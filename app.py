@@ -206,11 +206,8 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
                             dt_str = pub
                     if titulo and link:
                         itens.append({
-                            "titulo": titulo,
-                            "link": link,
-                            "fonte": fonte,
-                            "data_str": dt_str,
-                            "tag": _classificar_noticia(titulo),
+                            "titulo": titulo, "link": link, "fonte": fonte,
+                            "data_str": dt_str, "tag": _classificar_noticia(titulo),
                             "ts": dt_obj.timestamp() if dt_obj else 0.0,
                         })
                 if itens:
@@ -289,6 +286,21 @@ def buscar_detalhes_fundamentus(ticker: str) -> dict:
         return {}
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def buscar_cambio_brl(moeda: str) -> pd.Series:
+    if not moeda or moeda.upper() == "BRL":
+        return pd.Series(dtype=float)
+    try:
+        tk_fx = yf.Ticker(f"{moeda.upper()}BRL=X")
+        df_fx = tk_fx.history(period="6y", interval="1d")
+        if df_fx is not None and not df_fx.empty:
+            df_fx.index = pd.to_datetime(df_fx.index).tz_localize(None)
+            return df_fx["Close"].dropna()
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def carregar_todos_ativos_b3() -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
@@ -351,8 +363,11 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             if h5 is not None and not h5.empty:
                 cot_yf = float(h5["Close"].iloc[-1])
 
-        lpa = info.get("trailingEps")
-        vpa = info.get("bookValue")
+        # Se financialCurrency for diferente de BRL (ex: PETR4/VALE3 em USD),
+        # usa None para LPA/VPA do Yahoo para priorizar os valores em BRL do Fundamentus
+        fin_curr = (info.get("financialCurrency") or "BRL").upper()
+        lpa = info.get("trailingEps") if fin_curr == "BRL" else None
+        vpa = info.get("bookValue") if fin_curr == "BRL" else None
         roe_raw = info.get("returnOnEquity")
         roe = (roe_raw * 100) if roe_raw is not None else None
 
@@ -494,13 +509,16 @@ def buscar_historico_fundamentalista(
     pl_live: float | None = None,
     pvp_live: float | None = None,
     vpa_live: float | None = None,
-) -> tuple[list[dict], bool]:
+) -> tuple[list[dict], bool, str]:
     tk = yf.Ticker(f"{ticker}.SA")
     info = tk.info or {}
     fin = tk.financials
     bal = tk.balance_sheet
     qfin = tk.quarterly_financials
     qbal = tk.quarterly_balance_sheet
+
+    fin_curr = (info.get("financialCurrency") or "BRL").upper()
+    fx_series = buscar_cambio_brl(fin_curr) if fin_curr != "BRL" else pd.Series(dtype=float)
 
     det_fund = buscar_detalhes_fundamentus(ticker)
     setor_str = det_fund.get("Setor", "").lower()
@@ -526,6 +544,18 @@ def buscar_historico_fundamentalista(
             ano = pd.to_datetime(col_f).year
             col_b = next((cb for cb in cols_bal if pd.to_datetime(cb).year == ano), None)
 
+            # Taxas de câmbio para converter balanços estrangeiros (ex: PETR4/VALE3 em USD -> BRL)
+            fx_med = 1.0
+            fx_fim = 1.0
+            if fin_curr != "BRL" and not fx_series.empty:
+                sub_fx = fx_series[fx_series.index.year == ano]
+                if not sub_fx.empty:
+                    fx_med = float(sub_fx.mean())
+                    fx_fim = float(sub_fx.iloc[-1])
+                else:
+                    fx_med = float(fx_series.iloc[-1])
+                    fx_fim = fx_med
+
             rec = _pick_row(fin, ["Total Revenue", "Operating Revenue"], col_f)
             lbr = _pick_row(fin, ["Gross Profit"], col_f)
             lliq = _pick_row(fin, ["Net Income", "Net Income Common Stockholders"], col_f)
@@ -541,7 +571,19 @@ def buscar_historico_fundamentalista(
             if rec is None and lliq is None and ebitda is None:
                 continue
 
+            if rec is not None:
+                rec *= fx_med
+            if lbr is not None:
+                lbr *= fx_med
+            if lliq is not None:
+                lliq *= fx_med
+            if ebitda is not None:
+                ebitda *= fx_med
+
             patr = _pick_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], col_b) if col_b is not None else None
+            if patr is not None:
+                patr *= fx_fim
+
             div_liq = None
             if not eh_banco_seg and col_b is not None:
                 div_liq = _pick_row(bal, ["Net Debt"], col_b)
@@ -550,6 +592,8 @@ def buscar_historico_fundamentalista(
                     caixa = _pick_row(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_b)
                     if div_tot is not None and caixa is not None:
                         div_liq = div_tot - caixa
+                if div_liq is not None:
+                    div_liq *= fx_fim
 
             acoes = (_pick_row(bal, ["Ordinary Shares Number", "Share Issued"], col_b) if col_b is not None else None) or acoes_info
 
@@ -572,18 +616,20 @@ def buscar_historico_fundamentalista(
                 "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
             })
 
-    rec_12 = parse_br_num(det_fund.get("Receita Líquida")) or info.get("totalRevenue")
-    lliq_12 = parse_br_num(det_fund.get("Lucro Líquido")) or info.get("netIncomeToCommon")
+    # TTM (ÚLT. 12M) em BRL via Fundamentus (com fallback convertido se necessário)
+    fx_atual = float(fx_series.iloc[-1]) if (fin_curr != "BRL" and not fx_series.empty) else 1.0
+    rec_12 = parse_br_num(det_fund.get("Receita Líquida")) or (info.get("totalRevenue") * fx_atual if info.get("totalRevenue") else None)
+    lliq_12 = parse_br_num(det_fund.get("Lucro Líquido")) or (info.get("netIncomeToCommon") * fx_atual if info.get("netIncomeToCommon") else None)
     marg_br_pct = parse_br_num(det_fund.get("Marg. Bruta"))
-    lbr_12 = (rec_12 * marg_br_pct / 100.0) if (rec_12 is not None and marg_br_pct is not None) else info.get("grossProfits")
+    lbr_12 = (rec_12 * marg_br_pct / 100.0) if (rec_12 is not None and marg_br_pct is not None) else (info.get("grossProfits") * fx_atual if info.get("grossProfits") else None)
 
-    if qfin is not None and not qfin.empty:
+    if qfin is not None and not qfin.empty and (rec_12 is None or lliq_12 is None):
         qcols = sorted(list(qfin.columns), key=lambda c: pd.to_datetime(c), reverse=True)[:4]
         if len(qcols) >= 4:
             def _sum_q(cands):
                 vals = [_pick_row(qfin, cands, c) for c in qcols]
                 valid = [v for v in vals if v is not None]
-                return sum(valid) if len(valid) == 4 else None
+                return sum(valid) * fx_atual if len(valid) == 4 else None
             rec_12 = rec_12 or _sum_q(["Total Revenue", "Operating Revenue"])
             lbr_12 = lbr_12 or _sum_q(["Gross Profit"])
             lliq_12 = lliq_12 or _sum_q(["Net Income", "Net Income Common Stockholders"])
@@ -602,15 +648,16 @@ def buscar_historico_fundamentalista(
         if val_firma_fund and ev_ebitda_fund and ev_ebitda_fund != 0:
             ebitda_12 = val_firma_fund / ev_ebitda_fund
         elif info.get("ebitda"):
-            ebitda_12 = info.get("ebitda")
+            ebitda_12 = info.get("ebitda") * fx_atual
 
     if div_liq_12 is None and not eh_banco_seg and qbal is not None and not qbal.empty:
         col_qb = sorted(list(qbal.columns), key=lambda c: pd.to_datetime(c), reverse=True)[0]
-        div_liq_12 = _pick_row(qbal, ["Net Debt"], col_qb)
+        dl_raw = _pick_row(qbal, ["Net Debt"], col_qb)
+        div_liq_12 = (dl_raw * fx_atual) if dl_raw is not None else None
 
-    vpa_12 = parse_br_num(det_fund.get("VPA")) or vpa_live or info.get("bookValue")
-    pl_12 = parse_br_num(det_fund.get("P/L")) or pl_live or info.get("trailingPE")
-    pvp_12 = parse_br_num(det_fund.get("P/VP")) or pvp_live or info.get("priceToBook")
+    vpa_12 = parse_br_num(det_fund.get("VPA")) or vpa_live
+    pl_12 = parse_br_num(det_fund.get("P/L")) or pl_live
+    pvp_12 = parse_br_num(det_fund.get("P/VP")) or pvp_live
     val_merc_12 = val_merc_fund or ((cot_atual * acoes_info) if (cot_atual and acoes_info) else info.get("marketCap"))
     pebitda_12 = (val_merc_12 / ebitda_12) if (not eh_banco_seg and val_merc_12 and ebitda_12 and ebitda_12 != 0) else None
 
@@ -634,7 +681,7 @@ def buscar_historico_fundamentalista(
         "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
     })
 
-    return linhas, eh_banco_seg
+    return linhas, eh_banco_seg, fin_curr
 
 
 def toggle_favorito(ticker: str):
@@ -746,7 +793,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
                 )
 
     st.markdown(f"#### 📑 Histórico Fundamentalista — {ticker}")
-    hist_fund, eh_banco = buscar_historico_fundamentalista(
+    hist_fund, eh_banco, fin_curr = buscar_historico_fundamentalista(
         ticker,
         cot_live=base_ativo.get("cotacao") if base_ativo else None,
         pl_live=base_ativo.get("pl") if base_ativo else None,
@@ -792,8 +839,9 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
             f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
         )
         st.markdown(html_h, unsafe_allow_html=True)
-        nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`), e os anos fechados seguem o critério IFRS do Yahoo Finance (enquanto `ÚLT. 12M` e `ATUAL` usam dados CVM/Fundamentus)." if eh_banco else ""
-        st.caption(f"Nota: VPA histórico ajustado por desdobramentos.{nota_b}")
+        nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
+        nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`)." if eh_banco else ""
+        st.caption(f"Nota: VPA histórico ajustado por desdobramentos.{nota_fx}{nota_b}")
 
 
 def calc_ms(preco_calc: float | None, cotacao: float) -> float | None:
@@ -1254,42 +1302,44 @@ with tab1:
     if not resultados:
         st.info("Nenhum ativo encontrado no filtro atual.")
     else:
-        c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
-        opcoes_ordenacao = {
-            "Atratividade (Score)": "score",
-            "Margem de Segurança Média (%)": "avg_ms",
-            "Cotação (R$)": "cotacao",
-            "Dividend Yield 12m (%)": "dy_12m",
-            "P/L": "pl",
-            "P/VP": "pvp",
-            "ROE (%)": "roe",
-            "Preço Teto Médio (6a)": "pt_med",
-            "Preço Teto Projetivo": "pt_proj",
-            "Preço-Teto Bazin (12m)": "pt_bazin",
-            "Preço Justo Graham": "graham",
-            "Ticker (A-Z)": "ticker",
-        }
-        with c_busca:
-            busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
-        with c_ord1:
-            col_escolhida = st.selectbox("Ordenar por coluna:", list(opcoes_ordenacao.keys()), index=0)
-        with c_ord2:
-            dir_padrao = 1 if col_escolhida in ("P/L", "P/VP", "Ticker (A-Z)") else 0
-            direcao = st.selectbox("Ordem:", ["Decrescente (Maior → Menor)", "Crescente (Menor → Maior)"], index=dir_padrao)
-        with c_ord3:
-            max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, value=50, step=10)
+        with st.expander(f"📋 Tabela Comparativa ({len(resultados)} ativos no filtro) — clique para minimizar/maximizar | clique em um Ticker para abrir o Raio-X", expanded=True):
+            c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
+            opcoes_ordenacao = {
+                "Atratividade (Score)": "score",
+                "Margem de Segurança Média (%)": "avg_ms",
+                "Cotação (R$)": "cotacao",
+                "Dividend Yield 12m (%)": "dy_12m",
+                "P/L": "pl",
+                "P/VP": "pvp",
+                "ROE (%)": "roe",
+                "Preço Teto Médio (6a)": "pt_med",
+                "Preço Teto Projetivo": "pt_proj",
+                "Preço-Teto Bazin (12m)": "pt_bazin",
+                "Preço Justo Graham": "graham",
+                "Ticker (A-Z)": "ticker",
+            }
+            with c_busca:
+                busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
+            with c_ord1:
+                col_escolhida = st.selectbox("Ordenar por coluna:", list(opcoes_ordenacao.keys()), index=0)
+            with c_ord2:
+                dir_padrao = 1 if col_escolhida in ("P/L", "P/VP", "Ticker (A-Z)") else 0
+                direcao = st.selectbox("Ordem:", ["Decrescente (Maior → Menor)", "Crescente (Menor → Maior)"], index=dir_padrao)
+            with c_ord3:
+                max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, value=50, step=10)
 
-        lista_tab = resultados
-        if busca_tabela and busca_tabela.strip():
-            termo = busca_tabela.strip().upper()
-            lista_tab = [r for r in resultados if termo in r["ticker"] or termo in r["nome"].upper()]
+            lista_tab = resultados
+            if busca_tabela and busca_tabela.strip():
+                termo = busca_tabela.strip().upper()
+                lista_tab = [r for r in resultados if termo in r["ticker"] or termo in r["nome"].upper()]
 
-        chave_ord = opcoes_ordenacao[col_escolhida]
-        reverso = direcao.startswith("Decrescente")
-        resultados_ordenados = sort_resultados(lista_tab, chave_ord, reverso)
-        exibir = resultados_ordenados if max_linhas == 0 else resultados_ordenados[:int(max_linhas)]
+            chave_ord = opcoes_ordenacao[col_escolhida]
+            reverso = direcao.startswith("Decrescente")
+            resultados_ordenados = sort_resultados(lista_tab, chave_ord, reverso)
+            exibir = resultados_ordenados if max_linhas == 0 else resultados_ordenados[:int(max_linhas)]
 
-        with st.expander(f"📋 Tabela Comparativa ({len(exibir)} de {len(lista_tab)} ativos exibidos) — clique para minimizar/maximizar | clique em um Ticker para abrir o Raio-X", expanded=True):
+            st.caption(f"Mostrando **{len(exibir)}** de **{len(lista_tab)}** ativos.")
+
             if not exibir:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")
             else:

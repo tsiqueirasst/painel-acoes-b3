@@ -5,8 +5,10 @@ import io
 import json
 import math
 import secrets
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
 import pandas as pd
 import plotly.graph_objects as go
@@ -163,6 +165,70 @@ def salvar_dados_usuario_nuvem():
         st.error("Erro ao salvar na nuvem. Confira suas credenciais nos Secrets.")
 
 
+# --- NOTÍCIAS (GOOGLE NEWS RSS PT-BR) ---
+def _classificar_noticia(titulo: str) -> str:
+    t = titulo.lower()
+    if any(k in t for k in ("prejuízo", "prejuizo", "queda", "cai ", "desaba", "rombo", "crise", "investiga", "multa", "inadimpl", "calote", "rebaix")):
+        return "🔴 Atenção"
+    if any(k in t for k in ("privatiz", "leilão", "leilao", "fusão", "fusao", "aquisição", "aquisicao", "compra ", "venda ", "fato relevante", "estatiz", "governo", "desestatiz")):
+        return "🏛️ Fato/Corporativo"
+    if any(k in t for k in ("lucro", "dividendo", "jcp", "provento", "recorde", "dispara", "sobe ", "alta ", "aprova", "supera")):
+        return "🟢 Positivo/Provento"
+    return "📰 Notícia"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]]:
+    def _one(ticker: str):
+        for q_str in (f'"{ticker}"', f"{ticker} ações"):
+            try:
+                url = "https://news.google.com/rss/search"
+                params = {"q": q_str, "hl": "pt-BR", "gl": "BR", "ceid": "BR:pt-419"}
+                resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+                resp.raise_for_status()
+                root = ET.fromstring(resp.content)
+                itens = []
+                for item in root.findall("./channel/item"):
+                    titulo = (item.findtext("title") or "").strip()
+                    link = (item.findtext("link") or "").strip()
+                    pub = (item.findtext("pubDate") or "").strip()
+                    fonte_el = item.find("source")
+                    fonte = (fonte_el.text or "").strip() if fonte_el is not None else ""
+                    if fonte and titulo.endswith(f" - {fonte}"):
+                        titulo = titulo[: -len(f" - {fonte}")].strip()
+                    dt_obj = None
+                    dt_str = ""
+                    if pub:
+                        try:
+                            dt_obj = parsedate_to_datetime(pub)
+                            dt_str = dt_obj.astimezone(BRT).strftime("%d/%m/%Y %H:%M")
+                        except Exception:
+                            dt_str = pub
+                    if titulo and link:
+                        itens.append({
+                            "titulo": titulo,
+                            "link": link,
+                            "fonte": fonte,
+                            "data_str": dt_str,
+                            "tag": _classificar_noticia(titulo),
+                            "ts": dt_obj.timestamp() if dt_obj else 0.0,
+                        })
+                if itens:
+                    itens.sort(key=lambda x: x["ts"], reverse=True)
+                    return ticker, itens[:5]
+            except Exception:
+                continue
+        return ticker, []
+
+    out = {}
+    if not tickers_tuple:
+        return out
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for t, res in ex.map(_one, tickers_tuple):
+            out[t] = res
+    return out
+
+
 # --- DADOS B3 (FUNDAMENTUS & YAHOO) ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def carregar_setores_fundamentus() -> dict[str, str]:
@@ -279,6 +345,12 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         nome_raw = info.get("shortName") or info.get("longName") or ticker
         nome = " ".join(nome_raw.split())
 
+        cot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not cot_yf:
+            h5 = tk.history(period="5d")
+            if h5 is not None and not h5.empty:
+                cot_yf = float(h5["Close"].iloc[-1])
+
         lpa = info.get("trailingEps")
         vpa = info.get("bookValue")
         roe_raw = info.get("returnOnEquity")
@@ -314,6 +386,7 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
 
         return ticker, {
             "nome": nome,
+            "cotacao_yf": float(cot_yf) if cot_yf else None,
             "lpa_yf": float(lpa) if lpa is not None else None,
             "vpa_yf": float(vpa) if vpa is not None else None,
             "roe_yf": float(roe) if roe is not None else None,
@@ -499,7 +572,6 @@ def buscar_historico_fundamentalista(
                 "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
             })
 
-    # TTM (ÚLT. 12M) combinando Fundamentus oficial + fallback Yahoo Finance
     rec_12 = parse_br_num(det_fund.get("Receita Líquida")) or info.get("totalRevenue")
     lliq_12 = parse_br_num(det_fund.get("Lucro Líquido")) or info.get("netIncomeToCommon")
     marg_br_pct = parse_br_num(det_fund.get("Marg. Bruta"))
@@ -523,7 +595,6 @@ def buscar_historico_fundamentalista(
     val_merc_fund = parse_br_num(det_fund.get("Valor de mercado"))
     val_firma_fund = parse_br_num(det_fund.get("Valor da firma"))
     ev_ebitda_fund = parse_br_num(det_fund.get("EV / EBITDA"))
-    patr_12 = parse_br_num(det_fund.get("Patrim. Líq"))
     div_liq_12 = None if eh_banco_seg else parse_br_num(det_fund.get("Dív. Líquida"))
 
     ebitda_12 = None
@@ -549,7 +620,6 @@ def buscar_historico_fundamentalista(
         "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
     })
 
-    # Linha ATUAL (ao vivo com a cotação de hoje)
     cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
     val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
     pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
@@ -807,11 +877,12 @@ def consolidar_carteira_por_ativo(lancamentos: list[dict]) -> dict[str, dict]:
     for l in ordenados:
         t = l["ticker"]
         if t not in posicoes:
-            posicoes[t] = {"qtd": 0.0, "custo": 0.0, "pm": 0.0, "primeira_data": l["data"]}
+            posicoes[t] = {"qtd": 0.0, "custo": 0.0, "pm": 0.0, "primeira_data": l["data"], "tipo_ativo": l.get("tipo_ativo", "Ações")}
         p = posicoes[t]
+        custos = float(l.get("custos", 0.0) or 0.0)
         if l.get("tipo", "C") == "C":
             p["qtd"] += l["qtd"]
-            p["custo"] += l["qtd"] * l["preco"]
+            p["custo"] += (l["qtd"] * l["preco"]) + custos
             p["pm"] = (p["custo"] / p["qtd"]) if p["qtd"] > 0 else 0.0
         else:
             qtd_v = min(p["qtd"], l["qtd"])
@@ -898,6 +969,81 @@ def render_tela_login(key_prefix: str = "login"):
                         st.error("Erro ao criar conta. Confira as credenciais do Gist nos Secrets.")
 
 
+@st.dialog("Adicionar Lançamento")
+def modal_adicionar_lancamento(tickers_acoes: list[str]):
+    op_tipo_op = ["🟢 Compra", "🔴 Venda"]
+    if hasattr(st, "segmented_control"):
+        op_sel = st.segmented_control("Operação", op_tipo_op, default="🟢 Compra", label_visibility="collapsed", width="stretch")
+        if not op_sel:
+            op_sel = "🟢 Compra"
+    else:
+        op_sel = st.radio("Operação", op_tipo_op, horizontal=True, label_visibility="collapsed")
+    eh_compra = "Compra" in op_sel
+
+    c1, c2 = st.columns(2)
+    with c1:
+        tipo_ativo = st.selectbox("Tipo de ativo", ["Ações", "FIIs", "BDRs", "ETFs"], index=0)
+    with c2:
+        if tipo_ativo == "Ações":
+            ativo_sel = st.selectbox("Ativo", ["Selecionar"] + tickers_acoes, index=0)
+        else:
+            ativo_sel = st.text_input("Ativo (código B3)", placeholder="Ex: MXRF11, IVVB11, AAPL34").strip().upper().replace(".SA", "")
+
+    c3, c4 = st.columns(2)
+    with c3:
+        dt_l = st.date_input("Data da transação", value=datetime.now(BRT).date(), format="DD/MM/YYYY")
+    with c4:
+        qtd_l = st.number_input("Quantidade", min_value=1.0, value=1.0, step=1.0)
+
+    c5, c6 = st.columns(2)
+    with c5:
+        px_l = st.number_input("Preço (R$)", min_value=0.0, value=0.0, step=0.10, format="%.2f")
+    with c6:
+        custos_l = st.number_input("Outros custos (Opcional) (R$)", min_value=0.0, value=0.0, step=0.50, format="%.2f")
+
+    if eh_compra:
+        valor_total = (qtd_l * px_l) + custos_l
+    else:
+        valor_total = max(0.0, (qtd_l * px_l) - custos_l)
+
+    st.markdown(
+        f"<div style='background:rgba(128,128,128,0.16); padding:12px 16px; border-radius:8px; "
+        f"display:flex; justify-content:space-between; align-items:center; margin:10px 0 14px 0;'>"
+        f"<span style='font-weight:700; font-size:15px;'>Valor total</span>"
+        f"<span style='font-weight:700; font-size:17px;'>R$ {fmt_num(valor_total)}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    b1, b2 = st.columns([1, 1.4])
+    with b1:
+        if st.button("Cancelar", use_container_width=True):
+            st.rerun()
+    with b2:
+        if st.button("➕ Adicionar Lançamento", type="primary", use_container_width=True):
+            tem_erro = False
+            if not ativo_sel or ativo_sel == "Selecionar":
+                st.error("⚠️ Ativo: Campo obrigatório")
+                tem_erro = True
+            if px_l <= 0:
+                st.error("⚠️ Preço: Valor inválido (informe um preço maior que R$ 0,00)")
+                tem_erro = True
+            if not tem_erro:
+                nova_lista = list(st.session_state["lancamentos"])
+                nova_lista.append({
+                    "ticker": ativo_sel,
+                    "tipo_ativo": tipo_ativo,
+                    "qtd": float(qtd_l),
+                    "preco": float(px_l),
+                    "custos": float(custos_l),
+                    "data": dt_l.strftime("%Y-%m-%d"),
+                    "tipo": "C" if eh_compra else "V",
+                })
+                st.session_state["lancamentos"] = nova_lista
+                salvar_dados_usuario_nuvem()
+                st.rerun()
+
+
 # --- ESTADO INICIAL & SESSÃO ---
 if "lancamentos" not in st.session_state:
     st.session_state["lancamentos"] = []
@@ -919,7 +1065,7 @@ usuario_atual = st.session_state.get("usuario_email")
 
 # --- INTERFACE PRINCIPAL ---
 st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
-st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual e carteira protegida por login.")
+st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual, notícias e carteira protegida por login.")
 
 try:
     with st.spinner("Carregando todos os ativos da B3..."):
@@ -1060,13 +1206,14 @@ with st.spinner(f"Buscando dados de 6 anos e nomes na B3 para {len(tickers_para_
 def montar_item_completo(a: dict) -> dict:
     t = a["ticker"]
     yf_info = dados_yf.get(t, {})
+    cot = a.get("cotacao") or yf_info.get("cotacao_yf") or 0.0
     nome = yf_info.get("nome") or mapa_setores_ativos.get(t) or t
-    lpa = yf_info.get("lpa_yf") if yf_info.get("lpa_yf") is not None else a["lpa"]
-    vpa = yf_info.get("vpa_yf") if yf_info.get("vpa_yf") is not None else a["vpa"]
-    roe = a["roe"] if a["roe"] is not None else yf_info.get("roe_yf")
+    lpa = yf_info.get("lpa_yf") if yf_info.get("lpa_yf") is not None else a.get("lpa")
+    vpa = yf_info.get("vpa_yf") if yf_info.get("vpa_yf") is not None else a.get("vpa")
+    roe = a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf")
 
-    dpa_12m = yf_info.get("dpa_12m_yf") if yf_info.get("dpa_12m_yf") is not None else a["dpa_12m"]
-    dy_12m = (dpa_12m / a["cotacao"]) * 100 if (dpa_12m and a["cotacao"] > 0) else a["dy_12m"]
+    dpa_12m = yf_info.get("dpa_12m_yf") if yf_info.get("dpa_12m_yf") is not None else (a.get("dpa_12m") or 0.0)
+    dy_12m = (dpa_12m / cot) * 100 if (dpa_12m and cot > 0) else (a.get("dy_12m") or 0.0)
     dpa_med_6a = yf_info.get("dpa_med_6a")
     anos_hist = yf_info.get("anos_hist", 0)
     dpa_proj = yf_info.get("dpa_proj")
@@ -1078,7 +1225,7 @@ def montar_item_completo(a: dict) -> dict:
 
     item = {
         **a,
-        "nome": nome, "setor_nome": mapa_setores_ativos.get(t, ""),
+        "cotacao": cot, "nome": nome, "setor_nome": mapa_setores_ativos.get(t, ""),
         "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
@@ -1102,7 +1249,7 @@ tab1, tab2, tab3 = st.tabs([
     f"🔒 Minha Carteira ({len(posicoes_carteira) if usuario_atual else 'Login'})",
 ])
 
-# ==================== ABA 1: TABELA, RAIO-X E RANKING ====================
+# ==================== ABA 1: TABELA, RAIO-X, RANKING E NOTÍCIAS ====================
 with tab1:
     if not resultados:
         st.info("Nenhum ativo encontrado no filtro atual.")
@@ -1222,33 +1369,89 @@ with tab1:
                     "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
                 )
 
-        # --- RAIO-X DO ATIVO ---
+        # --- RAIO-X DO ATIVO (EXPANDER MINIMIZÁVEL) ---
         st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
         opcoes_raiox = [r["ticker"] for r in (exibir if exibir else resultados)]
         idx_raiox = opcoes_raiox.index(ativo_url) if ativo_url in opcoes_raiox else 0
-        with st.container(border=True):
+        with st.expander("🔎 Raio-X do Ativo (ou clique diretamente no código azul da tabela acima) — clique para minimizar/maximizar", expanded=True):
             ativo_escolhido = st.selectbox(
-                "🔎 Raio-X do Ativo (ou clique diretamente no código azul da tabela acima):",
+                "Ativo selecionado:",
                 options=opcoes_raiox,
                 index=idx_raiox,
             )
             item_raiox = next(r for r in resultados if r["ticker"] == ativo_escolhido)
             render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
 
-        # --- TOP 100 RANKING ---
-        qtd_top = min(100, len(resultados))
-        st.subheader(f"🏆 Top {qtd_top} do Ranking de Atratividade (Filtro Atual)")
-        blocos_ranking = []
-        for r in resultados[:100]:
-            justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
-            estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
-            blocos_ranking.append(
-                f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
-                f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
-                f"**Score: {r['score']}/100**  \n"
-                f"_{justificativa}_"
-            )
-        st.markdown("\n\n".join(blocos_ranking))
+        # --- RANKING DE ATRATIVIDADE (EXPANDER + QUANTIDADE ESCOLHÍVEL) ---
+        lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados
+        total_rank = len(lista_rank_base)
+        with st.expander(f"🏆 Ranking de Atratividade (Filtro Atual — até {total_rank} ativos) — clique para minimizar/maximizar", expanded=True):
+            if total_rank > 1:
+                qtd_ranking = st.number_input(
+                    f"Quantos ativos mostrar no Ranking (de 1 até {total_rank}):",
+                    min_value=1,
+                    max_value=total_rank,
+                    value=min(100, total_rank),
+                    step=10,
+                    key="qtd_ranking_input",
+                )
+            else:
+                qtd_ranking = total_rank
+
+            blocos_ranking = []
+            for r in lista_rank_base[:int(qtd_ranking)]:
+                justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
+                estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
+                blocos_ranking.append(
+                    f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
+                    f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
+                    f"**Score: {r['score']}/100**  \n"
+                    f"_{justificativa}_"
+                )
+            st.markdown("\n\n".join(blocos_ranking))
+
+        # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
+        ativos_para_news = exibir if exibir else lista_rank_base
+        with st.expander("📰 Últimas Informações e Notícias dos Ativos Pesquisados / Filtrados — clique para minimizar/maximizar", expanded=True):
+            if len(ativos_para_news) > 5:
+                c_nw1, c_nw2 = st.columns([1.4, 2.6])
+                with c_nw1:
+                    qtd_news = st.number_input(
+                        f"Buscar notícias para os primeiros N ativos (1 a {min(15, len(ativos_para_news))}):",
+                        min_value=1,
+                        max_value=min(15, len(ativos_para_news)),
+                        value=5,
+                        step=1,
+                        key="qtd_news_input",
+                    )
+                with c_nw2:
+                    tks_news_opc = [r["ticker"] for r in ativos_para_news]
+                    tks_news_sel = st.multiselect(
+                        "Ou escolha ativos específicos da lista atual:",
+                        options=tks_news_opc,
+                        default=[],
+                        key="ms_news_sel",
+                    )
+                alvo_news = tks_news_sel if tks_news_sel else [r["ticker"] for r in ativos_para_news[:int(qtd_news)]]
+            else:
+                alvo_news = [r["ticker"] for r in ativos_para_news]
+
+            with st.spinner(f"Buscando últimas notícias no Google News para {len(alvo_news)} ativo(s)..."):
+                noticias_dict = buscar_noticias_lote(tuple(alvo_news))
+
+            mapa_nomes_tab = {r["ticker"]: r["nome"] for r in resultados}
+            for t_n in alvo_news:
+                lista_n = noticias_dict.get(t_n, [])
+                nome_n = mapa_nomes_tab.get(t_n, t_n)
+                st.markdown(f"**🗞️ {t_n}** — _{nome_n}_")
+                if not lista_n:
+                    st.caption("Nenhuma notícia recente encontrada no Google News para este código.")
+                else:
+                    for n_it in lista_n:
+                        fonte_txt = f" · **{n_it['fonte']}**" if n_it["fonte"] else ""
+                        dt_txt = f" ({n_it['data_str']})" if n_it["data_str"] else ""
+                        st.markdown(f"- `{n_it['tag']}` [{n_it['titulo']}]({n_it['link']}){fonte_txt}{dt_txt}")
+                st.markdown("---")
 
 # ==================== ABA 2: COMPARAR ATIVOS ====================
 with tab2:
@@ -1335,10 +1538,15 @@ with tab3:
     if not usuario_atual:
         render_tela_login(key_prefix="tab_cart")
     else:
-        st.subheader(f"💼 Minha Carteira — {usuario_atual}")
+        c_head, c_btn_top = st.columns([3.5, 1.3])
+        with c_head:
+            st.subheader(f"💼 Minha Carteira — {usuario_atual}")
+        with c_btn_top:
+            if st.button("➕ Adicionar Lançamento", type="primary", use_container_width=True, key="btn_add_top"):
+                modal_adicionar_lancamento(tickers_b3)
 
         if not posicoes_carteira:
-            st.info("Sua carteira ainda está vazia. Use o formulário **➕ Adicionar Lançamento** abaixo para cadastrar seus ativos!")
+            st.info("Sua carteira ainda está vazia. Clique em **➕ Adicionar Lançamento** ali em cima para cadastrar seu primeiro ativo!")
         else:
             mapa_todos = {a["ticker"]: a for a in todos_ativos}
             tickers_cart = tuple(posicoes_carteira.keys())
@@ -1362,7 +1570,13 @@ with tab3:
             for t, pos in posicoes_carteira.items():
                 base = mapa_todos.get(t)
                 if not base:
-                    continue
+                    yf_b = dados_yf.get(t, {})
+                    cot_fb = yf_b.get("cotacao_yf")
+                    if not cot_fb:
+                        px_s = hist_cart.get(t, {}).get("px", pd.Series(dtype=float))
+                        cot_fb = float(px_s.iloc[-1]) if not px_s.empty else pos["pm"]
+                    base = {"ticker": t, "cotacao": cot_fb, "pl": None, "pvp": None, "roe": None, "lpa": None, "vpa": None, "dpa_12m": 0.0, "dy_12m": 0.0}
+
                 item_val = montar_item_completo(base)
                 cot = item_val["cotacao"]
                 qtd = pos["qtd"]
@@ -1396,7 +1610,7 @@ with tab3:
                 divs_total_recebidos += div_ativo_tot
                 divs_12m_recebidos += div_ativo_12m
 
-                setor_t = mapa_setores_full.get(t, "Outros")
+                setor_t = mapa_setores_full.get(t, pos.get("tipo_ativo", "Outros"))
                 valor_por_setor[setor_t] = valor_por_setor.get(setor_t, 0.0) + saldo
 
                 itens_tabela_cart.append({
@@ -1423,9 +1637,10 @@ with tab3:
                         t = l["ticker"]
                         if t not in pos_m:
                             pos_m[t] = {"qtd": 0.0, "custo": 0.0, "pm": 0.0}
+                        custos = float(l.get("custos", 0.0) or 0.0)
                         if l.get("tipo", "C") == "C":
                             pos_m[t]["qtd"] += l["qtd"]
-                            pos_m[t]["custo"] += l["qtd"] * l["preco"]
+                            pos_m[t]["custo"] += (l["qtd"] * l["preco"]) + custos
                             pos_m[t]["pm"] = pos_m[t]["custo"] / pos_m[t]["qtd"] if pos_m[t]["qtd"] > 0 else 0.0
                         else:
                             qv = min(pos_m[t]["qtd"], l["qtd"])
@@ -1589,83 +1804,64 @@ with tab3:
                 render_grafico_e_tabela_ativo(tk_c_sel, it_c_sel["nome"], base_ativo=it_c_sel, key_prefix="cart_rx")
 
         st.markdown("---")
-        with st.expander("➕ Adicionar Lançamento (Compra / Venda)", expanded=not bool(posicoes_carteira)):
-            with st.form("form_lancamento", clear_on_submit=False):
-                l1, l2, l3, l4, l5, l6 = st.columns([1.1, 1.3, 1.1, 1.1, 1.1, 1])
-                with l1:
-                    tipo_l = st.selectbox("Tipo:", ["Compra", "Venda"])
-                with l2:
-                    tk_l = st.selectbox("Ativo:", options=tickers_b3, index=tickers_b3.index("CMIG4") if "CMIG4" in tickers_b3 else 0)
-                with l3:
-                    dt_l = st.date_input("Data:", value=date.today())
-                with l4:
-                    qtd_l = st.number_input("Quantidade:", min_value=1.0, value=100.0, step=10.0)
-                with l5:
-                    px_l = st.number_input("Preço (R$):", min_value=0.01, value=10.00, step=0.25, format="%.2f")
-                with l6:
-                    st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
-                    ok_l = st.form_submit_button("Salvar", type="primary", use_container_width=True)
+        c_l1, c_l2 = st.columns([3.5, 1.3])
+        with c_l2:
+            if st.button("➕ Adicionar Lançamento", type="primary", use_container_width=True, key="btn_add_bot"):
+                modal_adicionar_lancamento(tickers_b3)
 
-                if ok_l:
-                    nova_lista = list(st.session_state["lancamentos"])
-                    nova_lista.append({
-                        "ticker": tk_l,
-                        "qtd": float(qtd_l),
-                        "preco": float(px_l),
-                        "data": dt_l.strftime("%Y-%m-%d"),
-                        "tipo": "C" if tipo_l == "Compra" else "V",
-                    })
-                    st.session_state["lancamentos"] = nova_lista
-                    salvar_dados_usuario_nuvem()
-                    st.rerun()
+        with c_l1:
+            with st.expander(f"🧾 Lançamentos ({len(st.session_state['lancamentos'])}) & Backup CSV", expanded=False):
+                if st.session_state["lancamentos"]:
+                    df_l = pd.DataFrame(st.session_state["lancamentos"])
+                    st.dataframe(df_l, use_container_width=True)
+                    c_del, c_limp, c_dl = st.columns([2, 1, 1.2])
+                    with c_del:
+                        op_del = [
+                            f"{i}: {x['data']} | {'Compra' if x['tipo']=='C' else 'Venda'} {x['qtd']:g} {x['ticker']} @ R$ {x['preco']:.2f}"
+                            for i, x in enumerate(st.session_state["lancamentos"])
+                        ]
+                        esc_del = st.selectbox("Excluir lançamento:", ["—"] + op_del)
+                        if esc_del != "—" and st.button("🗑️ Excluir"):
+                            idx_d = int(esc_del.split(":")[0])
+                            st.session_state["lancamentos"].pop(idx_d)
+                            salvar_dados_usuario_nuvem()
+                            st.rerun()
+                    with c_limp:
+                        if st.button("🧹 Limpar Tudo"):
+                            st.session_state["lancamentos"] = []
+                            salvar_dados_usuario_nuvem()
+                            st.rerun()
+                    with c_dl:
+                        st.download_button(
+                            "📥 Baixar CSV",
+                            data=df_l.to_csv(index=False).encode("utf-8"),
+                            file_name="lancamentos_carteira_b3.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
 
-        with st.expander(f"🧾 Histórico de Lançamentos ({len(st.session_state['lancamentos'])}) & Backup CSV", expanded=False):
-            if st.session_state["lancamentos"]:
-                df_l = pd.DataFrame(st.session_state["lancamentos"])
-                st.dataframe(df_l, use_container_width=True)
-                c_del, c_limp, c_dl = st.columns([2, 1, 1.2])
-                with c_del:
-                    op_del = [f"{i}: {x['data']} | {'Compra' if x['tipo']=='C' else 'Venda'} {x['qtd']:g} {x['ticker']} @ R$ {x['preco']:.2f}" for i, x in enumerate(st.session_state["lancamentos"])]
-                    esc_del = st.selectbox("Excluir lançamento:", ["—"] + op_del)
-                    if esc_del != "—" and st.button("🗑️ Excluir"):
-                        idx_d = int(esc_del.split(":")[0])
-                        st.session_state["lancamentos"].pop(idx_d)
-                        salvar_dados_usuario_nuvem()
-                        st.rerun()
-                with c_limp:
-                    if st.button("🧹 Limpar Tudo"):
-                        st.session_state["lancamentos"] = []
-                        salvar_dados_usuario_nuvem()
-                        st.rerun()
-                with c_dl:
-                    st.download_button(
-                        "📥 Baixar CSV",
-                        data=df_l.to_csv(index=False).encode("utf-8"),
-                        file_name="lancamentos_carteira_b3.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-
-            arq = st.file_uploader("📤 Importar Backup CSV (colunas: ticker, qtd, preco, data, tipo):", type=["csv"])
-            if arq is not None:
-                try:
-                    df_imp = pd.read_csv(io.BytesIO(arq.getvalue()))
-                    if {"ticker", "qtd"}.issubset(df_imp.columns):
-                        lista_imp = []
-                        hoje_iso = datetime.now(BRT).strftime("%Y-%m-%d")
-                        for _, row in df_imp.iterrows():
-                            t = str(row["ticker"]).strip().upper().replace(".SA", "")
-                            px_val = float(row["preco"]) if "preco" in df_imp.columns else float(row.get("pm", 0))
-                            dt_val = str(row["data"]) if "data" in df_imp.columns and pd.notna(row["data"]) else hoje_iso
-                            tp_val = str(row["tipo"]) if "tipo" in df_imp.columns and str(row["tipo"]) in ("C", "V") else "C"
-                            if t:
-                                lista_imp.append({"ticker": t, "qtd": float(row["qtd"]), "preco": px_val, "data": dt_val, "tipo": tp_val})
-                        st.session_state["lancamentos"] = lista_imp
-                        salvar_dados_usuario_nuvem()
-                        st.success("Lançamentos importados e salvos na sua conta!")
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"Arquivo inválido: {exc}")
+                arq = st.file_uploader("📤 Importar Backup CSV (colunas: ticker, qtd, preco, data, tipo, custos):", type=["csv"])
+                if arq is not None:
+                    try:
+                        df_imp = pd.read_csv(io.BytesIO(arq.getvalue()))
+                        if {"ticker", "qtd"}.issubset(df_imp.columns):
+                            lista_imp = []
+                            hoje_iso = datetime.now(BRT).strftime("%Y-%m-%d")
+                            for _, row in df_imp.iterrows():
+                                t = str(row["ticker"]).strip().upper().replace(".SA", "")
+                                px_val = float(row["preco"]) if "preco" in df_imp.columns else float(row.get("pm", 0))
+                                ct_val = float(row["custos"]) if "custos" in df_imp.columns and pd.notna(row["custos"]) else 0.0
+                                dt_val = str(row["data"]) if "data" in df_imp.columns and pd.notna(row["data"]) else hoje_iso
+                                tp_val = str(row["tipo"]) if "tipo" in df_imp.columns and str(row["tipo"]) in ("C", "V") else "C"
+                                ta_val = str(row["tipo_ativo"]) if "tipo_ativo" in df_imp.columns and pd.notna(row["tipo_ativo"]) else "Ações"
+                                if t:
+                                    lista_imp.append({"ticker": t, "tipo_ativo": ta_val, "qtd": float(row["qtd"]), "preco": px_val, "custos": ct_val, "data": dt_val, "tipo": tp_val})
+                            st.session_state["lancamentos"] = lista_imp
+                            salvar_dados_usuario_nuvem()
+                            st.success("Lançamentos importados e salvos na sua conta!")
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"Arquivo inválido: {exc}")
 
 st.divider()
 st.caption("Aviso: Estudo quantitativo e educacional com dados obtidos via Fundamentus e Yahoo Finance. Não constitui recomendação oficial de compra ou venda.")

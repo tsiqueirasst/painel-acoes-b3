@@ -1362,14 +1362,54 @@ def consolidar_carteira_por_ativo(lancamentos: list[dict]) -> dict[str, dict]:
     return {t: v for t, v in posicoes.items() if v["qtd"] > 0}
 
 
-def render_tela_login(key_prefix: str = "login", compacto: bool = False):
-if not gist_configurado():
-st.warning(
-"⚙️ Para ativar contas protegidas por senha e salvamento automático na nuvem sem mudar a URL, "
-"configure GITHUB_TOKEN e GIST_ID nos Secrets
- do Streamlit."
-)
-return
+def render_tela_login(key_prefix: str = "login"):
+    if not gist_configurado():
+        st.warning(
+            "⚙️ Para ativar contas protegidas por senha e salvamento automático na nuvem sem mudar a URL, "
+            "configure `GITHUB_TOKEN` e `GIST_ID` nos **Secrets** do Streamlit."
+        )
+        return
+
+    st.markdown("### 🔐 Acesse sua conta para visualizar e salvar sua Carteira e Favoritos")
+
+    if sso_configurado():
+        if st.button("🔵 Entrar com Google (SSO)", type="primary", use_container_width=True, key=f"{key_prefix}_sso"):
+            auth_cfg = get_secret("auth", {})
+            if isinstance(auth_cfg, dict) and "google" in auth_cfg:
+                st.login("google")
+            else:
+                st.login()
+        st.markdown("---")
+
+    t_entrar, t_criar = st.tabs(["Entrar com E-mail e Senha", "Criar Nova Conta"])
+    with t_entrar:
+        with st.form(f"{key_prefix}_form_in"):
+            em = st.text_input("E-mail:", placeholder="seu@email.com").strip().lower()
+            sn = st.text_input("Senha:", type="password")
+            ok = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+            if ok:
+                if not em or not sn:
+                    st.error("Preencha e-mail e senha.")
+                else:
+                    try:
+                        db, _ = ler_db_gist()
+                        u = db["usuarios"].get(em)
+                        if not u or not verificar_senha(sn, u.get("salt", ""), u.get("senha_hash", "")):
+                            st.error("E-mail ou senha incorretos.")
+                        else:
+                            st.session_state["usuario_email"] = em
+                            st.session_state["metodo_auth"] = "senha"
+                            carregar_dados_usuario_nuvem(em)
+                            st.rerun()
+                    except Exception:
+                        st.error("Erro ao verificar login. Confira as credenciais do Gist nos Secrets.")
+
+    with t_criar:
+        with st.form(f"{key_prefix}_form_up"):
+            em_n = st.text_input("Seu e-mail:", placeholder="seu@email.com").strip().lower()
+            sn_n = st.text_input("Crie uma senha (mín. 6 caracteres):", type="password")
+            sn_c = st.text_input("Confirme a senha:", type="password")
+            ok_n = st.form_submit_button("Criar Conta", use_container_width=True)
             if ok_n:
                 if "@" not in em_n or "." not in em_n:
                     st.error("Digite um e-mail válido.")
@@ -1523,9 +1563,8 @@ with st.sidebar:
             if metodo == "sso":
                 st.logout()
             st.rerun()
-else:
-st.caption("Modo visitante — entre abaixo para carregar e salvar seus dados na nuvem.")
-render_tela_login(key_prefix="sidebar", compacto=True)
+    else:
+        st.info("Modo visitante. Faça login na aba **🔒 Minha Carteira** para proteger e salvar seus dados na nuvem.")
 
     st.divider()
     st.header("🔍 Filtros da Bolsa")

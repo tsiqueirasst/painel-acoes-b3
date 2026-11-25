@@ -1,7 +1,8 @@
-streamlit
+streamlit[auth]
 yfinance
 pandas
 requests
 beautifulsoup4
 lxml
 plotly
+streamlit-keyup

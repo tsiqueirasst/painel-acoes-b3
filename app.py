@@ -662,18 +662,23 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
             da_ttm = _ttm_flow("da")
             ebitda_ttm = (ebit_ttm + da_ttm) if (ebit_ttm is not None and da_ttm is not None) else _ttm_flow("ebitda")
             ttm_cvm = {
+                "dt_ref": dt_ult_itr,
                 "rec": _ttm_flow("rec"),
                 "lbr": _ttm_flow("lbr"),
                 "lliq": _ttm_flow("lliq"),
                 "ebitda": ebitda_ttm,
                 "patr": met_curr.get("patr"),
                 "div_liq": met_curr.get("div_liq"),
+                "ytd_rec": met_curr.get("rec"),
+                "ytd_lbr": met_curr.get("lbr"),
+                "ytd_lliq": met_curr.get("lliq"),
+                "ytd_ebitda": met_curr.get("ebitda"),
             }
 
     return anuais, ttm_cvm
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def carregar_todos_ativos_b3() -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
     ativos = []
@@ -729,9 +734,17 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         nome_raw = info.get("shortName") or info.get("longName") or ticker
         nome = " ".join(nome_raw.split())
 
-        cot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
+        cot_yf = None
+        try:
+            fi = tk.fast_info
+            if fi:
+                cot_yf = fi.get("lastPrice") or fi.get("regularMarketPrice")
+        except Exception:
+            pass
         if not cot_yf:
-            h5 = tk.history(period="5d")
+            cot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not cot_yf:
+            h5 = tk.history(period="5d", auto_adjust=False)
             if h5 is not None and not h5.empty:
                 cot_yf = float(h5["Close"].iloc[-1])
 
@@ -784,7 +797,7 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         return ticker, {}
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def buscar_yahoo_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
     if not tickers_tuple:
         return {}
@@ -795,7 +808,7 @@ def buscar_yahoo_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
     return resultados
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def buscar_historico_preco(ticker: str, periodo_label: str, ajustada: bool) -> pd.Series:
     tk = yf.Ticker(f"{ticker}.SA")
     if periodo_label == "1 D":
@@ -872,7 +885,7 @@ def _pick_row(df: pd.DataFrame, candidatos: list[str], col) -> float | None:
     return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def buscar_historico_fundamentalista(
     ticker: str,
     cot_live: float | None = None,
@@ -892,9 +905,28 @@ def buscar_historico_fundamentalista(
         hist_px.index = pd.to_datetime(hist_px.index).tz_localize(None)
 
     acoes_fund = parse_br_num(det_fund.get("Nro. Ações"))
-    acoes_info = acoes_fund or info.get("sharesOutstanding")
     cot_fund = parse_br_num(det_fund.get("Cotação"))
-    cot_atual = cot_live or cot_fund or info.get("currentPrice") or info.get("regularMarketPrice")
+    val_merc_fd_chk = parse_br_num(det_fund.get("Valor de mercado"))
+    if acoes_fund and val_merc_fd_chk and cot_fund and cot_fund > 0:
+        acoes_equiv = val_merc_fd_chk / cot_fund
+        razao_unit = acoes_fund / acoes_equiv if acoes_equiv > 0 else 1.0
+        if 1.8 <= razao_unit <= 10.2 and abs(razao_unit - round(razao_unit)) < 0.15:
+            acoes_info = acoes_fund / round(razao_unit)
+        else:
+            acoes_info = acoes_fund
+    elif val_merc_fd_chk and cot_fund and cot_fund > 0:
+        acoes_info = val_merc_fd_chk / cot_fund
+    else:
+        acoes_info = acoes_fund or info.get("sharesOutstanding")
+
+    cot_yf_live = None
+    try:
+        fi_h = tk.fast_info
+        if fi_h:
+            cot_yf_live = fi_h.get("lastPrice") or fi_h.get("regularMarketPrice")
+    except Exception:
+        pass
+    cot_atual = cot_live or cot_yf_live or info.get("currentPrice") or info.get("regularMarketPrice") or cot_fund
     if not cot_atual and not hist_px.empty:
         cot_atual = float(hist_px["Close"].iloc[-1])
 
@@ -1090,11 +1122,98 @@ def buscar_historico_fundamentalista(
     pvp_atual = (val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else (pvp_live if pvp_live is not None else pvp_12)
     pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
 
+    # 2.5) Linha MÉDIA (anos inteiros + meses inéditos do ano atual, sem repetir meses do ano anterior em ÚLT. 12M)
+    linhas_anuais = [x for x in linhas if x["ano"] != "ÚLT. 12M"]
+    linha_12m = next((x for x in linhas if x["ano"] == "ÚLT. 12M"), None)
+    if linhas_anuais:
+        ult_ano_dfp = max(int(x["ano"]) for x in linhas_anuais)
+        mes_atual_bal = 0
+        ano_bal = ult_ano_dfp
+        if cvm_ttm and cvm_ttm.get("dt_ref"):
+            try:
+                dt_parts = str(cvm_ttm["dt_ref"]).split("-")
+                ano_bal = int(dt_parts[0])
+                mes_atual_bal = int(dt_parts[1])
+            except Exception:
+                pass
+        if ano_bal <= ult_ano_dfp:
+            dt_ult_str = (det_fund.get("Últ balanço processado") or "").strip()
+            m_dt = re.match(r"^\d{2}/(\d{2})/(\d{4})$", dt_ult_str)
+            if m_dt:
+                mes_f, ano_f = int(m_dt.group(1)), int(m_dt.group(2))
+                if ano_f > ult_ano_dfp:
+                    ano_bal, mes_atual_bal = ano_f, mes_f
+
+        meses_novos = mes_atual_bal if (ano_bal > ult_ano_dfp and 1 <= mes_atual_bal <= 12) else 0
+        total_meses = len(linhas_anuais) * 12 + meses_novos
+        total_anos_eq = total_meses / 12.0
+
+        def _media_ponderada_meses(campo: str) -> float | None:
+            pares = [(float(x[campo]), 12) for x in linhas_anuais if x.get(campo) is not None]
+            if meses_novos > 0 and linha_12m and linha_12m.get(campo) is not None:
+                pares.append((float(linha_12m[campo]), meses_novos))
+            if not pares:
+                return None
+            soma_p = sum(p for _, p in pares)
+            return sum(v * p for v, p in pares) / soma_p if soma_p > 0 else None
+
+        def _media_fluxo_anualizado(campo: str, ytd_key: str | None) -> float | None:
+            vals_dfp = [float(x[campo]) for x in linhas_anuais if x.get(campo) is not None]
+            if len(vals_dfp) != len(linhas_anuais) or not vals_dfp:
+                return _media_ponderada_meses(campo)
+            soma_total = sum(vals_dfp)
+            if meses_novos == 0:
+                return soma_total / len(vals_dfp)
+            ytd_val = cvm_ttm.get(ytd_key) if (cvm_ttm and ytd_key) else None
+            if ytd_val is not None:
+                return (soma_total + float(ytd_val)) / total_anos_eq
+            val_12m = linha_12m.get(campo) if linha_12m else None
+            val_ult_dfp = next((x.get(campo) for x in linhas_anuais if int(x["ano"]) == ult_ano_dfp), None)
+            if val_12m is not None and val_ult_dfp is not None:
+                frac_rep = (12 - meses_novos) / 12.0
+                return (soma_total + float(val_12m) - frac_rep * float(val_ult_dfp)) / total_anos_eq
+            return soma_total / len(vals_dfp)
+
+        rec_med = _media_fluxo_anualizado("rec", "ytd_rec")
+        lbr_med = _media_fluxo_anualizado("lbr", "ytd_lbr")
+        lliq_med = _media_fluxo_anualizado("lliq", "ytd_lliq")
+        ebitda_med = None if eh_banco_seg else _media_fluxo_anualizado("ebitda", "ytd_ebitda")
+        if lliq_med is not None and rec_med and rec_med != 0:
+            marg_med = (lliq_med / rec_med) * 100.0
+        else:
+            marg_med = _media_ponderada_meses("marg_liq")
+
+        if meses_novos > 0:
+            media_info = (
+                f" Linha MÉDIA: {len(linhas_anuais)} ano(s) completo(s) + {meses_novos} meses de {ano_bal} "
+                f"(descontando os {12 - meses_novos} meses de {ult_ano_dfp} presentes em ÚLT. 12M)."
+            )
+        else:
+            media_info = f" Linha MÉDIA: média dos {len(linhas_anuais)} ano(s) completo(s) acima."
+
+        linhas.append({
+            "ano": "MÉDIA",
+            "pl": _media_ponderada_meses("pl"),
+            "pvp": _media_ponderada_meses("pvp"),
+            "vpa": _media_ponderada_meses("vpa"),
+            "div_liq": None if eh_banco_seg else _media_ponderada_meses("div_liq"),
+            "marg_liq": marg_med,
+            "ebitda": ebitda_med,
+            "pebitda": None if eh_banco_seg else _media_ponderada_meses("pebitda"),
+            "val_merc": _media_ponderada_meses("val_merc"),
+            "lliq": lliq_med,
+            "lbr": lbr_med,
+            "rec": rec_med,
+            "is_atual": False,
+            "is_media": True,
+            "media_info": media_info,
+        })
+
     linhas.append({
         "ano": f"ATUAL{cot_txt}",
         "pl": pl_atual,
         "pvp": pvp_atual,
-        "vpa": vpa_live if vpa_live is not None else vpa_12,
+        "vpa": vpa_12 if vpa_12 is not None else vpa_live,
         "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_12,
         "pebitda": pebitda_atual, "val_merc": val_merc_atual,
         "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
@@ -1224,13 +1343,20 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
         st.info("Histórico anual detalhado indisponível para este ativo.")
     else:
         rows_h = []
+        media_info_txt = ""
         for h in hist_fund:
             pl_s = fmt_num(h["pl"]) if h["pl"] is not None else "—"
             pvp_s = fmt_num(h["pvp"]) if h["pvp"] is not None else "—"
             vpa_s = fmt_num(h["vpa"]) if h["vpa"] is not None else "—"
             ml_s = f"{fmt_num(h['marg_liq'])}%" if h["marg_liq"] is not None else "—"
             peb_s = fmt_num(h["pebitda"]) if h["pebitda"] is not None else "—"
-            estilo_row = "background-color:rgba(96,165,250,0.14); font-weight:700;" if h.get("is_atual") else ""
+            if h.get("is_atual"):
+                estilo_row = "background-color:rgba(96,165,250,0.14); font-weight:700;"
+            elif h.get("is_media"):
+                estilo_row = "background-color:rgba(250,204,21,0.12); font-weight:700; border-top:1px dashed rgba(250,204,21,0.45);"
+                media_info_txt = h.get("media_info", "")
+            else:
+                estilo_row = ""
             rows_h.append(
                 f"<tr style='{estilo_row}'>"
                 f"<td style='font-weight:700;'>{html.escape(h['ano'])}</td>"
@@ -1265,7 +1391,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
             nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
             nota_src = f"VPA histórico ajustado por desdobramentos.{nota_fx}"
         nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`)." if eh_banco else ""
-        st.caption(f"Nota: {nota_src}{nota_b}")
+        st.caption(f"Nota: {nota_src}{media_info_txt}{nota_b}")
 
 
 def calc_ms(preco_calc: float | None, cotacao: float) -> float | None:
@@ -1684,11 +1810,13 @@ with st.spinner(f"Buscando dados de 6 anos e nomes na B3 para {len(tickers_para_
 def montar_item_completo(a: dict) -> dict:
     t = a["ticker"]
     yf_info = dados_yf.get(t, {})
-    cot = a.get("cotacao") or yf_info.get("cotacao_yf") or 0.0
+    cot = yf_info.get("cotacao_yf") or a.get("cotacao") or 0.0
     nome = yf_info.get("nome") or mapa_setores_ativos.get(t) or t
-    lpa = yf_info.get("lpa_yf") if yf_info.get("lpa_yf") is not None else a.get("lpa")
-    vpa = yf_info.get("vpa_yf") if yf_info.get("vpa_yf") is not None else a.get("vpa")
+    lpa = a.get("lpa") if a.get("lpa") is not None else yf_info.get("lpa_yf")
+    vpa = a.get("vpa") if a.get("vpa") is not None else yf_info.get("vpa_yf")
     roe = a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf")
+    pl = (cot / lpa) if (cot > 0 and lpa is not None and lpa != 0) else a.get("pl")
+    pvp = (cot / vpa) if (cot > 0 and vpa is not None and vpa != 0) else a.get("pvp")
 
     dpa_12m = yf_info.get("dpa_12m_yf") if yf_info.get("dpa_12m_yf") is not None else (a.get("dpa_12m") or 0.0)
     dy_12m = (dpa_12m / cot) * 100 if (dpa_12m and cot > 0) else (a.get("dy_12m") or 0.0)
@@ -1704,7 +1832,7 @@ def montar_item_completo(a: dict) -> dict:
     item = {
         **a,
         "cotacao": cot, "nome": nome, "setor_nome": mapa_setores_ativos.get(t, ""),
-        "lpa": lpa, "vpa": vpa, "roe": roe,
+        "pl": pl, "pvp": pvp, "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,

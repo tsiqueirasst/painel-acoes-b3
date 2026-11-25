@@ -1103,9 +1103,10 @@ def buscar_historico_fundamentalista(
             ebitda_12 = info.get("ebitda") * fx_atual
 
     vpa_12 = parse_br_num(det_fund.get("VPA")) or vpa_live
-    pl_12 = parse_br_num(det_fund.get("P/L")) or pl_live
-    pvp_12 = parse_br_num(det_fund.get("P/VP")) or pvp_live
     val_merc_12 = val_merc_fund or ((cot_atual * acoes_info) if (cot_atual and acoes_info) else info.get("marketCap"))
+    patr_12 = parse_br_num(det_fund.get("Patrim. Líq")) or ((vpa_12 * acoes_info) if (vpa_12 and acoes_info) else None)
+    pl_12 = (val_merc_12 / lliq_12) if (val_merc_12 and lliq_12 and lliq_12 != 0) else (parse_br_num(det_fund.get("P/L")) or pl_live)
+    pvp_12 = (val_merc_12 / patr_12) if (val_merc_12 and patr_12 and patr_12 != 0) else (parse_br_num(det_fund.get("P/VP")) or pvp_live)
     pebitda_12 = (val_merc_12 / ebitda_12) if (not eh_banco_seg and val_merc_12 and ebitda_12 and ebitda_12 != 0) else None
 
     linhas.append({

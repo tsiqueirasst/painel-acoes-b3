@@ -17,6 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 from bs4 import BeautifulSoup
 from st_keyup import st_keyup
@@ -1122,7 +1123,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
         lbl_fav = "★ Remover dos Favoritos" if eh_fav else "⭐ Adicionar aos Favoritos"
         if st.button(lbl_fav, key=f"{key_prefix}_favbtn_{ticker}", use_container_width=True):
             toggle_favorito(ticker)
-            st.rerun()
+            st.rerun(scope="app")
 
     c_per, c_tipo = st.columns([3, 1.2])
     with c_per:
@@ -1773,10 +1774,6 @@ with tab1:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")
             else:
                 linhas_html = []
-                base_params = {"setor": filtro_setor, "liq": liq_label}
-                if busca_tickers.strip():
-                    base_params["busca"] = busca_tickers.strip()
-
                 fav_set = set(st.session_state["favoritos"])
                 for r in exibir:
                     cot = r["cotacao"]
@@ -1800,13 +1797,12 @@ with tab1:
                     setor_badge = f"<br><small style='opacity:0.65;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
                     estrela = " ⭐" if r["ticker"] in fav_set else ""
 
-                    params_link = {**base_params, "ativo": r["ticker"]}
-                    href = f"?{urlencode(params_link)}#raiox"
+                    href = f"#raiox-{r['ticker']}"
 
                     linha = (
                         "<tr>"
                         f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
-                        f"<td><a href='{href}' target='_self' style='color:#60a5fa; text-decoration:none; font-weight:700;'>🔎 {r['ticker']}</a>{estrela}<br><small style='opacity:0.8;'>{nome_esc}</small>{setor_badge}</td>"
+                        f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>🔎 {r['ticker']}</a>{estrela}<br><small style='opacity:0.8;'>{nome_esc}</small>{setor_badge}</td>"
                         f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
                         f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
                         f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
@@ -1851,15 +1847,116 @@ with tab1:
         # --- RAIO-X DO ATIVO (EXPANDER MINIMIZÁVEL) ---
         st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
         opcoes_raiox = [r["ticker"] for r in (exibir if exibir else resultados)]
-        idx_raiox = opcoes_raiox.index(ativo_url) if ativo_url in opcoes_raiox else 0
-        with st.expander("🔎 Raio-X do Ativo (ou clique diretamente no código azul da tabela acima) — clique para minimizar/maximizar", expanded=True):
-            ativo_escolhido = st.selectbox(
-                "Ativo selecionado:",
-                options=opcoes_raiox,
-                index=idx_raiox,
+        if "raiox_ativo_sel" not in st.session_state:
+            st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_raiox else opcoes_raiox[0]
+        elif st.session_state["raiox_ativo_sel"] not in opcoes_raiox:
+            st.session_state["raiox_ativo_sel"] = opcoes_raiox[0]
+
+        def _ao_clicar_ticker_tabela():
+            tk_clicado = st.session_state.get("raiox_bridge", "").strip().upper()
+            if tk_clicado:
+                st.session_state["raiox_ativo_sel"] = tk_clicado
+                st.session_state["raiox_bridge"] = ""
+
+        st.markdown(
+            "<style>"
+            "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
+            "div.element-container:has(input[aria-label='raiox_bridge_input']),"
+            "div[data-testid='stElementContainer']:has(iframe[height='0']),"
+            "div.element-container:has(iframe[height='0']){"
+            "position:fixed!important;left:-9999px!important;top:0!important;"
+            "width:1px!important;height:1px!important;opacity:0!important;"
+            "overflow:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
+        @st.fragment
+        def render_secao_raiox(opcoes_rx: list[str], mapa_res: dict[str, dict]):
+            st.text_input(
+                "raiox_bridge_input",
+                key="raiox_bridge",
+                label_visibility="collapsed",
+                on_change=_ao_clicar_ticker_tabela,
             )
-            item_raiox = next(r for r in resultados if r["ticker"] == ativo_escolhido)
-            render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+            if st.session_state.get("raiox_ativo_sel") not in opcoes_rx:
+                st.session_state["raiox_ativo_sel"] = opcoes_rx[0]
+            with st.expander("🔎 Raio-X do Ativo (ou clique diretamente no código azul da tabela acima) — clique para minimizar/maximizar", expanded=True):
+                ativo_escolhido = st.selectbox(
+                    "Ativo selecionado:",
+                    options=opcoes_rx,
+                    key="raiox_ativo_sel",
+                )
+                st.markdown(
+                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                    unsafe_allow_html=True,
+                )
+                item_raiox = mapa_res[ativo_escolhido]
+                render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+
+        render_secao_raiox(opcoes_raiox, {r["ticker"]: r for r in resultados})
+
+        components.html(
+            """
+            <script>
+            (function() {
+                const pWin = window.parent;
+                const pDoc = pWin.document;
+
+                pWin.__raioxSyncBridge = function(ticker) {
+                    const marker = pDoc.querySelector(".raiox-current-marker");
+                    const atual = marker ? marker.id.replace("raiox-current-", "").trim().toUpperCase() : "";
+                    const targetEl = pDoc.getElementById("raiox");
+
+                    if (atual === ticker) {
+                        if (targetEl) {
+                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }
+                        return;
+                    }
+
+                    const inp = pDoc.querySelector('input[aria-label="raiox_bridge_input"]');
+                    if (!inp) return;
+
+                    const setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, "value").set;
+                    setter.call(inp, ticker);
+                    inp.dispatchEvent(new Event("input", { bubbles: true }));
+
+                    setTimeout(function() {
+                        inp.dispatchEvent(new KeyboardEvent("keydown", {
+                            key: "Enter",
+                            code: "Enter",
+                            keyCode: 13,
+                            which: 13,
+                            bubbles: true,
+                            cancelable: true
+                        }));
+                        inp.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+                        if (targetEl) {
+                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }
+                    }, 60);
+                };
+
+                if (!pWin.__raioxClickHandlerAttached) {
+                    pWin.__raioxClickHandlerAttached = true;
+                    pDoc.addEventListener("click", function(e) {
+                        const link = e.target && e.target.closest ? e.target.closest('a[href^="#raiox-"]') : null;
+                        if (!link) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const href = link.getAttribute("href") || "";
+                        const ticker = href.replace("#raiox-", "").trim().toUpperCase();
+                        if (ticker && pWin.__raioxSyncBridge) {
+                            pWin.__raioxSyncBridge(ticker);
+                        }
+                    }, true);
+                }
+            })();
+            </script>
+            """,
+            height=0,
+        )
 
         # --- RANKING DE ATRATIVIDADE (EXPANDER + QUANTIDADE ESCOLHÍVEL) ---
         lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados

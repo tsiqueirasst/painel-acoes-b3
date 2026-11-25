@@ -315,9 +315,9 @@ with st.sidebar:
     filtro_setor = st.selectbox("Filtrar por Setor:", opcoes_filtro, index=0)
 
     liq_min_opcoes = {
+        "R$ 0 (mostrar literalmente todas)": 0,
         "R$ 100 mil/dia (recomendado)": 100_000,
         "R$ 1 milhão/dia (alta liquidez)": 1_000_000,
-        "R$ 0 (mostrar literalmente todas)": 0,
     }
     liq_label = st.selectbox("Liquidez mínima (2 meses):", list(liq_min_opcoes.keys()), index=0)
     liq_min = liq_min_opcoes[liq_label]
@@ -357,7 +357,7 @@ else:
     ativos_filtrados = [a for a in ativos_filtrados if a["liq_2m"] >= liq_min]
 
 if not ativos_filtrados:
-    st.warning("Nenhum ativo encontrado com esses filtros. Tente reduzir a liquidez mínima.")
+    st.warning("Nenhum ativo encontrado com esses filtros. Tente ajustar a busca.")
     st.stop()
 
 # Cálculo preliminar rápido para definir quem já tem histórico 6a/Proj carregado automaticamente
@@ -370,8 +370,6 @@ for a in ativos_filtrados:
 
 preliminares.sort(key=lambda x: x[0], reverse=True)
 
-# Se tiver até 55 ativos (ex: BESST ou setor individual), busca 6 anos + Projetivo de todos.
-# Se tiver mais (ex: Todos da B3), busca os Top 30 automaticamente (ou todos se o usuário clicar).
 carregar_todos_yf = False
 if len(ativos_filtrados) > 55:
     carregar_todos_yf = st.checkbox(
@@ -433,7 +431,6 @@ for _, a in preliminares:
     item_calc["motivos"] = motivos
     resultados.append(item_calc)
 
-# Define posição oficial no Ranking de Atratividade (antes da ordenação personalizada por coluna)
 resultados.sort(key=lambda x: x["score"], reverse=True)
 for idx, r in enumerate(resultados, start=1):
     r["pos_ranking"] = idx
@@ -441,7 +438,6 @@ for idx, r in enumerate(resultados, start=1):
 tab1, tab2 = st.tabs([f"📊 Tabela & Ranking ({len(resultados)} ativos)", "⚖️ Comparar Ativos"])
 
 with tab1:
-    # Controles de ordenação por coluna
     col_ord1, col_ord2, col_ord3 = st.columns([2, 1.5, 1.5])
     opcoes_ordenacao = {
         "Atratividade (Score)": "score",
@@ -470,107 +466,87 @@ with tab1:
     resultados_ordenados = sort_resultados(resultados, chave_ord, reverso)
     exibir = resultados_ordenados if max_linhas == "Todos" else resultados_ordenados[:int(max_linhas)]
 
-    linhas_html = []
-    for r in exibir:
-        cot = r["cotacao"]
-        sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
+    with st.expander(f"📋 Tabela Comparativa ({len(exibir)} ativos exibidos) — clique aqui para minimizar ou maximizar", expanded=True):
+        linhas_html = []
+        for r in exibir:
+            cot = r["cotacao"]
+            sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
 
-        pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
-        if r["pvp"] is not None:
-            cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
-            emoji_pvp = "🟢" if r["pvp"] < 1 else "🔴"
-            pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {emoji_pvp}</span>"
-        else:
-            pvp_html = "N/A"
-        roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
+            pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
+            if r["pvp"] is not None:
+                cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
+                emoji_pvp = "🟢" if r["pvp"] < 1 else "🔴"
+                pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {emoji_pvp}</span>"
+            else:
+                pvp_html = "N/A"
+            roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
 
-        lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
-        vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
-        dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
-        dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
+            lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
+            vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
+            dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
+            dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
 
-        nome_esc = html.escape(r["nome"])
-        setor_badge = f"<br><small style='opacity:0.65;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
+            nome_esc = html.escape(r["nome"])
+            setor_badge = f"<br><small style='opacity:0.65;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
 
-        linhas_html.append(f"""
-        <tr>
-            <td style="text-align:center; font-weight:700;">{r['pos_ranking']}º<br><small style="opacity:0.75;">{r['score']}</small></td>
-            <td><strong>{r['ticker']}</strong><br><small style="opacity:0.8;">{nome_esc}</small>{setor_badge}</td>
-            <td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>
-            <td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>
-            <td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>
-            <td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>
-            <td>{html_preco_ms(r['pt_proj'], cot)}</td>
-            <td>{html_preco_ms(r['pt_bazin'], cot)}</td>
-            <td>{html_preco_ms(r['graham'], cot)}</td>
-        </tr>
-        """)
+            linha = (
+                "<tr>"
+                f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
+                f"<td><strong>{r['ticker']}</strong><br><small style='opacity:0.8;'>{nome_esc}</small>{setor_badge}</td>"
+                f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
+                f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
+                f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
+                f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
+                f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
+                f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
+                f"<td>{html_preco_ms(r['graham'], cot)}</td>"
+                "</tr>"
+            )
+            linhas_html.append(linha)
 
-    tabela_html = f"""
-    <style>
-        .val-table-wrap {{ width: 100%; overflow-x: auto; }}
-        .val-table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 13px;
-            line-height: 1.4;
-        }}
-        .val-table th {{
-            background-color: rgba(128, 128, 128, 0.18);
-            text-align: left;
-            padding: 8px 6px;
-            border-bottom: 2px solid rgba(128, 128, 128, 0.35);
-            font-weight: 600;
-            font-size: 12px;
-        }}
-        .val-table td {{
-            padding: 8px 6px;
-            border-bottom: 1px solid rgba(128, 128, 128, 0.22);
-            vertical-align: middle;
-        }}
-        .val-table tr:hover td {{
-            background-color: rgba(128, 128, 128, 0.08);
-        }}
-    </style>
-    <div class="val-table-wrap">
-        <table class="val-table">
-            <thead>
-                <tr>
-                    <th style="text-align:center;">Rank<br><small>Score</small></th>
-                    <th>Ticker / Empresa</th>
-                    <th>Cotação ({data_ref}) & DY</th>
-                    <th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>
-                    <th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>
-                    <th>Preço Teto Médio (6a) & MS</th>
-                    <th>Preço Teto Projetivo & MS</th>
-                    <th>Preço-Teto Bazin (12m) & MS</th>
-                    <th>Preço Justo Graham & MS</th>
-                </tr>
-            </thead>
-            <tbody>
-                {"".join(linhas_html)}
-            </tbody>
-        </table>
-    </div>
-    """
-    st.markdown(tabela_html, unsafe_allow_html=True)
+        css_tabela = (
+            "<style>"
+            ".val-table-wrap{width:100%;overflow-x:auto;}"
+            ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
+            ".val-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
+            ".val-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"
+            ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+            "</style>"
+        )
+        tabela_html = (
+            f"{css_tabela}"
+            "<div class='val-table-wrap'><table class='val-table'><thead><tr>"
+            "<th style='text-align:center;'>Rank<br><small>Score</small></th>"
+            "<th>Ticker / Empresa</th>"
+            f"<th>Cotação ({data_ref}) & DY</th>"
+            "<th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
+            "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
+            "<th>Preço Teto Médio (6a) & MS</th>"
+            "<th>Preço Teto Projetivo & MS</th>"
+            "<th>Preço-Teto Bazin (12m) & MS</th>"
+            "<th>Preço Justo Graham & MS</th>"
+            f"</tr></thead><tbody>{''.join(linhas_html)}</tbody></table></div>"
+        )
+        st.markdown(tabela_html, unsafe_allow_html=True)
 
-    # Legenda compacta das siglas e nota do asterisco
-    st.caption(
-        "**Legenda siglas B3:** `ON` = Ordinária (voto) · `PN` = Preferencial (dividendos) · `UNT` = Unit (ON+PN) · "
-        "`ED/EJ` = Ex-Dividendo/JCP · `N1/N2/NM` = Nível 1, Nível 2 e Novo Mercado (governança).  \n"
-        "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
-    )
+        st.caption(
+            "**Legenda siglas B3:** `ON` = Ordinária (voto) · `PN` = Preferencial (dividendos) · `UNT` = Unit (ON+PN) · "
+            "`ED/EJ` = Ex-Dividendo/JCP · `N1/N2/NM` = Nível 1, Nível 2 e Novo Mercado (governança).  \n"
+            "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
+        )
 
-    st.subheader("🏆 Top 10 do Ranking de Atratividade (Filtro Atual)")
-    for r in resultados[:10]:
+    qtd_top = min(100, len(resultados))
+    st.subheader(f"🏆 Top {qtd_top} do Ranking de Atratividade (Filtro Atual)")
+    blocos_ranking = []
+    for r in resultados[:100]:
         justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
-        st.markdown(
+        blocos_ranking.append(
             f"**{r['pos_ranking']}º Lugar: {r['ticker']}** ({r['nome']}) | "
             f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
             f"**Score: {r['score']}/100**  \n"
             f"_{justificativa}_"
         )
+    st.markdown("\n\n".join(blocos_ranking))
 
 with tab2:
     st.subheader("⚖️ Comparador Lado a Lado")
@@ -584,7 +560,6 @@ with tab2:
     if len(selecionados) < 2:
         st.info("Selecione pelo menos 2 ativos acima para visualizar a comparação.")
     else:
-        # Garante dados completos do Yahoo Finance caso algum escolhido não estivesse no Top 30
         faltantes = tuple(t for t in selecionados if t not in dados_yf)
         extra_yf = buscar_yahoo_lote(faltantes) if faltantes else {}
 

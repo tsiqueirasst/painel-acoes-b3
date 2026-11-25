@@ -1,6 +1,10 @@
+import hashlib
+import hmac
 import html
 import io
+import json
 import math
+import secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -10,6 +14,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 from bs4 import BeautifulSoup
+from st_keyup import st_keyup
 
 st.set_page_config(page_title="Painel Valuation B3", page_icon="📈", layout="wide")
 
@@ -30,6 +35,7 @@ BESST_SETORES = {
 }
 
 
+# --- UTILITÁRIOS DE FORMATAÇÃO ---
 def fmt_num(val: float, casas: int = 2) -> str:
     s = f"{val:,.{casas}f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
@@ -61,34 +67,103 @@ def parse_br_num(val: str) -> float | None:
         return None
 
 
-def parse_lancamentos_str(raw: str) -> list[dict]:
-    itens = []
-    if not raw:
-        return itens
-    hoje_iso = datetime.now(BRT).strftime("%Y-%m-%d")
-    for bloco in raw.split(";"):
-        partes = bloco.split(":")
-        if len(partes) >= 3:
-            t = partes[0].strip().upper().replace(".SA", "")
-            try:
-                qtd = float(partes[1])
-                preco = float(partes[2])
-                dt = partes[3] if len(partes) >= 4 and partes[3] else hoje_iso
-                tipo = partes[4] if len(partes) >= 5 and partes[4] in ("C", "V") else "C"
-                if t and qtd > 0 and preco >= 0:
-                    itens.append({"ticker": t, "qtd": qtd, "preco": preco, "data": dt, "tipo": tipo})
-            except ValueError:
-                continue
-    return itens
+# --- SECRETS, GIST PRIVADO & AUTENTICAÇÃO ---
+def get_secret(key: str, default=None):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return default
 
 
-def serializar_lancamentos(lista: list[dict]) -> str:
-    return ";".join(
-        f"{x['ticker']}:{x['qtd']:g}:{x['preco']:.2f}:{x['data']}:{x.get('tipo', 'C')}"
-        for x in lista
-    )
+def gist_configurado() -> bool:
+    return bool(get_secret("GITHUB_TOKEN") and get_secret("GIST_ID"))
 
 
+def sso_configurado() -> bool:
+    return get_secret("auth") is not None
+
+
+def _gist_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {get_secret('GITHUB_TOKEN')}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def ler_db_gist() -> tuple[dict, str]:
+    gist_id = get_secret("GIST_ID")
+    url = f"https://api.github.com/gists/{gist_id}"
+    resp = requests.get(url, headers=_gist_headers(), timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    files = data.get("files", {})
+    if not files:
+        return {"usuarios": {}}, "dados_painel.json"
+    filename = "dados_painel.json" if "dados_painel.json" in files else next(iter(files.keys()))
+    conteudo = files[filename].get("content", "{}").strip() or "{}"
+    try:
+        db = json.loads(conteudo)
+    except json.JSONDecodeError:
+        db = {}
+    if "usuarios" not in db or not isinstance(db["usuarios"], dict):
+        db["usuarios"] = {}
+    return db, filename
+
+
+def salvar_db_gist(db: dict, filename: str):
+    gist_id = get_secret("GIST_ID")
+    url = f"https://api.github.com/gists/{gist_id}"
+    payload = {"files": {filename: {"content": json.dumps(db, ensure_ascii=False, indent=2)}}}
+    resp = requests.patch(url, headers=_gist_headers(), json=payload, timeout=15)
+    resp.raise_for_status()
+
+
+def hash_senha(senha: str, salt_hex: str | None = None) -> tuple[str, str]:
+    salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", senha.encode("utf-8"), salt, 100_000)
+    return salt.hex(), dk.hex()
+
+
+def verificar_senha(senha: str, salt_hex: str, hash_salvo: str) -> bool:
+    if not salt_hex or not hash_salvo:
+        return False
+    _, novo_hash = hash_senha(senha, salt_hex)
+    return hmac.compare_digest(novo_hash, hash_salvo)
+
+
+def carregar_dados_usuario_nuvem(email: str):
+    if not gist_configurado() or not email:
+        return
+    try:
+        db, _ = ler_db_gist()
+        u = db["usuarios"].get(email.lower(), {})
+        favs = [str(x).upper() for x in u.get("favoritos", [])]
+        lancs = u.get("lancamentos", [])
+        st.session_state["favoritos"] = favs
+        st.session_state["ms_favs"] = favs
+        st.session_state["lancamentos"] = lancs
+        st.session_state["nuvem_carregada_para"] = email.lower()
+    except Exception as exc:
+        st.warning(f"Não foi possível carregar dados da nuvem: {exc}")
+
+
+def salvar_dados_usuario_nuvem():
+    email = st.session_state.get("usuario_email")
+    if not gist_configurado() or not email:
+        return
+    try:
+        db, filename = ler_db_gist()
+        em = email.lower()
+        u = db["usuarios"].get(em, {})
+        u["favoritos"] = st.session_state.get("favoritos", [])
+        u["lancamentos"] = st.session_state.get("lancamentos", [])
+        db["usuarios"][em] = u
+        salvar_db_gist(db, filename)
+    except Exception as exc:
+        st.error(f"Erro ao salvar na nuvem: {exc}")
+
+
+# --- DADOS B3 (FUNDAMENTUS & YAHOO) ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def carregar_setores_fundamentus() -> dict[str, str]:
     url = "https://www.fundamentus.com.br/buscaavancada.php"
@@ -143,17 +218,9 @@ def carregar_todos_ativos_b3() -> list[dict]:
         dpa_12m = cotacao * (dy / 100.0)
 
         ativos.append({
-            "ticker": papel,
-            "nome": papel,
-            "cotacao": cotacao,
-            "dy_12m": dy,
-            "pl": pl,
-            "pvp": pvp,
-            "roe": roe,
-            "lpa": lpa,
-            "vpa": vpa,
-            "dpa_12m": dpa_12m,
-            "liq_2m": liq_2m,
+            "ticker": papel, "nome": papel, "cotacao": cotacao, "dy_12m": dy,
+            "pl": pl, "pvp": pvp, "roe": roe, "lpa": lpa, "vpa": vpa,
+            "dpa_12m": dpa_12m, "liq_2m": liq_2m,
         })
     return ativos
 
@@ -251,8 +318,7 @@ def buscar_historico_preco(ticker: str, periodo_label: str, ajustada: bool) -> p
         df = tk.history(period="5d", interval="15m", auto_adjust=ajustada)
         if not df.empty:
             df.index = pd.to_datetime(df.index).tz_localize(None)
-            ultimo_dia = df.index.date[-1]
-            df = df[df.index.date == ultimo_dia]
+            df = df[df.index.date == df.index.date[-1]]
     elif periodo_label == "7 D":
         df = tk.history(period="1mo", interval="1h", auto_adjust=ajustada)
         if not df.empty:
@@ -366,7 +432,6 @@ def buscar_historico_fundamentalista(
                 if ebit is not None and dep is not None:
                     ebitda = ebit + dep
 
-            # Pula anos totalmente vazios (como 2021 quando o Yahoo só traz valor de mercado)
             if rec is None and lliq is None and ebitda is None:
                 continue
 
@@ -394,14 +459,11 @@ def buscar_historico_fundamentalista(
             marg_liq = (lliq / rec * 100) if (lliq is not None and rec and rec != 0) else None
 
             linhas.append({
-                "ano": str(ano),
-                "pl": pl, "pvp": pvp, "vpa": vpa, "div_liq": div_liq,
+                "ano": str(ano), "pl": pl, "pvp": pvp, "vpa": vpa, "div_liq": div_liq,
                 "marg_liq": marg_liq, "ebitda": ebitda, "pebitda": pebitda,
-                "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec,
-                "is_atual": False,
+                "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
             })
 
-    # TTM (ÚLT. 12M)
     rec_12 = lbr_12 = lliq_12 = ebitda_12 = div_liq_12 = marg_12 = None
     patr_12 = acoes_12 = vpa_12 = val_merc_12 = pl_12 = pvp_12 = pebitda_12 = None
 
@@ -436,14 +498,11 @@ def buscar_historico_fundamentalista(
             marg_12 = (lliq_12 / rec_12 * 100) if (lliq_12 is not None and rec_12 and rec_12 != 0) else None
 
             linhas.append({
-                "ano": "ÚLT. 12M",
-                "pl": pl_12, "pvp": pvp_12, "vpa": vpa_12, "div_liq": div_liq_12,
+                "ano": "ÚLT. 12M", "pl": pl_12, "pvp": pvp_12, "vpa": vpa_12, "div_liq": div_liq_12,
                 "marg_liq": marg_12, "ebitda": ebitda_12, "pebitda": pebitda_12,
-                "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12,
-                "is_atual": False,
+                "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
             })
 
-    # Linha final ATUAL (Hoje) com múltiplos ao vivo para comparação
     cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
     val_merc_atual = info.get("marketCap") or ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
     ebitda_ref = ebitda_12 or (linhas[-1]["ebitda"] if linhas else None)
@@ -454,15 +513,9 @@ def buscar_historico_fundamentalista(
         "pl": pl_live if pl_live is not None else pl_12,
         "pvp": pvp_live if pvp_live is not None else pvp_12,
         "vpa": vpa_live if vpa_live is not None else vpa_12,
-        "div_liq": div_liq_12,
-        "marg_liq": marg_12,
-        "ebitda": ebitda_ref,
-        "pebitda": pebitda_atual,
-        "val_merc": val_merc_atual,
-        "lliq": lliq_12,
-        "lbr": lbr_12,
-        "rec": rec_12,
-        "is_atual": True,
+        "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_ref,
+        "pebitda": pebitda_atual, "val_merc": val_merc_atual,
+        "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
     })
 
     return linhas
@@ -476,10 +529,7 @@ def toggle_favorito(ticker: str):
         favs.append(ticker)
     st.session_state["favoritos"] = favs
     st.session_state["ms_favs"] = favs
-    if favs:
-        st.query_params["favs"] = ",".join(favs)
-    elif "favs" in st.query_params:
-        del st.query_params["favs"]
+    salvar_dados_usuario_nuvem()
 
 
 def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict | None = None, key_prefix: str = "raiox"):
@@ -498,16 +548,12 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
         periodo = st.radio(
             "Período:",
             ["1 D", "7 D", "30 D", "6 M", "YTD", "1 A", "5 A", "10 A", "15 A"],
-            index=5,
-            horizontal=True,
-            key=f"{key_prefix}_per_{ticker}",
+            index=5, horizontal=True, key=f"{key_prefix}_per_{ticker}",
         )
     with c_tipo:
         tipo_cot = st.selectbox(
-            "Tipo:",
-            ["Cotação ajustada", "Cotação simples"],
-            index=0,
-            key=f"{key_prefix}_tipo_{ticker}",
+            "Tipo:", ["Cotação ajustada", "Cotação simples"],
+            index=0, key=f"{key_prefix}_tipo_{ticker}",
         )
 
     ajustada = tipo_cot == "Cotação ajustada"
@@ -516,8 +562,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
     if serie.empty:
         st.warning(f"Não foi possível carregar o gráfico de {ticker} para o período {periodo}.")
     else:
-        p_ini = float(serie.iloc[0])
-        p_fim = float(serie.iloc[-1])
+        p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
         var_pct = ((p_fim - p_ini) / p_ini) * 100 if p_ini > 0 else 0.0
         cor = "#22c55e" if var_pct >= 0 else "#ef4444"
         fill_cor = "rgba(34, 197, 94, 0.22)" if var_pct >= 0 else "rgba(239, 68, 68, 0.22)"
@@ -645,11 +690,9 @@ def html_preco_ms(preco_calc: float | None, cotacao: float, sufixo: str = "") ->
     ms = calc_ms(preco_calc, cotacao)
     sinal = "+" if ms >= 0 else ""
     if cotacao <= preco_calc:
-        cor = "#22c55e"
-        status = "🟢 (abaixo)"
+        cor, status = "#22c55e", "🟢 (abaixo)"
     else:
-        cor = "#ef4444"
-        status = "🔴 (acima)"
+        cor, status = "#ef4444", "🔴 (acima)"
     return (
         f"<strong>R$ {fmt_num(preco_calc)}{sufixo}</strong><br>"
         f"<span style='color:{cor}; font-weight:600; white-space:nowrap;'>"
@@ -671,22 +714,11 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         pts_ms = 0.0
 
     pvp = d["pvp"]
-    if pvp is not None and pvp > 0:
-        pts_pvp = max(0.0, min(15.0, ((2.5 - pvp) / 1.5) * 15.0)) + (5.0 if pvp < 1.0 else 0.0)
-    else:
-        pts_pvp = 0.0
-
+    pts_pvp = (max(0.0, min(15.0, ((2.5 - pvp) / 1.5) * 15.0)) + (5.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
     pl = d["pl"]
-    if pl is not None and pl > 0:
-        pts_pl = max(0.0, min(15.0, ((20.0 - pl) / 15.0) * 15.0))
-    else:
-        pts_pl = 0.0
-
+    pts_pl = max(0.0, min(15.0, ((20.0 - pl) / 15.0) * 15.0)) if (pl and pl > 0) else 0.0
     roe = d["roe"]
-    if roe is not None and roe > 0:
-        pts_roe = min(20.0, (roe / 25.0) * 20.0)
-    else:
-        pts_roe = 0.0
+    pts_roe = min(20.0, (roe / 25.0) * 20.0) if (roe and roe > 0) else 0.0
 
     score = round(pts_ms + pts_pvp + pts_pl + pts_roe, 1)
 
@@ -740,18 +772,107 @@ def consolidar_carteira_por_ativo(lancamentos: list[dict]) -> dict[str, dict]:
     return {t: v for t, v in posicoes.items() if v["qtd"] > 0}
 
 
-# --- ESTADO INICIAL ---
-if "lancamentos" not in st.session_state:
-    st.session_state["lancamentos"] = parse_lancamentos_str(st.query_params.get("carteira", ""))
+def render_tela_login(key_prefix: str = "login"):
+    if not gist_configurado():
+        st.warning(
+            "⚙️ Para ativar contas protegidas por senha e salvamento automático na nuvem sem mudar a URL, "
+            "configure `GITHUB_TOKEN` e `GIST_ID` nos **Secrets** do Streamlit."
+        )
+        return
 
+    st.markdown("### 🔐 Acesse sua conta para visualizar e salvar sua Carteira e Favoritos")
+
+    if sso_configurado():
+        if st.button("🔵 Entrar com Google (SSO)", type="primary", use_container_width=True, key=f"{key_prefix}_sso"):
+            auth_cfg = get_secret("auth", {})
+            if isinstance(auth_cfg, dict) and "google" in auth_cfg:
+                st.login("google")
+            else:
+                st.login()
+        st.markdown("---")
+
+    t_entrar, t_criar = st.tabs(["Entrar com E-mail e Senha", "Criar Nova Conta"])
+    with t_entrar:
+        with st.form(f"{key_prefix}_form_in"):
+            em = st.text_input("E-mail:", placeholder="seu@email.com").strip().lower()
+            sn = st.text_input("Senha:", type="password")
+            ok = st.form_submit_button("Entrar", type="primary", use_container_width=True)
+            if ok:
+                if not em or not sn:
+                    st.error("Preencha e-mail e senha.")
+                else:
+                    try:
+                        db, _ = ler_db_gist()
+                        u = db["usuarios"].get(em)
+                        if not u or not verificar_senha(sn, u.get("salt", ""), u.get("senha_hash", "")):
+                            st.error("E-mail ou senha incorretos.")
+                        else:
+                            st.session_state["usuario_email"] = em
+                            st.session_state["metodo_auth"] = "senha"
+                            carregar_dados_usuario_nuvem(em)
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"Erro ao verificar login: {exc}")
+
+    with t_criar:
+        with st.form(f"{key_prefix}_form_up"):
+            em_n = st.text_input("Seu e-mail:", placeholder="seu@email.com").strip().lower()
+            sn_n = st.text_input("Crie uma senha (mín. 6 caracteres):", type="password")
+            sn_c = st.text_input("Confirme a senha:", type="password")
+            ok_n = st.form_submit_button("Criar Conta", use_container_width=True)
+            if ok_n:
+                if "@" not in em_n or "." not in em_n:
+                    st.error("Digite um e-mail válido.")
+                elif len(sn_n) < 6:
+                    st.error("A senha deve ter pelo menos 6 caracteres.")
+                elif sn_n != sn_c:
+                    st.error("As senhas não coincidem.")
+                else:
+                    try:
+                        db, filename = ler_db_gist()
+                        if em_n in db["usuarios"] and db["usuarios"][em_n].get("senha_hash"):
+                            st.error("Esse e-mail já possui conta cadastrada.")
+                        else:
+                            salt_h, hash_h = hash_senha(sn_n)
+                            u_atual = db["usuarios"].get(em_n, {})
+                            u_atual["salt"] = salt_h
+                            u_atual["senha_hash"] = hash_h
+                            u_atual.setdefault("favoritos", [])
+                            u_atual.setdefault("lancamentos", [])
+                            db["usuarios"][em_n] = u_atual
+                            salvar_db_gist(db, filename)
+                            st.session_state["usuario_email"] = em_n
+                            st.session_state["metodo_auth"] = "senha"
+                            carregar_dados_usuario_nuvem(em_n)
+                            st.success("Conta criada com sucesso!")
+                            st.rerun()
+                    except Exception as exc:
+                        st.error(f"Erro ao criar conta: {exc}")
+
+
+# --- ESTADO INICIAL & SESSÃO DO USUÁRIO ---
+if "lancamentos" not in st.session_state:
+    st.session_state["lancamentos"] = []
 if "favoritos" not in st.session_state:
-    favs_raw = st.query_params.get("favs", "")
-    st.session_state["favoritos"] = [x.strip().upper() for x in favs_raw.split(",") if x.strip()]
+    st.session_state["favoritos"] = []
+
+# Detecta login via Google SSO (st.login)
+try:
+    if getattr(st.user, "is_logged_in", False) and getattr(st.user, "email", None):
+        em_sso = st.user.email.lower()
+        st.session_state["usuario_email"] = em_sso
+        st.session_state["metodo_auth"] = "sso"
+        if st.session_state.get("nuvem_carregada_para") != em_sso:
+            carregar_dados_usuario_nuvem(em_sso)
+except Exception:
+    pass
+
+usuario_atual = st.session_state.get("usuario_email")
 
 
 # --- INTERFACE PRINCIPAL ---
 st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
-st.caption("Todos os ativos da bolsa, Setor BESST, Favoritos, gráfico interativo, balanço anual e gestão completa da sua carteira.")
+st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual e carteira protegida por login.")
 
 try:
     with st.spinner("Carregando todos os ativos da B3..."):
@@ -765,6 +886,23 @@ tickers_b3 = sorted([a["ticker"] for a in todos_ativos])
 
 # --- BARRA LATERAL ---
 with st.sidebar:
+    st.header("👤 Sua Conta")
+    if usuario_atual:
+        st.success(f"Logado: **{usuario_atual}**")
+        if st.button("🚪 Sair da Conta", use_container_width=True):
+            metodo = st.session_state.get("metodo_auth")
+            for k in ("usuario_email", "metodo_auth", "nuvem_carregada_para"):
+                st.session_state.pop(k, None)
+            st.session_state["favoritos"] = []
+            st.session_state["ms_favs"] = []
+            st.session_state["lancamentos"] = []
+            if metodo == "sso":
+                st.logout()
+            st.rerun()
+    else:
+        st.info("Modo visitante. Faça login na aba **💼 Minha Carteira** para proteger e salvar seus dados na nuvem.")
+
+    st.divider()
     st.header("🔍 Filtros da Bolsa")
 
     opcoes_filtro = [
@@ -802,17 +940,14 @@ with st.sidebar:
     favs_sel = st.multiselect("Selecione suas favoritas:", options=tickers_b3, key="ms_favs")
     if favs_sel != st.session_state["favoritos"]:
         st.session_state["favoritos"] = favs_sel
-        if favs_sel:
-            st.query_params["favs"] = ",".join(favs_sel)
-        elif "favs" in st.query_params:
-            del st.query_params["favs"]
+        salvar_dados_usuario_nuvem()
         st.rerun()
 
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-# Sincroniza query params
+# Sincroniza filtros públicos leves na URL (sem carteira nem favoritos privados)
 st.query_params["setor"] = filtro_setor
 st.query_params["liq"] = liq_label
 if busca_tickers.strip():
@@ -820,19 +955,7 @@ if busca_tickers.strip():
 elif "busca" in st.query_params:
     del st.query_params["busca"]
 
-carteira_str = serializar_lancamentos(st.session_state["lancamentos"])
-if carteira_str:
-    st.query_params["carteira"] = carteira_str
-elif "carteira" in st.query_params:
-    del st.query_params["carteira"]
-
-if st.session_state["favoritos"]:
-    st.query_params["favs"] = ",".join(st.session_state["favoritos"])
-elif "favs" in st.query_params:
-    del st.query_params["favs"]
-
-# Consolida carteira
-posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"])
+posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
 # Aplica filtros
 mapa_setores_ativos = {}
@@ -862,7 +985,6 @@ if busca_tickers.strip():
 elif filtro_setor not in ("💼 Apenas Minha Carteira", "⭐ Apenas Meus Favoritos"):
     ativos_filtrados = [a for a in ativos_filtrados if a["liq_2m"] >= liq_min]
 
-# Preliminar para definir quais buscam Yahoo Finance
 preliminares = []
 for a in ativos_filtrados:
     pt_bazin = a["dpa_12m"] / 0.06 if a["dpa_12m"] > 0 else None
@@ -911,8 +1033,7 @@ def montar_item_completo(a: dict) -> dict:
 
     item = {
         **a,
-        "nome": nome,
-        "setor_nome": mapa_setores_ativos.get(t, ""),
+        "nome": nome, "setor_nome": mapa_setores_ativos.get(t, ""),
         "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
@@ -933,13 +1054,13 @@ for idx, r in enumerate(resultados, start=1):
 tab1, tab2, tab3 = st.tabs([
     f"📊 Tabela & Raio-X ({len(resultados)} ativos)",
     "⚖️ Comparar Ativos",
-    f"💼 Minha Carteira ({len(posicoes_carteira)})",
+    f"🔒 Minha Carteira ({len(posicoes_carteira) if usuario_atual else 'Login'})",
 ])
 
 # ==================== ABA 1: TABELA, RAIO-X E RANKING ====================
 with tab1:
     if not resultados:
-        st.info("Nenhum ativo encontrado no filtro atual. Se escolheu Favoritos ou Minha Carteira, adicione seus ativos primeiro.")
+        st.info("Nenhum ativo encontrado no filtro atual.")
     else:
         c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
         opcoes_ordenacao = {
@@ -957,7 +1078,7 @@ with tab1:
             "Ticker (A-Z)": "ticker",
         }
         with c_busca:
-            busca_tabela = st.text_input("🔎 Buscar na tabela:", placeholder="Código ou nome (ex: CMIG, BANCO)")
+            busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
         with c_ord1:
             col_escolhida = st.selectbox("Ordenar por coluna:", list(opcoes_ordenacao.keys()), index=0)
         with c_ord2:
@@ -967,7 +1088,7 @@ with tab1:
             max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, value=50, step=10)
 
         lista_tab = resultados
-        if busca_tabela.strip():
+        if busca_tabela and busca_tabela.strip():
             termo = busca_tabela.strip().upper()
             lista_tab = [r for r in resultados if termo in r["ticker"] or termo in r["nome"].upper()]
 
@@ -984,10 +1105,6 @@ with tab1:
                 base_params = {"setor": filtro_setor, "liq": liq_label}
                 if busca_tickers.strip():
                     base_params["busca"] = busca_tickers.strip()
-                if carteira_str:
-                    base_params["carteira"] = carteira_str
-                if st.session_state["favoritos"]:
-                    base_params["favs"] = ",".join(st.session_state["favoritos"])
 
                 fav_set = set(st.session_state["favoritos"])
                 for r in exibir:
@@ -1168,369 +1285,343 @@ with tab2:
             with st_tab:
                 render_grafico_e_tabela_ativo(r["ticker"], r["nome"], base_ativo=r, key_prefix="comp_sub")
 
-# ==================== ABA 3: MINHA CARTEIRA (ESTILO IMAGENS 4 e 5) ====================
+# ==================== ABA 3: MINHA CARTEIRA (PROTEGIDA POR LOGIN) ====================
 with tab3:
-    st.subheader("💼 Minha Carteira — Controle Patrimonial & Valuation")
-
-    if not posicoes_carteira:
-        st.info("Sua carteira ainda está vazia. Use o formulário **➕ Adicionar Lançamento** abaixo para cadastrar seus ativos!")
+    if not usuario_atual:
+        render_tela_login(key_prefix="tab_cart")
     else:
-        mapa_todos = {a["ticker"]: a for a in todos_ativos}
-        tickers_cart = tuple(posicoes_carteira.keys())
-        faltantes_c = tuple(t for t in tickers_cart if t not in dados_yf)
-        if faltantes_c:
-            dados_yf.update(buscar_yahoo_lote(faltantes_c))
+        st.subheader(f"💼 Minha Carteira — {usuario_atual}")
 
-        hist_cart = buscar_divs_e_precos_carteira(tickers_cart)
-        mapa_setores_full = carregar_mapa_todos_setores()
+        if not posicoes_carteira:
+            st.info("Sua carteira ainda está vazia. Use o formulário **➕ Adicionar Lançamento** abaixo para cadastrar seus ativos!")
+        else:
+            mapa_todos = {a["ticker"]: a for a in todos_ativos}
+            tickers_cart = tuple(posicoes_carteira.keys())
+            faltantes_c = tuple(t for t in tickers_cart if t not in dados_yf)
+            if faltantes_c:
+                dados_yf.update(buscar_yahoo_lote(faltantes_c))
 
-        hoje_dt = pd.Timestamp.now().tz_localize(None)
-        inicio_12m_dt = hoje_dt - timedelta(days=365)
+            hist_cart = buscar_divs_e_precos_carteira(tickers_cart)
+            mapa_setores_full = carregar_mapa_todos_setores()
 
-        total_investido = 0.0
-        total_atual = 0.0
-        divs_total_recebidos = 0.0
-        divs_12m_recebidos = 0.0
-        itens_tabela_cart = []
-        valor_por_setor: dict[str, float] = {}
+            hoje_dt = pd.Timestamp.now().tz_localize(None)
+            inicio_12m_dt = hoje_dt - timedelta(days=365)
 
-        # Calcula posição e dividendos reais recebidos por ativo
-        for t, pos in posicoes_carteira.items():
-            base = mapa_todos.get(t)
-            if not base:
-                continue
-            item_val = montar_item_completo(base)
-            cot = item_val["cotacao"]
-            qtd = pos["qtd"]
-            pm = pos["pm"]
-            inv = pos["custo"]
-            saldo = qtd * cot
-            ganho_cap = saldo - inv
+            total_investido = 0.0
+            total_atual = 0.0
+            divs_total_recebidos = 0.0
+            divs_12m_recebidos = 0.0
+            itens_tabela_cart = []
+            valor_por_setor: dict[str, float] = {}
 
-            # Dividendos recebidos com base nas datas dos lançamentos
-            divs_serie = hist_cart.get(t, {}).get("divs", pd.Series(dtype=float))
-            lanc_t = sorted([l for l in st.session_state["lancamentos"] if l["ticker"] == t], key=lambda x: x["data"])
-            div_ativo_tot = 0.0
-            div_ativo_12m = 0.0
-
-            if not divs_serie.empty and lanc_t:
-                for dt_div, dpa_val in divs_serie.items():
-                    qtd_na_data = 0.0
-                    for l in lanc_t:
-                        if pd.to_datetime(l["data"]) <= dt_div:
-                            qtd_na_data += l["qtd"] if l.get("tipo", "C") == "C" else -l["qtd"]
-                    if qtd_na_data > 0:
-                        recebido = qtd_na_data * float(dpa_val)
-                        div_ativo_tot += recebido
-                        if dt_div >= inicio_12m_dt:
-                            div_ativo_12m += recebido
-
-            var_pct = ((cot / pm) - 1) * 100 if pm > 0 else 0.0
-            rent_pct = (((saldo + div_ativo_tot) / inv) - 1) * 100 if inv > 0 else 0.0
-
-            total_investido += inv
-            total_atual += saldo
-            divs_total_recebidos += div_ativo_tot
-            divs_12m_recebidos += div_ativo_12m
-
-            setor_t = mapa_setores_full.get(t, "Outros")
-            valor_por_setor[setor_t] = valor_por_setor.get(setor_t, 0.0) + saldo
-
-            itens_tabela_cart.append({
-                **item_val,
-                "qtd": qtd,
-                "pm": pm,
-                "inv": inv,
-                "saldo": saldo,
-                "ganho_cap": ganho_cap,
-                "div_tot": div_ativo_tot,
-                "var_pct": var_pct,
-                "rent_pct": rent_pct,
-                "setor_t": setor_t,
-            })
-
-        # Calcula Evolução do Patrimônio (12 meses) e Rentabilidade 12M
-        meses = pd.date_range(end=hoje_dt, periods=12, freq="ME").tolist()
-        if not meses or meses[-1].month != hoje_dt.month or meses[-1].year != hoje_dt.year:
-            meses = (meses + [hoje_dt])[-12:]
-
-        labels_mes = []
-        vals_aplicado = []
-        vals_ganho = []
-        vals_saldo = []
-
-        lanc_ord = sorted(st.session_state["lancamentos"], key=lambda x: x["data"])
-        for idx_m, dt_m in enumerate(meses):
-            eh_atual = (idx_m == len(meses) - 1)
-            labels_mes.append(dt_m.strftime("%m/%y"))
-
-            # Posição acumulada até dt_m
-            pos_m: dict[str, dict] = {}
-            for l in lanc_ord:
-                if pd.to_datetime(l["data"]) <= dt_m:
-                    t = l["ticker"]
-                    if t not in pos_m:
-                        pos_m[t] = {"qtd": 0.0, "custo": 0.0, "pm": 0.0}
-                    if l.get("tipo", "C") == "C":
-                        pos_m[t]["qtd"] += l["qtd"]
-                        pos_m[t]["custo"] += l["qtd"] * l["preco"]
-                        pos_m[t]["pm"] = pos_m[t]["custo"] / pos_m[t]["qtd"] if pos_m[t]["qtd"] > 0 else 0.0
-                    else:
-                        qv = min(pos_m[t]["qtd"], l["qtd"])
-                        pos_m[t]["qtd"] -= qv
-                        pos_m[t]["custo"] = pos_m[t]["qtd"] * pos_m[t]["pm"]
-
-            ap_m = sum(v["custo"] for v in pos_m.values() if v["qtd"] > 0)
-            sal_m = 0.0
-            for t, v in pos_m.items():
-                if v["qtd"] <= 0:
+            for t, pos in posicoes_carteira.items():
+                base = mapa_todos.get(t)
+                if not base:
                     continue
-                if eh_atual and t in mapa_todos:
-                    px_m = mapa_todos[t]["cotacao"]
-                else:
-                    px_ser = hist_cart.get(t, {}).get("px", pd.Series(dtype=float))
-                    sub_px = px_ser[px_ser.index <= dt_m] if not px_ser.empty else pd.Series(dtype=float)
-                    px_m = float(sub_px.iloc[-1]) if not sub_px.empty else v["pm"]
-                sal_m += v["qtd"] * px_m
+                item_val = montar_item_completo(base)
+                cot = item_val["cotacao"]
+                qtd = pos["qtd"]
+                pm = pos["pm"]
+                inv = pos["custo"]
+                saldo = qtd * cot
+                ganho_cap = saldo - inv
 
-            vals_aplicado.append(ap_m)
-            vals_ganho.append(sal_m - ap_m)
-            vals_saldo.append(sal_m)
+                divs_serie = hist_cart.get(t, {}).get("divs", pd.Series(dtype=float))
+                lanc_t = sorted([l for l in st.session_state["lancamentos"] if l["ticker"] == t], key=lambda x: x["data"])
+                div_ativo_tot = 0.0
+                div_ativo_12m = 0.0
 
-        ganho_cap_tot = total_atual - total_investido
-        lucro_total = ganho_cap_tot + divs_total_recebidos
-        var_cart_pct = ((total_atual / total_investido) - 1) * 100 if total_investido > 0 else 0.0
-        rent_total_pct = ((lucro_total / total_investido) * 100) if total_investido > 0 else 0.0
+                if not divs_serie.empty and lanc_t:
+                    for dt_div, dpa_val in divs_serie.items():
+                        qtd_na_data = 0.0
+                        for l in lanc_t:
+                            if pd.to_datetime(l["data"]) <= dt_div:
+                                qtd_na_data += l["qtd"] if l.get("tipo", "C") == "C" else -l["qtd"]
+                        if qtd_na_data > 0:
+                            recebido = qtd_na_data * float(dpa_val)
+                            div_ativo_tot += recebido
+                            if dt_div >= inicio_12m_dt:
+                                div_ativo_12m += recebido
 
-        # Cards superiores (Imagem 4)
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            with st.container(border=True):
-                cor_v = "#22c55e" if var_cart_pct >= 0 else "#ef4444"
-                st.caption("💼 Patrimônio total")
-                st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(total_atual)}</span> <span style='color:{cor_v}; font-weight:600;'>{var_cart_pct:+.2f}%</span>", unsafe_allow_html=True)
-                st.caption(f"Valor investido: **R$ {fmt_num(total_investido)}**")
-        with k2:
-            with st.container(border=True):
-                cor_l = "#22c55e" if lucro_total >= 0 else "#ef4444"
-                st.caption("💰 Lucro total")
-                st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_l};'>R$ {fmt_num(lucro_total)}</span>", unsafe_allow_html=True)
-                st.caption(f"Ganho Cap: **R$ {fmt_num(ganho_cap_tot)}** | Divs: **R$ {fmt_num(divs_total_recebidos)}**")
-        with k3:
-            with st.container(border=True):
-                st.caption("💵 Proventos Recebidos (12M)")
-                st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(divs_12m_recebidos)}</span>", unsafe_allow_html=True)
-                st.caption(f"Total recebido desde compras: **R$ {fmt_num(divs_total_recebidos)}**")
-        with k4:
-            with st.container(border=True):
-                cor_r = "#22c55e" if rent_total_pct >= 0 else "#ef4444"
-                st.caption("📈 Rentabilidade (c/ dividendos)")
-                st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_r};'>{rent_total_pct:+.2f}%</span>", unsafe_allow_html=True)
-                st.caption(f"Variação pura do preço: **{var_cart_pct:+.2f}%**")
+                var_pct = ((cot / pm) - 1) * 100 if pm > 0 else 0.0
+                rent_pct = (((saldo + div_ativo_tot) / inv) - 1) * 100 if inv > 0 else 0.0
 
-        # Gráficos lado a lado (Imagem 4)
-        g_esq, g_dir = st.columns([1.8, 1])
-        with g_esq:
-            with st.container(border=True):
-                st.markdown("**Evolução do Patrimônio (Últimos 12 Meses)**")
-                fig_ev = go.Figure()
-                fig_ev.add_trace(go.Bar(
-                    x=labels_mes, y=vals_aplicado, name="Valor aplicado",
-                    marker_color="#10b981",
-                    hovertemplate="Valor aplicado: R$ %{y:,.2f}<extra></extra>",
-                ))
-                fig_ev.add_trace(go.Bar(
-                    x=labels_mes, y=vals_ganho, name="Ganho de Capital",
-                    marker_color=["#6ee7b7" if g >= 0 else "#fca5a5" for g in vals_ganho],
-                    hovertemplate="Ganho de Capital: R$ %{y:,.2f}<extra></extra>",
-                ))
-                fig_ev.update_layout(
-                    barmode="relative", height=290, margin=dict(l=10, r=10, t=25, b=10),
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.22)", tickprefix="R$ "),
-                    xaxis=dict(showgrid=False),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-                )
-                st.plotly_chart(fig_ev, use_container_width=True)
+                total_investido += inv
+                total_atual += saldo
+                divs_total_recebidos += div_ativo_tot
+                divs_12m_recebidos += div_ativo_12m
 
-        with g_dir:
-            with st.container(border=True):
-                modo_pizza = st.selectbox("Ativos na Carteira:", ["Por Ativo", "Por Setor"], index=0, label_visibility="collapsed")
-                if modo_pizza == "Por Ativo":
-                    lbls = [x["ticker"] for x in itens_tabela_cart]
-                    vals = [x["saldo"] for x in itens_tabela_cart]
-                else:
-                    lbls = list(valor_por_setor.keys())
-                    vals = list(valor_por_setor.values())
-                fig_pz = go.Figure(data=[go.Pie(labels=lbls, values=vals, hole=0.52, textinfo="label+percent")])
-                fig_pz.update_layout(
-                    title=f"Ativos na Carteira ({modo_pizza})",
-                    height=245, margin=dict(l=10, r=10, t=35, b=10),
-                    paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
-                )
-                st.plotly_chart(fig_pz, use_container_width=True)
+                setor_t = mapa_setores_full.get(t, "Outros")
+                valor_por_setor[setor_t] = valor_por_setor.get(setor_t, 0.0) + saldo
 
-        # Tabela da Carteira combinando Imagem 5 + Tabela & Raio-X
-        itens_tabela_cart.sort(key=lambda x: x["saldo"], reverse=True)
-        st.markdown(
-            f"#### 📋 Ações ({len(itens_tabela_cart)} ativos) — "
-            f"Valor total: **R$ {fmt_num(total_atual)}** | Variação: **{var_cart_pct:+.2f}%** | Rentabilidade: **{rent_total_pct:+.2f}%**"
-        )
+                itens_tabela_cart.append({
+                    **item_val,
+                    "qtd": qtd, "pm": pm, "inv": inv, "saldo": saldo,
+                    "ganho_cap": ganho_cap, "div_tot": div_ativo_tot,
+                    "var_pct": var_pct, "rent_pct": rent_pct, "setor_t": setor_t,
+                })
 
-        rows_c = []
-        base_params_c = {"setor": filtro_setor, "liq": liq_label}
-        if carteira_str:
-            base_params_c["carteira"] = carteira_str
-        if st.session_state["favoritos"]:
-            base_params_c["favs"] = ",".join(st.session_state["favoritos"])
+            meses = pd.date_range(end=hoje_dt, periods=12, freq="ME").tolist()
+            if not meses or meses[-1].month != hoje_dt.month or meses[-1].year != hoje_dt.year:
+                meses = (meses + [hoje_dt])[-12:]
 
-        for r in itens_tabela_cart:
-            cot = r["cotacao"]
-            pct_cart = (r["saldo"] / total_atual * 100) if total_atual > 0 else 0.0
-            cor_var = "#22c55e" if r["var_pct"] >= 0 else "#ef4444"
-            cor_rent = "#22c55e" if r["rent_pct"] >= 0 else "#ef4444"
+            labels_mes, vals_aplicado, vals_ganho = [], [], []
+            lanc_ord = sorted(st.session_state["lancamentos"], key=lambda x: x["data"])
 
-            pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
-            if r["pvp"] is not None:
-                cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
-                pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {'🟢' if r['pvp'] < 1 else '🔴'}</span>"
-            else:
-                pvp_html = "N/A"
-            roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
-            lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
-            vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
-            dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
-            dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
-            sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
+            for idx_m, dt_m in enumerate(meses):
+                eh_atual = (idx_m == len(meses) - 1)
+                labels_mes.append(dt_m.strftime("%m/%y"))
 
-            href_c = f"?{urlencode({**base_params_c, 'ativo': r['ticker']})}#raiox"
-            qtd_fmt = int(r["qtd"]) if float(r["qtd"]).is_integer() else r["qtd"]
+                pos_m: dict[str, dict] = {}
+                for l in lanc_ord:
+                    if pd.to_datetime(l["data"]) <= dt_m:
+                        t = l["ticker"]
+                        if t not in pos_m:
+                            pos_m[t] = {"qtd": 0.0, "custo": 0.0, "pm": 0.0}
+                        if l.get("tipo", "C") == "C":
+                            pos_m[t]["qtd"] += l["qtd"]
+                            pos_m[t]["custo"] += l["qtd"] * l["preco"]
+                            pos_m[t]["pm"] = pos_m[t]["custo"] / pos_m[t]["qtd"] if pos_m[t]["qtd"] > 0 else 0.0
+                        else:
+                            qv = min(pos_m[t]["qtd"], l["qtd"])
+                            pos_m[t]["qtd"] -= qv
+                            pos_m[t]["custo"] = pos_m[t]["qtd"] * pos_m[t]["pm"]
 
-            rows_c.append(
-                "<tr>"
-                f"<td><a href='{href_c}' target='_self' style='color:#60a5fa; text-decoration:none; font-weight:700;'>🔎 {r['ticker']}</a><br><small style='opacity:0.75;'>{html.escape(r['setor_t'])}</small><br><small>Score: <strong>{r['score']}</strong></small></td>"
-                f"<td>Qtd: <strong>{qtd_fmt}</strong><br>PM: R$ {fmt_num(r['pm'])}<br>Atual: <strong>R$ {fmt_num(cot)}</strong></td>"
-                f"<td>Saldo: <strong>R$ {fmt_num(r['saldo'])}</strong><br>Peso: {fmt_num(pct_cart, 1)}%<br>Var: <span style='color:{cor_var}; font-weight:600;'>{r['var_pct']:+.2f}%</span> | Rent: <span style='color:{cor_rent}; font-weight:600;'>{r['rent_pct']:+.2f}%</span></td>"
-                f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt} | DY: {fmt_num(r['dy_12m'])}%</td>"
-                f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
-                f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
-                f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
-                f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
-                f"<td>{html_preco_ms(r['graham'], cot)}</td>"
-                "</tr>"
+                ap_m = sum(v["custo"] for v in pos_m.values() if v["qtd"] > 0)
+                sal_m = 0.0
+                for t, v in pos_m.items():
+                    if v["qtd"] <= 0:
+                        continue
+                    if eh_atual and t in mapa_todos:
+                        px_m = mapa_todos[t]["cotacao"]
+                    else:
+                        px_ser = hist_cart.get(t, {}).get("px", pd.Series(dtype=float))
+                        sub_px = px_ser[px_ser.index <= dt_m] if not px_ser.empty else pd.Series(dtype=float)
+                        px_m = float(sub_px.iloc[-1]) if not sub_px.empty else v["pm"]
+                    sal_m += v["qtd"] * px_m
+
+                vals_aplicado.append(ap_m)
+                vals_ganho.append(sal_m - ap_m)
+
+            ganho_cap_tot = total_atual - total_investido
+            lucro_total = ganho_cap_tot + divs_total_recebidos
+            var_cart_pct = ((total_atual / total_investido) - 1) * 100 if total_investido > 0 else 0.0
+            rent_total_pct = ((lucro_total / total_investido) * 100) if total_investido > 0 else 0.0
+
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                with st.container(border=True):
+                    cor_v = "#22c55e" if var_cart_pct >= 0 else "#ef4444"
+                    st.caption("💼 Patrimônio total")
+                    st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(total_atual)}</span> <span style='color:{cor_v}; font-weight:600;'>{var_cart_pct:+.2f}%</span>", unsafe_allow_html=True)
+                    st.caption(f"Valor investido: **R$ {fmt_num(total_investido)}**")
+            with k2:
+                with st.container(border=True):
+                    cor_l = "#22c55e" if lucro_total >= 0 else "#ef4444"
+                    st.caption("💰 Lucro total")
+                    st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_l};'>R$ {fmt_num(lucro_total)}</span>", unsafe_allow_html=True)
+                    st.caption(f"Ganho Cap: **R$ {fmt_num(ganho_cap_tot)}** | Divs: **R$ {fmt_num(divs_total_recebidos)}**")
+            with k3:
+                with st.container(border=True):
+                    st.caption("💵 Proventos Recebidos (12M)")
+                    st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(divs_12m_recebidos)}</span>", unsafe_allow_html=True)
+                    st.caption(f"Total recebido desde compras: **R$ {fmt_num(divs_total_recebidos)}**")
+            with k4:
+                with st.container(border=True):
+                    cor_r = "#22c55e" if rent_total_pct >= 0 else "#ef4444"
+                    st.caption("📈 Rentabilidade (c/ dividendos)")
+                    st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_r};'>{rent_total_pct:+.2f}%</span>", unsafe_allow_html=True)
+                    st.caption(f"Variação pura do preço: **{var_cart_pct:+.2f}%**")
+
+            g_esq, g_dir = st.columns([1.8, 1])
+            with g_esq:
+                with st.container(border=True):
+                    st.markdown("**Evolução do Patrimônio (Últimos 12 Meses)**")
+                    fig_ev = go.Figure()
+                    fig_ev.add_trace(go.Bar(
+                        x=labels_mes, y=vals_aplicado, name="Valor aplicado",
+                        marker_color="#10b981", hovertemplate="Valor aplicado: R$ %{y:,.2f}<extra></extra>",
+                    ))
+                    fig_ev.add_trace(go.Bar(
+                        x=labels_mes, y=vals_ganho, name="Ganho de Capital",
+                        marker_color=["#6ee7b7" if g >= 0 else "#fca5a5" for g in vals_ganho],
+                        hovertemplate="Ganho de Capital: R$ %{y:,.2f}<extra></extra>",
+                    ))
+                    fig_ev.update_layout(
+                        barmode="relative", height=290, margin=dict(l=10, r=10, t=25, b=10),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.22)", tickprefix="R$ "),
+                        xaxis=dict(showgrid=False),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                    )
+                    st.plotly_chart(fig_ev, use_container_width=True)
+
+            with g_dir:
+                with st.container(border=True):
+                    modo_pizza = st.selectbox("Ativos na Carteira:", ["Por Ativo", "Por Setor"], index=0, label_visibility="collapsed")
+                    if modo_pizza == "Por Ativo":
+                        lbls = [x["ticker"] for x in itens_tabela_cart]
+                        vals = [x["saldo"] for x in itens_tabela_cart]
+                    else:
+                        lbls = list(valor_por_setor.keys())
+                        vals = list(valor_por_setor.values())
+                    fig_pz = go.Figure(data=[go.Pie(labels=lbls, values=vals, hole=0.52, textinfo="label+percent")])
+                    fig_pz.update_layout(
+                        title=f"Ativos na Carteira ({modo_pizza})",
+                        height=245, margin=dict(l=10, r=10, t=35, b=10),
+                        paper_bgcolor="rgba(0,0,0,0)", showlegend=False,
+                    )
+                    st.plotly_chart(fig_pz, use_container_width=True)
+
+            itens_tabela_cart.sort(key=lambda x: x["saldo"], reverse=True)
+            st.markdown(
+                f"#### 📋 Ações ({len(itens_tabela_cart)} ativos) — "
+                f"Valor total: **R$ {fmt_num(total_atual)}** | Variação: **{var_cart_pct:+.2f}%** | Rentabilidade: **{rent_total_pct:+.2f}%**"
             )
 
-        css_c = (
-            "<style>"
-            ".cart-wrap{width:100%;overflow-x:auto;}"
-            ".cart-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
-            ".cart-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
-            ".cart-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"
-            ".cart-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
-            "</style>"
-        )
-        html_c = (
-            f"{css_c}<div class='cart-wrap'><table class='cart-table'><thead><tr>"
-            "<th>Ativo / Setor</th><th>Posição<br><small>(Qtd | PM | Atual)</small></th>"
-            "<th>Saldo & Retorno<br><small>(Peso | Var. | Rent.)</small></th>"
-            "<th>Indicadores<br><small>(P/L | P/VP | ROE | DY)</small></th>"
-            "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
-            "<th>PT Médio (6a) & MS</th><th>PT Projetivo & MS</th>"
-            "<th>PT Bazin (12m) & MS</th><th>Graham & MS</th>"
-            f"</tr></thead><tbody>{''.join(rows_c)}</tbody></table></div>"
-        )
-        st.markdown(html_c, unsafe_allow_html=True)
+            rows_c = []
+            base_params_c = {"setor": filtro_setor, "liq": liq_label}
+            for r in itens_tabela_cart:
+                cot = r["cotacao"]
+                pct_cart = (r["saldo"] / total_atual * 100) if total_atual > 0 else 0.0
+                cor_var = "#22c55e" if r["var_pct"] >= 0 else "#ef4444"
+                cor_rent = "#22c55e" if r["rent_pct"] >= 0 else "#ef4444"
 
-        # Raio-X rápido dentro da Carteira
-        with st.expander("🔎 Abrir Gráfico & Histórico Fundamentalista de um ativo da carteira", expanded=False):
-            tk_c_sel = st.selectbox("Escolha o ativo da carteira:", options=[x["ticker"] for x in itens_tabela_cart], key="cart_raiox_sel")
-            it_c_sel = next(x for x in itens_tabela_cart if x["ticker"] == tk_c_sel)
-            render_grafico_e_tabela_ativo(tk_c_sel, it_c_sel["nome"], base_ativo=it_c_sel, key_prefix="cart_rx")
+                pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
+                if r["pvp"] is not None:
+                    cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
+                    pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {'🟢' if r['pvp'] < 1 else '🔴'}</span>"
+                else:
+                    pvp_html = "N/A"
+                roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
+                lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
+                vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
+                dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
+                dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
+                sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
 
-    # Formulário + Adicionar Lançamento e Gerenciar Lançamentos (Imagem 5)
-    st.markdown("---")
-    with st.expander("➕ Adicionar Lançamento (Compra / Venda)", expanded=not bool(posicoes_carteira)):
-        with st.form("form_lancamento", clear_on_submit=False):
-            l1, l2, l3, l4, l5, l6 = st.columns([1.1, 1.3, 1.1, 1.1, 1.1, 1])
-            with l1:
-                tipo_l = st.selectbox("Tipo:", ["Compra", "Venda"])
-            with l2:
-                tk_l = st.selectbox("Ativo:", options=tickers_b3, index=tickers_b3.index("CMIG4") if "CMIG4" in tickers_b3 else 0)
-            with l3:
-                dt_l = st.date_input("Data:", value=date.today())
-            with l4:
-                qtd_l = st.number_input("Quantidade:", min_value=1.0, value=100.0, step=10.0)
-            with l5:
-                px_l = st.number_input("Preço (R$):", min_value=0.01, value=10.00, step=0.25, format="%.2f")
-            with l6:
-                st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
-                ok_l = st.form_submit_button("Salvar", type="primary", use_container_width=True)
+                href_c = f"?{urlencode({**base_params_c, 'ativo': r['ticker']})}#raiox"
+                qtd_fmt = int(r["qtd"]) if float(r["qtd"]).is_integer() else r["qtd"]
 
-            if ok_l:
-                nova_lista = list(st.session_state["lancamentos"])
-                nova_lista.append({
-                    "ticker": tk_l,
-                    "qtd": float(qtd_l),
-                    "preco": float(px_l),
-                    "data": dt_l.strftime("%Y-%m-%d"),
-                    "tipo": "C" if tipo_l == "Compra" else "V",
-                })
-                st.session_state["lancamentos"] = nova_lista
-                st.query_params["carteira"] = serializar_lancamentos(nova_lista)
-                st.rerun()
-
-    with st.expander(f"🧾 Histórico de Lançamentos ({len(st.session_state['lancamentos'])}) & Backup CSV", expanded=False):
-        if st.session_state["lancamentos"]:
-            df_l = pd.DataFrame(st.session_state["lancamentos"])
-            st.dataframe(df_l, use_container_width=True)
-            c_del, c_limp, c_dl = st.columns([2, 1, 1.2])
-            with c_del:
-                op_del = [f"{i}: {x['data']} | {'Compra' if x['tipo']=='C' else 'Venda'} {x['qtd']:g} {x['ticker']} @ R$ {x['preco']:.2f}" for i, x in enumerate(st.session_state["lancamentos"])]
-                esc_del = st.selectbox("Excluir lançamento:", ["—"] + op_del)
-                if esc_del != "—" and st.button("🗑️ Excluir"):
-                    idx_d = int(esc_del.split(":")[0])
-                    st.session_state["lancamentos"].pop(idx_d)
-                    nv = serializar_lancamentos(st.session_state["lancamentos"])
-                    if nv:
-                        st.query_params["carteira"] = nv
-                    elif "carteira" in st.query_params:
-                        del st.query_params["carteira"]
-                    st.rerun()
-            with c_limp:
-                if st.button("🧹 Limpar Tudo"):
-                    st.session_state["lancamentos"] = []
-                    if "carteira" in st.query_params:
-                        del st.query_params["carteira"]
-                    st.rerun()
-            with c_dl:
-                st.download_button(
-                    "📥 Baixar CSV",
-                    data=df_l.to_csv(index=False).encode("utf-8"),
-                    file_name="lancamentos_carteira_b3.csv",
-                    mime="text/csv",
-                    use_container_width=True,
+                rows_c.append(
+                    "<tr>"
+                    f"<td><a href='{href_c}' target='_self' style='color:#60a5fa; text-decoration:none; font-weight:700;'>🔎 {r['ticker']}</a><br><small style='opacity:0.75;'>{html.escape(r['setor_t'])}</small><br><small>Score: <strong>{r['score']}</strong></small></td>"
+                    f"<td>Qtd: <strong>{qtd_fmt}</strong><br>PM: R$ {fmt_num(r['pm'])}<br>Atual: <strong>R$ {fmt_num(cot)}</strong></td>"
+                    f"<td>Saldo: <strong>R$ {fmt_num(r['saldo'])}</strong><br>Peso: {fmt_num(pct_cart, 1)}%<br>Var: <span style='color:{cor_var}; font-weight:600;'>{r['var_pct']:+.2f}%</span> | Rent: <span style='color:{cor_rent}; font-weight:600;'>{r['rent_pct']:+.2f}%</span></td>"
+                    f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt} | DY: {fmt_num(r['dy_12m'])}%</td>"
+                    f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
+                    f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
+                    f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
+                    f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
+                    f"<td>{html_preco_ms(r['graham'], cot)}</td>"
+                    "</tr>"
                 )
 
-        arq = st.file_uploader("📤 Importar Backup CSV (colunas: ticker, qtd, preco, data, tipo):", type=["csv"])
-        if arq is not None:
-            try:
-                df_imp = pd.read_csv(io.BytesIO(arq.getvalue()))
-                if {"ticker", "qtd"}.issubset(df_imp.columns):
-                    lista_imp = []
-                    hoje_iso = datetime.now(BRT).strftime("%Y-%m-%d")
-                    for _, row in df_imp.iterrows():
-                        t = str(row["ticker"]).strip().upper().replace(".SA", "")
-                        px_val = float(row["preco"]) if "preco" in df_imp.columns else float(row.get("pm", 0))
-                        dt_val = str(row["data"]) if "data" in df_imp.columns and pd.notna(row["data"]) else hoje_iso
-                        tp_val = str(row["tipo"]) if "tipo" in df_imp.columns and str(row["tipo"]) in ("C", "V") else "C"
-                        if t:
-                            lista_imp.append({"ticker": t, "qtd": float(row["qtd"]), "preco": px_val, "data": dt_val, "tipo": tp_val})
-                    st.session_state["lancamentos"] = lista_imp
-                    st.query_params["carteira"] = serializar_lancamentos(lista_imp)
-                    st.success("Lançamentos importados!")
+            css_c = (
+                "<style>"
+                ".cart-wrap{width:100%;overflow-x:auto;}"
+                ".cart-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
+                ".cart-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
+                ".cart-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"
+                ".cart-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+                "</style>"
+            )
+            html_c = (
+                f"{css_c}<div class='cart-wrap'><table class='cart-table'><thead><tr>"
+                "<th>Ativo / Setor</th><th>Posição<br><small>(Qtd | PM | Atual)</small></th>"
+                "<th>Saldo & Retorno<br><small>(Peso | Var. | Rent.)</small></th>"
+                "<th>Indicadores<br><small>(P/L | P/VP | ROE | DY)</small></th>"
+                "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
+                "<th>PT Médio (6a) & MS</th><th>PT Projetivo & MS</th>"
+                "<th>PT Bazin (12m) & MS</th><th>Graham & MS</th>"
+                f"</tr></thead><tbody>{''.join(rows_c)}</tbody></table></div>"
+            )
+            st.markdown(html_c, unsafe_allow_html=True)
+
+            with st.expander("🔎 Abrir Gráfico & Histórico Fundamentalista de um ativo da carteira", expanded=False):
+                tk_c_sel = st.selectbox("Escolha o ativo da carteira:", options=[x["ticker"] for x in itens_tabela_cart], key="cart_raiox_sel")
+                it_c_sel = next(x for x in itens_tabela_cart if x["ticker"] == tk_c_sel)
+                render_grafico_e_tabela_ativo(tk_c_sel, it_c_sel["nome"], base_ativo=it_c_sel, key_prefix="cart_rx")
+
+        # Lançamentos + Backup CSV
+        st.markdown("---")
+        with st.expander("➕ Adicionar Lançamento (Compra / Venda)", expanded=not bool(posicoes_carteira)):
+            with st.form("form_lancamento", clear_on_submit=False):
+                l1, l2, l3, l4, l5, l6 = st.columns([1.1, 1.3, 1.1, 1.1, 1.1, 1])
+                with l1:
+                    tipo_l = st.selectbox("Tipo:", ["Compra", "Venda"])
+                with l2:
+                    tk_l = st.selectbox("Ativo:", options=tickers_b3, index=tickers_b3.index("CMIG4") if "CMIG4" in tickers_b3 else 0)
+                with l3:
+                    dt_l = st.date_input("Data:", value=date.today())
+                with l4:
+                    qtd_l = st.number_input("Quantidade:", min_value=1.0, value=100.0, step=10.0)
+                with l5:
+                    px_l = st.number_input("Preço (R$):", min_value=0.01, value=10.00, step=0.25, format="%.2f")
+                with l6:
+                    st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
+                    ok_l = st.form_submit_button("Salvar", type="primary", use_container_width=True)
+
+                if ok_l:
+                    nova_lista = list(st.session_state["lancamentos"])
+                    nova_lista.append({
+                        "ticker": tk_l,
+                        "qtd": float(qtd_l),
+                        "preco": float(px_l),
+                        "data": dt_l.strftime("%Y-%m-%d"),
+                        "tipo": "C" if tipo_l == "Compra" else "V",
+                    })
+                    st.session_state["lancamentos"] = nova_lista
+                    salvar_dados_usuario_nuvem()
                     st.rerun()
-            except Exception as exc:
-                st.error(f"Arquivo inválido: {exc}")
+
+        with st.expander(f"🧾 Histórico de Lançamentos ({len(st.session_state['lancamentos'])}) & Backup CSV", expanded=False):
+            if st.session_state["lancamentos"]:
+                df_l = pd.DataFrame(st.session_state["lancamentos"])
+                st.dataframe(df_l, use_container_width=True)
+                c_del, c_limp, c_dl = st.columns([2, 1, 1.2])
+                with c_del:
+                    op_del = [f"{i}: {x['data']} | {'Compra' if x['tipo']=='C' else 'Venda'} {x['qtd']:g} {x['ticker']} @ R$ {x['preco']:.2f}" for i, x in enumerate(st.session_state["lancamentos"])]
+                    esc_del = st.selectbox("Excluir lançamento:", ["—"] + op_del)
+                    if esc_del != "—" and st.button("🗑️ Excluir"):
+                        idx_d = int(esc_del.split(":")[0])
+                        st.session_state["lancamentos"].pop(idx_d)
+                        salvar_dados_usuario_nuvem()
+                        st.rerun()
+                with c_limp:
+                    if st.button("🧹 Limpar Tudo"):
+                        st.session_state["lancamentos"] = []
+                        salvar_dados_usuario_nuvem()
+                        st.rerun()
+                with c_dl:
+                    st.download_button(
+                        "📥 Baixar CSV",
+                        data=df_l.to_csv(index=False).encode("utf-8"),
+                        file_name="lancamentos_carteira_b3.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+
+            arq = st.file_uploader("📤 Importar Backup CSV (colunas: ticker, qtd, preco, data, tipo):", type=["csv"])
+            if arq is not None:
+                try:
+                    df_imp = pd.read_csv(io.BytesIO(arq.getvalue()))
+                    if {"ticker", "qtd"}.issubset(df_imp.columns):
+                        lista_imp = []
+                        hoje_iso = datetime.now(BRT).strftime("%Y-%m-%d")
+                        for _, row in df_imp.iterrows():
+                            t = str(row["ticker"]).strip().upper().replace(".SA", "")
+                            px_val = float(row["preco"]) if "preco" in df_imp.columns else float(row.get("pm", 0))
+                            dt_val = str(row["data"]) if "data" in df_imp.columns and pd.notna(row["data"]) else hoje_iso
+                            tp_val = str(row["tipo"]) if "tipo" in df_imp.columns and str(row["tipo"]) in ("C", "V") else "C"
+                            if t:
+                                lista_imp.append({"ticker": t, "qtd": float(row["qtd"]), "preco": px_val, "data": dt_val, "tipo": tp_val})
+                        st.session_state["lancamentos"] = lista_imp
+                        salvar_dados_usuario_nuvem()
+                        st.success("Lançamentos importados e salvos na sua conta!")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Arquivo inválido: {exc}")
 
 st.divider()
 st.caption("Aviso: Estudo quantitativo e educacional com dados obtidos via Fundamentus e Yahoo Finance. Não constitui recomendação oficial de compra ou venda.")

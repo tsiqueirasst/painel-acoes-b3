@@ -4,12 +4,15 @@ import html
 import io
 import json
 import math
+import re
 import secrets
 import xml.etree.ElementTree as ET
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
+
 import pandas as pd
 import plotly.graph_objects as go
 import requests
@@ -226,7 +229,7 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
     return out
 
 
-# --- DADOS B3 (FUNDAMENTUS & YAHOO) ---
+# --- DADOS B3 (FUNDAMENTUS, CVM & YAHOO) ---
 @st.cache_data(ttl=86400, show_spinner=False)
 def carregar_setores_fundamentus() -> dict[str, str]:
     url = "https://www.fundamentus.com.br/buscaavancada.php"
@@ -301,6 +304,374 @@ def buscar_cambio_brl(moeda: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
+# --- MOTOR CVM DADOS ABERTOS (DFP + ITR) ---
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_mapa_cvm_tickers() -> tuple[dict[str, str], dict[str, str]]:
+    """Retorna (mapa_ticker_para_cnpj, mapa_cd_cvm_para_cnpj)."""
+    ano_atual = datetime.now(BRT).year
+    mapa_tk: dict[str, str] = {}
+    mapa_cod: dict[str, str] = {}
+    pat_tk = re.compile(r"^[A-Z]{4}\d{1,2}$")
+
+    for ano in (ano_atual, ano_atual - 1, ano_atual - 2):
+        try:
+            url = f"https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FCA/DADOS/fca_cia_aberta_{ano}.zip"
+            resp = requests.get(url, headers=HEADERS, timeout=25)
+            if resp.status_code != 200:
+                continue
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                alvos = [n for n in zf.namelist() if "valor_mobiliario" in n.lower() and n.lower().endswith(".csv")]
+                if not alvos:
+                    continue
+                with zf.open(alvos[0]) as f:
+                    df = pd.read_csv(f, sep=";", encoding="latin-1", dtype=str)
+                col_map = {c.lower(): c for c in df.columns}
+                c_tk = col_map.get("codigo_negociacao")
+                c_cnpj = col_map.get("cnpj_companhia")
+                c_fim = col_map.get("data_fim_negociacao")
+                c_ref = col_map.get("data_referencia")
+                if not c_tk or not c_cnpj:
+                    continue
+                if c_ref:
+                    df = df.sort_values(c_ref, ascending=True)
+                for _, row in df.iterrows():
+                    tk_val = str(row.get(c_tk) or "").strip().upper()
+                    cnpj_val = str(row.get(c_cnpj) or "").strip()
+                    if not pat_tk.match(tk_val) or not cnpj_val:
+                        continue
+                    fim_val = str(row.get(c_fim) or "").strip() if c_fim else ""
+                    if fim_val and fim_val < f"{ano - 1}-01-01" and tk_val in mapa_tk:
+                        continue
+                    mapa_tk[tk_val] = cnpj_val
+            if mapa_tk:
+                break
+        except Exception:
+            continue
+
+    try:
+        resp_cad = requests.get(
+            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv",
+            headers=HEADERS,
+            timeout=20,
+        )
+        if resp_cad.status_code == 200:
+            df_cad = pd.read_csv(
+                io.BytesIO(resp_cad.content),
+                sep=";",
+                encoding="latin-1",
+                dtype=str,
+                usecols=lambda c: c in {"CNPJ_CIA", "CD_CVM", "SIT"},
+            )
+            for _, row in df_cad.iterrows():
+                cnpj_c = str(row.get("CNPJ_CIA") or "").strip()
+                cd_c = str(row.get("CD_CVM") or "").strip().lstrip("0")
+                if cnpj_c and cd_c:
+                    mapa_cod[cd_c] = cnpj_c
+    except Exception:
+        pass
+
+    return mapa_tk, mapa_cod
+
+
+def _ler_df_cvm_zip(zf: zipfile.ZipFile, padrao_nome: str, tipo_doc: str) -> pd.DataFrame:
+    alvos = [n for n in zf.namelist() if padrao_nome in n and n.lower().endswith(".csv")]
+    if not alvos:
+        return pd.DataFrame()
+    nome_csv = alvos[0]
+
+    with zf.open(nome_csv) as f_head:
+        cols_disp = list(pd.read_csv(f_head, sep=";", encoding="latin-1", nrows=0).columns)
+
+    desejadas = ["CNPJ_CIA", "VERSAO", "DT_REFER", "DT_INI_EXERC", "DT_FIM_EXERC", "ORDEM_EXERC", "CD_CONTA", "DS_CONTA", "VL_CONTA", "ESCALA_MOEDA"]
+    usecols = [c for c in desejadas if c in cols_disp]
+    dtype_map = {c: str for c in usecols if c not in ("VERSAO", "VL_CONTA")}
+
+    partes = []
+    with zf.open(nome_csv) as f:
+        for chunk in pd.read_csv(f, sep=";", encoding="latin-1", usecols=usecols, dtype=dtype_map, chunksize=100_000):
+            if "ORDEM_EXERC" in chunk.columns:
+                chunk = chunk[chunk["ORDEM_EXERC"] == "ÚLTIMO"]
+            if chunk.empty:
+                continue
+
+            cd = chunk["CD_CONTA"].fillna("").str.strip()
+            ds = chunk["DS_CONTA"].fillna("").str.lower()
+
+            if tipo_doc == "DRE":
+                mask = cd.isin({"3.01", "3.03", "3.05", "3.11", "3.11.01", "3.13"}) | (
+                    (cd.str.len() <= 7) & cd.str.startswith("3.") & ds.str.contains("lucro|preju|resultado líq|resultado liq", regex=True)
+                )
+            elif tipo_doc == "BPA":
+                mask = cd.isin({"1.01.01", "1.01.02"})
+            elif tipo_doc == "BPP":
+                mask = cd.isin({"2.01.04", "2.02.01", "2.03", "2.03.09", "2.07", "2.07.01", "2.07.02"}) | (
+                    (cd.str.len() <= 7) & cd.str.startswith("2.") & ds.str.contains("patrimônio l|patrimonio l", regex=True)
+                )
+            elif tipo_doc == "DFC_MI":
+                mask = cd.str.startswith("6.01") & ds.str.contains("deprecia|amortiza|exaust", regex=True)
+            else:
+                mask = pd.Series(False, index=chunk.index)
+
+            sub = chunk[mask].copy()
+            if sub.empty:
+                continue
+            sub["CD_CONTA"] = cd[mask]
+            sub["DS_CONTA"] = sub["DS_CONTA"].fillna("").str.strip()
+            sub["CNPJ_CIA"] = sub["CNPJ_CIA"].fillna("").str.strip()
+            sub["VL_CONTA"] = pd.to_numeric(sub["VL_CONTA"], errors="coerce")
+            sub = sub.dropna(subset=["VL_CONTA"])
+            if "ESCALA_MOEDA" in sub.columns:
+                mult = sub["ESCALA_MOEDA"].fillna("").str.upper().map(lambda x: 1000.0 if x == "MIL" else 1.0)
+                sub["VL_CONTA"] = sub["VL_CONTA"] * mult
+            else:
+                sub["VL_CONTA"] = sub["VL_CONTA"] * 1000.0
+            if "VERSAO" in sub.columns:
+                sub["VERSAO"] = pd.to_numeric(sub["VERSAO"], errors="coerce").fillna(1)
+            else:
+                sub["VERSAO"] = 1
+            partes.append(sub)
+
+    if not partes:
+        return pd.DataFrame()
+    return pd.concat(partes, ignore_index=True)
+
+
+def _consolidar_registros_cvm(df_con: pd.DataFrame, df_ind: pd.DataFrame, eh_fluxo: bool = False) -> dict[tuple[str, str], dict]:
+    """Agrupa registros por (CNPJ_CIA, DT_REFER) mantendo consolidado > individual e última versão."""
+    out: dict[tuple[str, str], dict] = {}
+    for prioridade, df in ((1, df_ind), (2, df_con)):
+        if df is None or df.empty:
+            continue
+        if eh_fluxo and "DT_INI_EXERC" in df.columns and "DT_FIM_EXERC" in df.columns:
+            dt_ini = pd.to_datetime(df["DT_INI_EXERC"], errors="coerce")
+            dt_fim = pd.to_datetime(df["DT_FIM_EXERC"], errors="coerce")
+            df = df.assign(_span=(dt_fim - dt_ini).dt.days.fillna(0))
+            df = df.sort_values(["VERSAO", "_span"], ascending=[True, True])
+        else:
+            df = df.sort_values("VERSAO", ascending=True)
+
+        # Para cada (CNPJ, DT_REFER, CD_CONTA) a última linha (maior VERSAO e maior _span YTD) vence
+        df = df.drop_duplicates(subset=["CNPJ_CIA", "DT_REFER", "CD_CONTA"], keep="last")
+
+        for row in df.itertuples(index=False):
+            key = (row.CNPJ_CIA, row.DT_REFER)
+            if key not in out:
+                out[key] = {"_prio": prioridade, "contas": {}}
+            elif prioridade < out[key]["_prio"]:
+                continue
+            elif prioridade > out[key]["_prio"]:
+                out[key] = {"_prio": prioridade, "contas": {}}
+            out[key]["contas"][row.CD_CONTA] = (row.DS_CONTA, float(row.VL_CONTA))
+    return out
+
+
+def _extrair_metricas_periodo(dre_c: dict, bpa_c: dict, bpp_c: dict, dfc_c: dict) -> dict | None:
+    def _val(contas: dict, cd: str) -> float | None:
+        it = contas.get(cd)
+        return it[1] if it is not None else None
+
+    def _ds(contas: dict, cd: str) -> str:
+        it = contas.get(cd)
+        return it[0].lower() if it is not None else ""
+
+    rec = _val(dre_c, "3.01")
+    lbr = _val(dre_c, "3.03")
+    ebit = _val(dre_c, "3.05")
+
+    lliq = None
+    for cand_ll in ("3.11", "3.13", "3.11.01"):
+        if cand_ll in dre_c:
+            ds_ll = _ds(dre_c, cand_ll)
+            if any(k in ds_ll for k in ("lucro", "preju", "resultado")):
+                lliq = _val(dre_c, cand_ll)
+                break
+    if lliq is None:
+        for cd_k, (ds_k, vl_k) in dre_c.items():
+            d_low = ds_k.lower()
+            if "lucro" in d_low or "preju" in d_low:
+                if "consolidado" in d_low or "do período" in d_low or "do periodo" in d_low:
+                    lliq = vl_k
+                    break
+
+    if rec is None and lliq is None and not bpp_c:
+        return None
+
+    # Patrimônio Líquido (compatível com empresas padrão 2.03 e bancos IFRS 9 2.07)
+    patr = None
+    # 1) Conta específica "Patrimônio Líquido Atribuído aos Controladores" (ex: 2.07.01)
+    for cd_k, (ds_k, vl_k) in sorted(bpp_c.items()):
+        d_low = ds_k.lower()
+        if ("patrimônio l" in d_low or "patrimonio l" in d_low) and ("controlador" in d_low) and ("não" not in d_low and "nao" not in d_low):
+            patr = vl_k
+            break
+    # 2) Conta 2.07 ou 2.03 desde que a descrição seja de fato Patrimônio Líquido (não Provisões)
+    if patr is None:
+        for cd_base, cd_nc in (("2.07", "2.07.02"), ("2.03", "2.03.09")):
+            if cd_base in bpp_c and "patrim" in _ds(bpp_c, cd_base):
+                pl_tot = _val(bpp_c, cd_base)
+                pl_nc = _val(bpp_c, cd_nc)
+                if pl_nc is not None and "não control" in _ds(bpp_c, cd_nc).replace("nao", "não"):
+                    patr = pl_tot - pl_nc
+                else:
+                    patr = pl_tot
+                break
+    # 3) Fallback por descrição contendo patrimônio líquido
+    if patr is None:
+        for cd_k, (ds_k, vl_k) in sorted(bpp_c.items()):
+            d_low = ds_k.lower()
+            if ("patrimônio l" in d_low or "patrimonio l" in d_low) and ("não control" not in d_low and "nao control" not in d_low):
+                patr = vl_k
+                break
+
+    # Dívida Líquida = (Empréstimos & Financiamentos CP + LP, que já incluem arrendamentos na CVM) - (Caixa + Aplicações)
+    div_cp = _val(bpp_c, "2.01.04")
+    div_lp = _val(bpp_c, "2.02.01")
+    cx1 = _val(bpa_c, "1.01.01")
+    cx2 = _val(bpa_c, "1.01.02")
+    div_liq = None
+    if div_cp is not None or div_lp is not None:
+        div_bruta = (div_cp or 0.0) + (div_lp or 0.0)
+        disp = (cx1 or 0.0) + (cx2 or 0.0)
+        div_liq = div_bruta - disp
+
+    # Depreciação & Amortização (DFC_MI) evitando dupla contagem entre conta pai e conta filha
+    da = None
+    if dfc_c:
+        cods_ord = sorted(dfc_c.keys(), key=lambda x: (len(x), x))
+        mantidos = []
+        for c in cods_ord:
+            if not any(c.startswith(m + ".") for m in mantidos):
+                mantidos.append(c)
+        soma_da = sum(dfc_c[c][1] for c in mantidos)
+        if soma_da < 0 and ebit is not None and ebit > 0:
+            soma_da = abs(soma_da)
+        da = soma_da
+
+    ebitda = (ebit + da) if (ebit is not None and da is not None) else None
+
+    return {
+        "rec": rec,
+        "lbr": lbr,
+        "ebit": ebit,
+        "lliq": lliq,
+        "patr": patr,
+        "div_liq": div_liq,
+        "da": da,
+        "ebitda": ebitda,
+    }
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_cvm_doc_ano(tipo: str, ano: int) -> dict[tuple[str, str], dict]:
+    """Baixa e resume DFP ou ITR de um ano da CVM por (CNPJ_CIA, DT_REFER)."""
+    base = "DFP" if tipo == "DFP" else "ITR"
+    url = f"https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{base}/DADOS/{tipo.lower()}_cia_aberta_{ano}.zip"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=45)
+        if resp.status_code != 200:
+            return {}
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            pref = f"{tipo.lower()}_cia_aberta"
+            dre_m = _consolidar_registros_cvm(
+                _ler_df_cvm_zip(zf, f"{pref}_DRE_con", "DRE"),
+                _ler_df_cvm_zip(zf, f"{pref}_DRE_ind", "DRE"),
+                eh_fluxo=True,
+            )
+            bpa_m = _consolidar_registros_cvm(
+                _ler_df_cvm_zip(zf, f"{pref}_BPA_con", "BPA"),
+                _ler_df_cvm_zip(zf, f"{pref}_BPA_ind", "BPA"),
+                eh_fluxo=False,
+            )
+            bpp_m = _consolidar_registros_cvm(
+                _ler_df_cvm_zip(zf, f"{pref}_BPP_con", "BPP"),
+                _ler_df_cvm_zip(zf, f"{pref}_BPP_ind", "BPP"),
+                eh_fluxo=False,
+            )
+            dfc_m = _consolidar_registros_cvm(
+                _ler_df_cvm_zip(zf, f"{pref}_DFC_MI_con", "DFC_MI"),
+                _ler_df_cvm_zip(zf, f"{pref}_DFC_MI_ind", "DFC_MI"),
+                eh_fluxo=True,
+            )
+
+        chaves = set(dre_m.keys()) | set(bpp_m.keys())
+        resumo: dict[tuple[str, str], dict] = {}
+        for k in chaves:
+            met = _extrair_metricas_periodo(
+                dre_m.get(k, {}).get("contas", {}),
+                bpa_m.get(k, {}).get("contas", {}),
+                bpp_m.get(k, {}).get("contas", {}),
+                dfc_m.get(k, {}).get("contas", {}),
+            )
+            if met is not None:
+                resumo[k] = met
+        return resumo
+    except Exception:
+        return {}
+
+
+def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dict], dict | None]:
+    """Retorna (anuais_por_ano, ttm_cvm) direto da CVM em R$."""
+    mapa_tk, mapa_cod = carregar_mapa_cvm_tickers()
+    cnpj = mapa_tk.get(ticker)
+    if not cnpj:
+        return {}, None
+
+    ano_atual = datetime.now(BRT).year
+    anos_dfp = list(range(ano_atual - 5, ano_atual + 1))
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        dfps_lista = list(ex.map(lambda a: (a, carregar_cvm_doc_ano("DFP", a)), anos_dfp))
+
+    anuais: dict[int, dict] = {}
+    for _, dados_ano in dfps_lista:
+        for (c_cnpj, dt_ref), met in dados_ano.items():
+            if c_cnpj == cnpj:
+                yr = int(str(dt_ref)[:4])
+                anuais[yr] = met
+
+    if not anuais:
+        return {}, None
+
+    # TTM via CVM: DFP(último_ano) + ITR_atual - ITR_mesmo_trimestre_ano_anterior
+    ttm_cvm = None
+    ult_yr = max(anuais.keys())
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_curr = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr + 1)
+        fut_prev = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr)
+        itr_curr = fut_curr.result()
+        itr_prev = fut_prev.result()
+
+    datas_curr = sorted([dt_ref for (c_cnpj, dt_ref) in itr_curr.keys() if c_cnpj == cnpj])
+    if datas_curr:
+        dt_ult_itr = datas_curr[-1]
+        mm_dd = dt_ult_itr[4:]
+        dt_prev_itr = f"{ult_yr}{mm_dd}"
+        met_curr = itr_curr.get((cnpj, dt_ult_itr))
+        met_prev = itr_prev.get((cnpj, dt_prev_itr))
+        met_dfp = anuais.get(ult_yr)
+
+        if met_curr and met_prev and met_dfp:
+            def _ttm_flow(k: str) -> float | None:
+                v_dfp, v_c, v_p = met_dfp.get(k), met_curr.get(k), met_prev.get(k)
+                if v_dfp is not None and v_c is not None and v_p is not None:
+                    return v_dfp + v_c - v_p
+                return None
+
+            ebit_ttm = _ttm_flow("ebit")
+            da_ttm = _ttm_flow("da")
+            ebitda_ttm = (ebit_ttm + da_ttm) if (ebit_ttm is not None and da_ttm is not None) else _ttm_flow("ebitda")
+            ttm_cvm = {
+                "rec": _ttm_flow("rec"),
+                "lbr": _ttm_flow("lbr"),
+                "lliq": _ttm_flow("lliq"),
+                "ebitda": ebitda_ttm,
+                "patr": met_curr.get("patr"),
+                "div_liq": met_curr.get("div_liq"),
+            }
+
+    return anuais, ttm_cvm
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def carregar_todos_ativos_b3() -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
@@ -363,8 +734,6 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             if h5 is not None and not h5.empty:
                 cot_yf = float(h5["Close"].iloc[-1])
 
-        # Se financialCurrency for diferente de BRL (ex: PETR4/VALE3 em USD),
-        # usa None para LPA/VPA do Yahoo para priorizar os valores em BRL do Fundamentus
         fin_curr = (info.get("financialCurrency") or "BRL").upper()
         lpa = info.get("trailingEps") if fin_curr == "BRL" else None
         vpa = info.get("bookValue") if fin_curr == "BRL" else None
@@ -509,93 +878,41 @@ def buscar_historico_fundamentalista(
     pl_live: float | None = None,
     pvp_live: float | None = None,
     vpa_live: float | None = None,
-) -> tuple[list[dict], bool, str]:
+) -> tuple[list[dict], bool, str, str]:
     tk = yf.Ticker(f"{ticker}.SA")
     info = tk.info or {}
-    fin = tk.financials
-    bal = tk.balance_sheet
-    qfin = tk.quarterly_financials
-    qbal = tk.quarterly_balance_sheet
-
-    fin_curr = (info.get("financialCurrency") or "BRL").upper()
-    fx_series = buscar_cambio_brl(fin_curr) if fin_curr != "BRL" else pd.Series(dtype=float)
 
     det_fund = buscar_detalhes_fundamentus(ticker)
     setor_str = det_fund.get("Setor", "").lower()
     eh_banco_seg = any(k in setor_str for k in ("intermediários financeiros", "bancos", "previdência e seguros"))
 
-    hist_px = tk.history(period="6y", interval="1d", auto_adjust=False)
+    hist_px = tk.history(period="7y", interval="1d", auto_adjust=False)
     if not hist_px.empty:
         hist_px.index = pd.to_datetime(hist_px.index).tz_localize(None)
 
     acoes_fund = parse_br_num(det_fund.get("Nro. Ações"))
     acoes_info = acoes_fund or info.get("sharesOutstanding")
-    cot_atual = cot_live or parse_br_num(det_fund.get("Cotação")) or info.get("currentPrice") or info.get("regularMarketPrice")
+    cot_fund = parse_br_num(det_fund.get("Cotação"))
+    cot_atual = cot_live or cot_fund or info.get("currentPrice") or info.get("regularMarketPrice")
     if not cot_atual and not hist_px.empty:
         cot_atual = float(hist_px["Close"].iloc[-1])
 
-    linhas = []
+    # 1) Tenta buscar histórico oficial da CVM (DFP + ITR) em Reais (R$)
+    cvm_anuais, cvm_ttm = buscar_dados_cvm_empresa(ticker, det_fund)
+    linhas: list[dict] = []
+    fonte_anual = "CVM" if cvm_anuais else "Yahoo"
+    fin_curr = "BRL"
 
-    if fin is not None and not fin.empty:
-        cols_fin = sorted(list(fin.columns), key=lambda c: pd.to_datetime(c))
-        cols_bal = list(bal.columns) if (bal is not None and not bal.empty) else []
-
-        for col_f in cols_fin[-5:]:
-            ano = pd.to_datetime(col_f).year
-            col_b = next((cb for cb in cols_bal if pd.to_datetime(cb).year == ano), None)
-
-            # Taxas de câmbio para converter balanços estrangeiros (ex: PETR4/VALE3 em USD -> BRL)
-            fx_med = 1.0
-            fx_fim = 1.0
-            if fin_curr != "BRL" and not fx_series.empty:
-                sub_fx = fx_series[fx_series.index.year == ano]
-                if not sub_fx.empty:
-                    fx_med = float(sub_fx.mean())
-                    fx_fim = float(sub_fx.iloc[-1])
-                else:
-                    fx_med = float(fx_series.iloc[-1])
-                    fx_fim = fx_med
-
-            rec = _pick_row(fin, ["Total Revenue", "Operating Revenue"], col_f)
-            lbr = _pick_row(fin, ["Gross Profit"], col_f)
-            lliq = _pick_row(fin, ["Net Income", "Net Income Common Stockholders"], col_f)
-            ebitda = None
-            if not eh_banco_seg:
-                ebitda = _pick_row(fin, ["EBITDA", "Normalized EBITDA"], col_f)
-                if ebitda is None:
-                    ebit = _pick_row(fin, ["Operating Income", "EBIT"], col_f)
-                    dep = _pick_row(fin, ["Reconciled Depreciation", "Depreciation And Amortization"], col_f)
-                    if ebit is not None and dep is not None:
-                        ebitda = ebit + dep
-
-            if rec is None and lliq is None and ebitda is None:
-                continue
-
-            if rec is not None:
-                rec *= fx_med
-            if lbr is not None:
-                lbr *= fx_med
-            if lliq is not None:
-                lliq *= fx_med
-            if ebitda is not None:
-                ebitda *= fx_med
-
-            patr = _pick_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], col_b) if col_b is not None else None
-            if patr is not None:
-                patr *= fx_fim
-
-            div_liq = None
-            if not eh_banco_seg and col_b is not None:
-                div_liq = _pick_row(bal, ["Net Debt"], col_b)
-                if div_liq is None:
-                    div_tot = _pick_row(bal, ["Total Debt"], col_b)
-                    caixa = _pick_row(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_b)
-                    if div_tot is not None and caixa is not None:
-                        div_liq = div_tot - caixa
-                if div_liq is not None:
-                    div_liq *= fx_fim
-
-            acoes = (_pick_row(bal, ["Ordinary Shares Number", "Share Issued"], col_b) if col_b is not None else None) or acoes_info
+    if cvm_anuais:
+        anos_exibir = sorted(cvm_anuais.keys())[-4:]
+        for ano in anos_exibir:
+            met = cvm_anuais[ano]
+            rec = met.get("rec")
+            lbr = met.get("lbr")
+            lliq = met.get("lliq")
+            patr = met.get("patr")
+            div_liq = None if eh_banco_seg else met.get("div_liq")
+            ebitda = None if eh_banco_seg else met.get("ebitda")
 
             px_ano = None
             if not hist_px.empty:
@@ -603,57 +920,154 @@ def buscar_historico_fundamentalista(
                 if not sub.empty:
                     px_ano = float(sub["Close"].iloc[-1])
 
-            vpa = (patr / acoes) if (patr and acoes and acoes > 0) else None
-            val_merc = (px_ano * acoes) if (px_ano and acoes and acoes > 0) else None
+            vpa = (patr / acoes_info) if (patr and acoes_info and acoes_info > 0) else None
+            val_merc = (px_ano * acoes_info) if (px_ano and acoes_info and acoes_info > 0) else None
             pl = (val_merc / lliq) if (val_merc and lliq and lliq != 0) else None
             pvp = (val_merc / patr) if (val_merc and patr and patr != 0) else None
             pebitda = (val_merc / ebitda) if (not eh_banco_seg and val_merc and ebitda and ebitda != 0) else None
-            marg_liq = (lliq / rec * 100) if (lliq is not None and rec and rec != 0) else None
+            marg_liq = (lliq / rec * 100.0) if (lliq is not None and rec and rec != 0) else None
 
             linhas.append({
                 "ano": str(ano), "pl": pl, "pvp": pvp, "vpa": vpa, "div_liq": div_liq,
                 "marg_liq": marg_liq, "ebitda": ebitda, "pebitda": pebitda,
                 "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
             })
+    else:
+        # Fallback Yahoo Finance com auto-detecção de balanço em USD (mesmo quando info["financialCurrency"] diz "BRL")
+        fin = tk.financials
+        bal = tk.balance_sheet
+        fin_curr = (info.get("financialCurrency") or "BRL").upper()
 
-    # TTM (ÚLT. 12M) em BRL via Fundamentus (com fallback convertido se necessário)
-    fx_atual = float(fx_series.iloc[-1]) if (fin_curr != "BRL" and not fx_series.empty) else 1.0
-    rec_12 = parse_br_num(det_fund.get("Receita Líquida")) or (info.get("totalRevenue") * fx_atual if info.get("totalRevenue") else None)
-    lliq_12 = parse_br_num(det_fund.get("Lucro Líquido")) or (info.get("netIncomeToCommon") * fx_atual if info.get("netIncomeToCommon") else None)
+        if fin_curr == "BRL" and fin is not None and not fin.empty:
+            cols_f_chk = sorted(list(fin.columns), key=lambda c: pd.to_datetime(c))
+            rec_yf_chk = _pick_row(fin, ["Total Revenue", "Operating Revenue"], cols_f_chk[-1])
+            rec_fd_chk = parse_br_num(det_fund.get("Receita Líquida"))
+            if rec_yf_chk and rec_fd_chk and 3.5 <= (rec_fd_chk / rec_yf_chk) <= 8.0:
+                fin_curr = "USD"
+            elif bal is not None and not bal.empty:
+                cols_b_chk = sorted(list(bal.columns), key=lambda c: pd.to_datetime(c))
+                pl_yf_chk = _pick_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], cols_b_chk[-1])
+                pl_fd_chk = parse_br_num(det_fund.get("Patrim. Líq"))
+                if pl_yf_chk and pl_fd_chk and 3.5 <= (pl_fd_chk / pl_yf_chk) <= 8.0:
+                    fin_curr = "USD"
+
+        fx_series = buscar_cambio_brl(fin_curr) if fin_curr != "BRL" else pd.Series(dtype=float)
+
+        if fin is not None and not fin.empty:
+            cols_fin = sorted(list(fin.columns), key=lambda c: pd.to_datetime(c))
+            cols_bal = list(bal.columns) if (bal is not None and not bal.empty) else []
+
+            for col_f in cols_fin[-4:]:
+                ano = pd.to_datetime(col_f).year
+                col_b = next((cb for cb in cols_bal if pd.to_datetime(cb).year == ano), None)
+
+                fx_med, fx_fim = 1.0, 1.0
+                if fin_curr != "BRL" and not fx_series.empty:
+                    sub_fx = fx_series[fx_series.index.year == ano]
+                    if not sub_fx.empty:
+                        fx_med = float(sub_fx.mean())
+                        fx_fim = float(sub_fx.iloc[-1])
+                    else:
+                        fx_med = float(fx_series.iloc[-1])
+                        fx_fim = fx_med
+
+                rec = _pick_row(fin, ["Total Revenue", "Operating Revenue"], col_f)
+                lbr = _pick_row(fin, ["Gross Profit"], col_f)
+                lliq = _pick_row(fin, ["Net Income", "Net Income Common Stockholders"], col_f)
+                ebitda = None
+                if not eh_banco_seg:
+                    ebitda = _pick_row(fin, ["EBITDA", "Normalized EBITDA"], col_f)
+                    if ebitda is None:
+                        ebit = _pick_row(fin, ["Operating Income", "EBIT"], col_f)
+                        dep = _pick_row(fin, ["Reconciled Depreciation", "Depreciation And Amortization"], col_f)
+                        if ebit is not None and dep is not None:
+                            ebitda = ebit + dep
+
+                if rec is None and lliq is None and ebitda is None:
+                    continue
+
+                if rec is not None:
+                    rec *= fx_med
+                if lbr is not None:
+                    lbr *= fx_med
+                if lliq is not None:
+                    lliq *= fx_med
+                if ebitda is not None:
+                    ebitda *= fx_med
+
+                patr = _pick_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], col_b) if col_b is not None else None
+                if patr is not None:
+                    patr *= fx_fim
+
+                div_liq = None
+                if not eh_banco_seg and col_b is not None:
+                    div_liq = _pick_row(bal, ["Net Debt"], col_b)
+                    if div_liq is None:
+                        div_tot = _pick_row(bal, ["Total Debt"], col_b)
+                        caixa = _pick_row(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_b)
+                        if div_tot is not None and caixa is not None:
+                            div_liq = div_tot - caixa
+                    if div_liq is not None:
+                        div_liq *= fx_fim
+
+                acoes = acoes_fund or (_pick_row(bal, ["Ordinary Shares Number", "Share Issued"], col_b) if col_b is not None else None) or acoes_info
+                px_ano = None
+                if not hist_px.empty:
+                    sub = hist_px[hist_px.index.year == ano]
+                    if not sub.empty:
+                        px_ano = float(sub["Close"].iloc[-1])
+
+                vpa = (patr / acoes) if (patr and acoes and acoes > 0) else None
+                val_merc = (px_ano * acoes) if (px_ano and acoes and acoes > 0) else None
+                pl = (val_merc / lliq) if (val_merc and lliq and lliq != 0) else None
+                pvp = (val_merc / patr) if (val_merc and patr and patr != 0) else None
+                pebitda = (val_merc / ebitda) if (not eh_banco_seg and val_merc and ebitda and ebitda != 0) else None
+                marg_liq = (lliq / rec * 100) if (lliq is not None and rec and rec != 0) else None
+
+                linhas.append({
+                    "ano": str(ano), "pl": pl, "pvp": pvp, "vpa": vpa, "div_liq": div_liq,
+                    "marg_liq": marg_liq, "ebitda": ebitda, "pebitda": pebitda,
+                    "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
+                })
+
+    # 2) Linha ÚLT. 12M (combina CVM TTM + Fundamentus para precisão máxima em bancos e não bancos)
+    fx_atual = 1.0
+    if fin_curr != "BRL":
+        fx_s = buscar_cambio_brl(fin_curr)
+        if not fx_s.empty:
+            fx_atual = float(fx_s.iloc[-1])
+
+    rec_fund_12 = parse_br_num(det_fund.get("Receita Líquida"))
+    lliq_fund_12 = parse_br_num(det_fund.get("Lucro Líquido"))
     marg_br_pct = parse_br_num(det_fund.get("Marg. Bruta"))
-    lbr_12 = (rec_12 * marg_br_pct / 100.0) if (rec_12 is not None and marg_br_pct is not None) else (info.get("grossProfits") * fx_atual if info.get("grossProfits") else None)
+    lbr_fund_12 = (rec_fund_12 * marg_br_pct / 100.0) if (rec_fund_12 is not None and marg_br_pct is not None) else None
 
-    if qfin is not None and not qfin.empty and (rec_12 is None or lliq_12 is None):
-        qcols = sorted(list(qfin.columns), key=lambda c: pd.to_datetime(c), reverse=True)[:4]
-        if len(qcols) >= 4:
-            def _sum_q(cands):
-                vals = [_pick_row(qfin, cands, c) for c in qcols]
-                valid = [v for v in vals if v is not None]
-                return sum(valid) * fx_atual if len(valid) == 4 else None
-            rec_12 = rec_12 or _sum_q(["Total Revenue", "Operating Revenue"])
-            lbr_12 = lbr_12 or _sum_q(["Gross Profit"])
-            lliq_12 = lliq_12 or _sum_q(["Net Income", "Net Income Common Stockholders"])
+    if eh_banco_seg and cvm_ttm:
+        rec_12 = cvm_ttm.get("rec") or rec_fund_12
+        lbr_12 = cvm_ttm.get("lbr") or lbr_fund_12
+        lliq_12 = cvm_ttm.get("lliq") or lliq_fund_12
+    else:
+        rec_12 = rec_fund_12 or (cvm_ttm.get("rec") if cvm_ttm else None) or (info.get("totalRevenue") * fx_atual if info.get("totalRevenue") else None)
+        lbr_12 = lbr_fund_12 or (cvm_ttm.get("lbr") if cvm_ttm else None) or (info.get("grossProfits") * fx_atual if info.get("grossProfits") else None)
+        lliq_12 = lliq_fund_12 or (cvm_ttm.get("lliq") if cvm_ttm else None) or (info.get("netIncomeToCommon") * fx_atual if info.get("netIncomeToCommon") else None)
 
     marg_12 = parse_br_num(det_fund.get("Marg. Líquida"))
-    if marg_12 is None and lliq_12 is not None and rec_12 and rec_12 != 0:
+    if (marg_12 is None or (eh_banco_seg and marg_12 == 0.0)) and lliq_12 is not None and rec_12 and rec_12 != 0:
         marg_12 = (lliq_12 / rec_12) * 100.0
 
     val_merc_fund = parse_br_num(det_fund.get("Valor de mercado"))
     val_firma_fund = parse_br_num(det_fund.get("Valor da firma"))
     ev_ebitda_fund = parse_br_num(det_fund.get("EV / EBITDA"))
-    div_liq_12 = None if eh_banco_seg else parse_br_num(det_fund.get("Dív. Líquida"))
+    div_liq_12 = None if eh_banco_seg else (parse_br_num(det_fund.get("Dív. Líquida")) if det_fund.get("Dív. Líquida") is not None else (cvm_ttm.get("div_liq") if cvm_ttm else None))
 
     ebitda_12 = None
     if not eh_banco_seg:
         if val_firma_fund and ev_ebitda_fund and ev_ebitda_fund != 0:
             ebitda_12 = val_firma_fund / ev_ebitda_fund
+        elif cvm_ttm and cvm_ttm.get("ebitda") is not None:
+            ebitda_12 = cvm_ttm.get("ebitda")
         elif info.get("ebitda"):
             ebitda_12 = info.get("ebitda") * fx_atual
-
-    if div_liq_12 is None and not eh_banco_seg and qbal is not None and not qbal.empty:
-        col_qb = sorted(list(qbal.columns), key=lambda c: pd.to_datetime(c), reverse=True)[0]
-        dl_raw = _pick_row(qbal, ["Net Debt"], col_qb)
-        div_liq_12 = (dl_raw * fx_atual) if dl_raw is not None else None
 
     vpa_12 = parse_br_num(det_fund.get("VPA")) or vpa_live
     pl_12 = parse_br_num(det_fund.get("P/L")) or pl_live
@@ -667,21 +1081,25 @@ def buscar_historico_fundamentalista(
         "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
     })
 
+    # 3) Linha ATUAL (recalculada pela cotação vigente)
     cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
     val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
+    pl_atual = (val_merc_atual / lliq_12) if (val_merc_atual and lliq_12 and lliq_12 != 0) else (pl_live if pl_live is not None else pl_12)
+    patr_atual = parse_br_num(det_fund.get("Patrim. Líq")) or ((vpa_12 * acoes_info) if (vpa_12 and acoes_info) else None)
+    pvp_atual = (val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else (pvp_live if pvp_live is not None else pvp_12)
     pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
 
     linhas.append({
         "ano": f"ATUAL{cot_txt}",
-        "pl": pl_live if pl_live is not None else pl_12,
-        "pvp": pvp_live if pvp_live is not None else pvp_12,
+        "pl": pl_atual,
+        "pvp": pvp_atual,
         "vpa": vpa_live if vpa_live is not None else vpa_12,
         "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_12,
         "pebitda": pebitda_atual, "val_merc": val_merc_atual,
         "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
     })
 
-    return linhas, eh_banco_seg, fin_curr
+    return linhas, eh_banco_seg, fin_curr, fonte_anual
 
 
 def toggle_favorito(ticker: str):
@@ -793,13 +1211,14 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
                 )
 
     st.markdown(f"#### 📑 Histórico Fundamentalista — {ticker}")
-    hist_fund, eh_banco, fin_curr = buscar_historico_fundamentalista(
-        ticker,
-        cot_live=base_ativo.get("cotacao") if base_ativo else None,
-        pl_live=base_ativo.get("pl") if base_ativo else None,
-        pvp_live=base_ativo.get("pvp") if base_ativo else None,
-        vpa_live=base_ativo.get("vpa") if base_ativo else None,
-    )
+    with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
+        hist_fund, eh_banco, fin_curr, fonte_anual = buscar_historico_fundamentalista(
+            ticker,
+            cot_live=base_ativo.get("cotacao") if base_ativo else None,
+            pl_live=base_ativo.get("pl") if base_ativo else None,
+            pvp_live=base_ativo.get("pvp") if base_ativo else None,
+            vpa_live=base_ativo.get("vpa") if base_ativo else None,
+        )
     if not hist_fund:
         st.info("Histórico anual detalhado indisponível para este ativo.")
     else:
@@ -839,9 +1258,13 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
             f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
         )
         st.markdown(html_h, unsafe_allow_html=True)
-        nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
+        if fonte_anual == "CVM":
+            nota_src = "Dados anuais oficiais da CVM (DFP/ITR) em R$, com VPA e Valor de mercado históricos ajustados por desdobramentos."
+        else:
+            nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
+            nota_src = f"VPA histórico ajustado por desdobramentos.{nota_fx}"
         nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`)." if eh_banco else ""
-        st.caption(f"Nota: VPA histórico ajustado por desdobramentos.{nota_fx}{nota_b}")
+        st.caption(f"Nota: {nota_src}{nota_b}")
 
 
 def calc_ms(preco_calc: float | None, cotacao: float) -> float | None:
@@ -1113,7 +1536,7 @@ usuario_atual = st.session_state.get("usuario_email")
 
 # --- INTERFACE PRINCIPAL ---
 st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
-st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual, notícias e carteira protegida por login.")
+st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
 
 try:
     with st.spinner("Carregando todos os ativos da B3..."):
@@ -1914,4 +2337,4 @@ with tab3:
                         st.error(f"Arquivo inválido: {exc}")
 
 st.divider()
-st.caption("Aviso: Estudo quantitativo e educacional com dados obtidos via Fundamentus e Yahoo Finance. Não constitui recomendação oficial de compra ou venda.")
+st.caption("Aviso: Estudo quantitativo e educacional com dados obtidos via Fundamentus, CVM Dados Abertos e Yahoo Finance. Não constitui recomendação oficial de compra ou venda.")

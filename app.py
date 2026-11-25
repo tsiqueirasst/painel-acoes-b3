@@ -143,8 +143,8 @@ def carregar_dados_usuario_nuvem(email: str):
         st.session_state["ms_favs"] = favs
         st.session_state["lancamentos"] = lancs
         st.session_state["nuvem_carregada_para"] = email.lower()
-    except Exception as exc:
-        st.warning(f"Não foi possível carregar dados da nuvem: {exc}")
+    except Exception:
+        st.warning("Não foi possível carregar dados da nuvem. Confira seu GITHUB_TOKEN e GIST_ID nos Secrets.")
 
 
 def salvar_dados_usuario_nuvem():
@@ -159,8 +159,8 @@ def salvar_dados_usuario_nuvem():
         u["lancamentos"] = st.session_state.get("lancamentos", [])
         db["usuarios"][em] = u
         salvar_db_gist(db, filename)
-    except Exception as exc:
-        st.error(f"Erro ao salvar na nuvem: {exc}")
+    except Exception:
+        st.error("Erro ao salvar na nuvem. Confira suas credenciais nos Secrets.")
 
 
 # --- DADOS B3 (FUNDAMENTUS & YAHOO) ---
@@ -195,6 +195,32 @@ def _ler_tabela_fundamentus(url: str) -> list[dict]:
         if len(celulas) == len(cabecalho):
             registros.append(dict(zip(cabecalho, celulas)))
     return registros
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def buscar_detalhes_fundamentus(ticker: str) -> dict:
+    try:
+        url = f"https://www.fundamentus.com.br/detalhes.php?papel={ticker}"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+        dados = {}
+        for tr in soup.find_all("tr"):
+            tds = tr.find_all("td")
+            i = 0
+            while i + 1 < len(tds):
+                cls_lbl = " ".join(tds[i].get("class", []))
+                if "label" in cls_lbl:
+                    lbl = tds[i].get_text(strip=True).lstrip("?").strip()
+                    val = tds[i + 1].get_text(strip=True)
+                    if lbl and lbl not in dados:
+                        dados[lbl] = val
+                    i += 2
+                else:
+                    i += 1
+        return dados
+    except Exception:
+        return {}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -395,7 +421,7 @@ def buscar_historico_fundamentalista(
     pl_live: float | None = None,
     pvp_live: float | None = None,
     vpa_live: float | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     tk = yf.Ticker(f"{ticker}.SA")
     info = tk.info or {}
     fin = tk.financials
@@ -403,12 +429,17 @@ def buscar_historico_fundamentalista(
     qfin = tk.quarterly_financials
     qbal = tk.quarterly_balance_sheet
 
+    det_fund = buscar_detalhes_fundamentus(ticker)
+    setor_str = det_fund.get("Setor", "").lower()
+    eh_banco_seg = any(k in setor_str for k in ("intermediários financeiros", "bancos", "previdência e seguros"))
+
     hist_px = tk.history(period="6y", interval="1d", auto_adjust=False)
     if not hist_px.empty:
         hist_px.index = pd.to_datetime(hist_px.index).tz_localize(None)
 
-    acoes_info = info.get("sharesOutstanding")
-    cot_atual = cot_live or info.get("currentPrice") or info.get("regularMarketPrice")
+    acoes_fund = parse_br_num(det_fund.get("Nro. Ações"))
+    acoes_info = acoes_fund or info.get("sharesOutstanding")
+    cot_atual = cot_live or parse_br_num(det_fund.get("Cotação")) or info.get("currentPrice") or info.get("regularMarketPrice")
     if not cot_atual and not hist_px.empty:
         cot_atual = float(hist_px["Close"].iloc[-1])
 
@@ -425,23 +456,27 @@ def buscar_historico_fundamentalista(
             rec = _pick_row(fin, ["Total Revenue", "Operating Revenue"], col_f)
             lbr = _pick_row(fin, ["Gross Profit"], col_f)
             lliq = _pick_row(fin, ["Net Income", "Net Income Common Stockholders"], col_f)
-            ebitda = _pick_row(fin, ["EBITDA", "Normalized EBITDA"], col_f)
-            if ebitda is None:
-                ebit = _pick_row(fin, ["Operating Income", "EBIT"], col_f)
-                dep = _pick_row(fin, ["Reconciled Depreciation", "Depreciation And Amortization"], col_f)
-                if ebit is not None and dep is not None:
-                    ebitda = ebit + dep
+            ebitda = None
+            if not eh_banco_seg:
+                ebitda = _pick_row(fin, ["EBITDA", "Normalized EBITDA"], col_f)
+                if ebitda is None:
+                    ebit = _pick_row(fin, ["Operating Income", "EBIT"], col_f)
+                    dep = _pick_row(fin, ["Reconciled Depreciation", "Depreciation And Amortization"], col_f)
+                    if ebit is not None and dep is not None:
+                        ebitda = ebit + dep
 
             if rec is None and lliq is None and ebitda is None:
                 continue
 
             patr = _pick_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], col_b) if col_b is not None else None
-            div_liq = _pick_row(bal, ["Net Debt"], col_b) if col_b is not None else None
-            if div_liq is None and col_b is not None:
-                div_tot = _pick_row(bal, ["Total Debt"], col_b)
-                caixa = _pick_row(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_b)
-                if div_tot is not None and caixa is not None:
-                    div_liq = div_tot - caixa
+            div_liq = None
+            if not eh_banco_seg and col_b is not None:
+                div_liq = _pick_row(bal, ["Net Debt"], col_b)
+                if div_liq is None:
+                    div_tot = _pick_row(bal, ["Total Debt"], col_b)
+                    caixa = _pick_row(bal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_b)
+                    if div_tot is not None and caixa is not None:
+                        div_liq = div_tot - caixa
 
             acoes = (_pick_row(bal, ["Ordinary Shares Number", "Share Issued"], col_b) if col_b is not None else None) or acoes_info
 
@@ -455,7 +490,7 @@ def buscar_historico_fundamentalista(
             val_merc = (px_ano * acoes) if (px_ano and acoes and acoes > 0) else None
             pl = (val_merc / lliq) if (val_merc and lliq and lliq != 0) else None
             pvp = (val_merc / patr) if (val_merc and patr and patr != 0) else None
-            pebitda = (val_merc / ebitda) if (val_merc and ebitda and ebitda != 0) else None
+            pebitda = (val_merc / ebitda) if (not eh_banco_seg and val_merc and ebitda and ebitda != 0) else None
             marg_liq = (lliq / rec * 100) if (lliq is not None and rec and rec != 0) else None
 
             linhas.append({
@@ -464,8 +499,11 @@ def buscar_historico_fundamentalista(
                 "val_merc": val_merc, "lliq": lliq, "lbr": lbr, "rec": rec, "is_atual": False,
             })
 
-    rec_12 = lbr_12 = lliq_12 = ebitda_12 = div_liq_12 = marg_12 = None
-    patr_12 = acoes_12 = vpa_12 = val_merc_12 = pl_12 = pvp_12 = pebitda_12 = None
+    # TTM (ÚLT. 12M) combinando Fundamentus oficial + fallback Yahoo Finance
+    rec_12 = parse_br_num(det_fund.get("Receita Líquida")) or info.get("totalRevenue")
+    lliq_12 = parse_br_num(det_fund.get("Lucro Líquido")) or info.get("netIncomeToCommon")
+    marg_br_pct = parse_br_num(det_fund.get("Marg. Bruta"))
+    lbr_12 = (rec_12 * marg_br_pct / 100.0) if (rec_12 is not None and marg_br_pct is not None) else info.get("grossProfits")
 
     if qfin is not None and not qfin.empty:
         qcols = sorted(list(qfin.columns), key=lambda c: pd.to_datetime(c), reverse=True)[:4]
@@ -474,51 +512,59 @@ def buscar_historico_fundamentalista(
                 vals = [_pick_row(qfin, cands, c) for c in qcols]
                 valid = [v for v in vals if v is not None]
                 return sum(valid) if len(valid) == 4 else None
+            rec_12 = rec_12 or _sum_q(["Total Revenue", "Operating Revenue"])
+            lbr_12 = lbr_12 or _sum_q(["Gross Profit"])
+            lliq_12 = lliq_12 or _sum_q(["Net Income", "Net Income Common Stockholders"])
 
-            rec_12 = _sum_q(["Total Revenue", "Operating Revenue"])
-            lbr_12 = _sum_q(["Gross Profit"])
-            lliq_12 = _sum_q(["Net Income", "Net Income Common Stockholders"])
-            ebitda_12 = _sum_q(["EBITDA", "Normalized EBITDA"])
+    marg_12 = parse_br_num(det_fund.get("Marg. Líquida"))
+    if marg_12 is None and lliq_12 is not None and rec_12 and rec_12 != 0:
+        marg_12 = (lliq_12 / rec_12) * 100.0
 
-            col_qb = sorted(list(qbal.columns), key=lambda c: pd.to_datetime(c), reverse=True)[0] if (qbal is not None and not qbal.empty) else None
-            patr_12 = _pick_row(qbal, ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"], col_qb) if col_qb is not None else None
-            div_liq_12 = _pick_row(qbal, ["Net Debt"], col_qb) if col_qb is not None else None
-            if div_liq_12 is None and col_qb is not None:
-                dt12 = _pick_row(qbal, ["Total Debt"], col_qb)
-                cx12 = _pick_row(qbal, ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"], col_qb)
-                if dt12 is not None and cx12 is not None:
-                    div_liq_12 = dt12 - cx12
-            acoes_12 = (_pick_row(qbal, ["Ordinary Shares Number", "Share Issued"], col_qb) if col_qb is not None else None) or acoes_info
+    val_merc_fund = parse_br_num(det_fund.get("Valor de mercado"))
+    val_firma_fund = parse_br_num(det_fund.get("Valor da firma"))
+    ev_ebitda_fund = parse_br_num(det_fund.get("EV / EBITDA"))
+    patr_12 = parse_br_num(det_fund.get("Patrim. Líq"))
+    div_liq_12 = None if eh_banco_seg else parse_br_num(det_fund.get("Dív. Líquida"))
 
-            vpa_12 = (patr_12 / acoes_12) if (patr_12 and acoes_12 and acoes_12 > 0) else info.get("bookValue")
-            val_merc_12 = info.get("marketCap") or ((cot_atual * acoes_12) if (cot_atual and acoes_12) else None)
-            pl_12 = (val_merc_12 / lliq_12) if (val_merc_12 and lliq_12 and lliq_12 != 0) else info.get("trailingPE")
-            pvp_12 = (val_merc_12 / patr_12) if (val_merc_12 and patr_12 and patr_12 != 0) else info.get("priceToBook")
-            pebitda_12 = (val_merc_12 / ebitda_12) if (val_merc_12 and ebitda_12 and ebitda_12 != 0) else None
-            marg_12 = (lliq_12 / rec_12 * 100) if (lliq_12 is not None and rec_12 and rec_12 != 0) else None
+    ebitda_12 = None
+    if not eh_banco_seg:
+        if val_firma_fund and ev_ebitda_fund and ev_ebitda_fund != 0:
+            ebitda_12 = val_firma_fund / ev_ebitda_fund
+        elif info.get("ebitda"):
+            ebitda_12 = info.get("ebitda")
 
-            linhas.append({
-                "ano": "ÚLT. 12M", "pl": pl_12, "pvp": pvp_12, "vpa": vpa_12, "div_liq": div_liq_12,
-                "marg_liq": marg_12, "ebitda": ebitda_12, "pebitda": pebitda_12,
-                "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
-            })
+    if div_liq_12 is None and not eh_banco_seg and qbal is not None and not qbal.empty:
+        col_qb = sorted(list(qbal.columns), key=lambda c: pd.to_datetime(c), reverse=True)[0]
+        div_liq_12 = _pick_row(qbal, ["Net Debt"], col_qb)
 
+    vpa_12 = parse_br_num(det_fund.get("VPA")) or vpa_live or info.get("bookValue")
+    pl_12 = parse_br_num(det_fund.get("P/L")) or pl_live or info.get("trailingPE")
+    pvp_12 = parse_br_num(det_fund.get("P/VP")) or pvp_live or info.get("priceToBook")
+    val_merc_12 = val_merc_fund or ((cot_atual * acoes_info) if (cot_atual and acoes_info) else info.get("marketCap"))
+    pebitda_12 = (val_merc_12 / ebitda_12) if (not eh_banco_seg and val_merc_12 and ebitda_12 and ebitda_12 != 0) else None
+
+    linhas.append({
+        "ano": "ÚLT. 12M", "pl": pl_12, "pvp": pvp_12, "vpa": vpa_12, "div_liq": div_liq_12,
+        "marg_liq": marg_12, "ebitda": ebitda_12, "pebitda": pebitda_12,
+        "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
+    })
+
+    # Linha ATUAL (ao vivo com a cotação de hoje)
     cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
-    val_merc_atual = info.get("marketCap") or ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
-    ebitda_ref = ebitda_12 or (linhas[-1]["ebitda"] if linhas else None)
-    pebitda_atual = (val_merc_atual / ebitda_ref) if (val_merc_atual and ebitda_ref and ebitda_ref != 0) else pebitda_12
+    val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
+    pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
 
     linhas.append({
         "ano": f"ATUAL{cot_txt}",
         "pl": pl_live if pl_live is not None else pl_12,
         "pvp": pvp_live if pvp_live is not None else pvp_12,
         "vpa": vpa_live if vpa_live is not None else vpa_12,
-        "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_ref,
+        "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_12,
         "pebitda": pebitda_atual, "val_merc": val_merc_atual,
         "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
     })
 
-    return linhas
+    return linhas, eh_banco_seg
 
 
 def toggle_favorito(ticker: str):
@@ -630,7 +676,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
                 )
 
     st.markdown(f"#### 📑 Histórico Fundamentalista — {ticker}")
-    hist_fund = buscar_historico_fundamentalista(
+    hist_fund, eh_banco = buscar_historico_fundamentalista(
         ticker,
         cot_live=base_ativo.get("cotacao") if base_ativo else None,
         pl_live=base_ativo.get("pl") if base_ativo else None,
@@ -638,7 +684,7 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
         vpa_live=base_ativo.get("vpa") if base_ativo else None,
     )
     if not hist_fund:
-        st.info("Histórico anual detalhado indisponível para este ativo no Yahoo Finance.")
+        st.info("Histórico anual detalhado indisponível para este ativo.")
     else:
         rows_h = []
         for h in hist_fund:
@@ -676,6 +722,8 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
             f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
         )
         st.markdown(html_h, unsafe_allow_html=True)
+        nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`), e os anos fechados seguem o critério IFRS do Yahoo Finance (enquanto `ÚLT. 12M` e `ATUAL` usam dados CVM/Fundamentus)." if eh_banco else ""
+        st.caption(f"Nota: VPA histórico ajustado por desdobramentos.{nota_b}")
 
 
 def calc_ms(preco_calc: float | None, cotacao: float) -> float | None:
@@ -811,8 +859,8 @@ def render_tela_login(key_prefix: str = "login"):
                             st.session_state["metodo_auth"] = "senha"
                             carregar_dados_usuario_nuvem(em)
                             st.rerun()
-                    except Exception as exc:
-                        st.error(f"Erro ao verificar login: {exc}")
+                    except Exception:
+                        st.error("Erro ao verificar login. Confira as credenciais do Gist nos Secrets.")
 
     with t_criar:
         with st.form(f"{key_prefix}_form_up"):
@@ -846,17 +894,16 @@ def render_tela_login(key_prefix: str = "login"):
                             carregar_dados_usuario_nuvem(em_n)
                             st.success("Conta criada com sucesso!")
                             st.rerun()
-                    except Exception as exc:
-                        st.error(f"Erro ao criar conta: {exc}")
+                    except Exception:
+                        st.error("Erro ao criar conta. Confira as credenciais do Gist nos Secrets.")
 
 
-# --- ESTADO INICIAL & SESSÃO DO USUÁRIO ---
+# --- ESTADO INICIAL & SESSÃO ---
 if "lancamentos" not in st.session_state:
     st.session_state["lancamentos"] = []
 if "favoritos" not in st.session_state:
     st.session_state["favoritos"] = []
 
-# Detecta login via Google SSO (st.login)
 try:
     if getattr(st.user, "is_logged_in", False) and getattr(st.user, "email", None):
         em_sso = st.user.email.lower()
@@ -900,7 +947,7 @@ with st.sidebar:
                 st.logout()
             st.rerun()
     else:
-        st.info("Modo visitante. Faça login na aba **💼 Minha Carteira** para proteger e salvar seus dados na nuvem.")
+        st.info("Modo visitante. Faça login na aba **🔒 Minha Carteira** para proteger e salvar seus dados na nuvem.")
 
     st.divider()
     st.header("🔍 Filtros da Bolsa")
@@ -947,7 +994,6 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# Sincroniza filtros públicos leves na URL (sem carteira nem favoritos privados)
 st.query_params["setor"] = filtro_setor
 st.query_params["liq"] = liq_label
 if busca_tickers.strip():
@@ -957,7 +1003,6 @@ elif "busca" in st.query_params:
 
 posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
-# Aplica filtros
 mapa_setores_ativos = {}
 ativos_filtrados = todos_ativos
 
@@ -1543,7 +1588,6 @@ with tab3:
                 it_c_sel = next(x for x in itens_tabela_cart if x["ticker"] == tk_c_sel)
                 render_grafico_e_tabela_ativo(tk_c_sel, it_c_sel["nome"], base_ativo=it_c_sel, key_prefix="cart_rx")
 
-        # Lançamentos + Backup CSV
         st.markdown("---")
         with st.expander("➕ Adicionar Lançamento (Compra / Venda)", expanded=not bool(posicoes_carteira)):
             with st.form("form_lancamento", clear_on_submit=False):

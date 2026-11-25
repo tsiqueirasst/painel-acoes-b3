@@ -1362,7 +1362,7 @@ def consolidar_carteira_por_ativo(lancamentos: list[dict]) -> dict[str, dict]:
     return {t: v for t, v in posicoes.items() if v["qtd"] > 0}
 
 
-def render_tela_login(key_prefix: str = "login"):
+def render_tela_login(key_prefix: str = "login", compacto: bool = False):
     if not gist_configurado():
         st.warning(
             "⚙️ Para ativar contas protegidas por senha e salvamento automático na nuvem sem mudar a URL, "
@@ -1370,22 +1370,28 @@ def render_tela_login(key_prefix: str = "login"):
         )
         return
 
-    st.markdown("### 🔐 Acesse sua conta para visualizar e salvar sua Carteira e Favoritos")
+    if compacto:
+        st.caption("🔐 Modo visitante. Faça login para salvar sua Carteira e Favoritos na nuvem:")
+    else:
+        st.markdown("### 🔐 Acesse sua conta para visualizar e salvar sua Carteira e Favoritos")
 
     if sso_configurado():
-        if st.button("🔵 Entrar com Google (SSO)", type="primary", use_container_width=True, key=f"{key_prefix}_sso"):
+        lbl_sso = "🔵 Entrar com Google" if compacto else "🔵 Entrar com Google (SSO)"
+        if st.button(lbl_sso, type="primary", use_container_width=True, key=f"{key_prefix}_sso"):
             auth_cfg = get_secret("auth", {})
             if isinstance(auth_cfg, dict) and "google" in auth_cfg:
                 st.login("google")
             else:
                 st.login()
-        st.markdown("---")
+        if not compacto:
+            st.markdown("---")
 
-    t_entrar, t_criar = st.tabs(["Entrar com E-mail e Senha", "Criar Nova Conta"])
+    tabs_labels = ["Entrar", "Criar Conta"] if compacto else ["Entrar com E-mail e Senha", "Criar Nova Conta"]
+    t_entrar, t_criar = st.tabs(tabs_labels)
     with t_entrar:
         with st.form(f"{key_prefix}_form_in"):
-            em = st.text_input("E-mail:", placeholder="seu@email.com").strip().lower()
-            sn = st.text_input("Senha:", type="password")
+            em = st.text_input("E-mail:", placeholder="seu@email.com", key=f"{key_prefix}_in_em").strip().lower()
+            sn = st.text_input("Senha:", type="password", key=f"{key_prefix}_in_sn")
             ok = st.form_submit_button("Entrar", type="primary", use_container_width=True)
             if ok:
                 if not em or not sn:
@@ -1406,9 +1412,9 @@ def render_tela_login(key_prefix: str = "login"):
 
     with t_criar:
         with st.form(f"{key_prefix}_form_up"):
-            em_n = st.text_input("Seu e-mail:", placeholder="seu@email.com").strip().lower()
-            sn_n = st.text_input("Crie uma senha (mín. 6 caracteres):", type="password")
-            sn_c = st.text_input("Confirme a senha:", type="password")
+            em_n = st.text_input("Seu e-mail:", placeholder="seu@email.com", key=f"{key_prefix}_up_em").strip().lower()
+            sn_n = st.text_input("Crie uma senha (mín. 6 caracteres):", type="password", key=f"{key_prefix}_up_sn")
+            sn_c = st.text_input("Confirme a senha:", type="password", key=f"{key_prefix}_up_sc")
             ok_n = st.form_submit_button("Criar Conta", use_container_width=True)
             if ok_n:
                 if "@" not in em_n or "." not in em_n:
@@ -1564,7 +1570,7 @@ with st.sidebar:
                 st.logout()
             st.rerun()
     else:
-        st.info("Modo visitante. Faça login na aba **🔒 Minha Carteira** para proteger e salvar seus dados na nuvem.")
+        render_tela_login(key_prefix="sidebar_login", compacto=True)
 
     st.divider()
     st.header("🔍 Filtros da Bolsa")

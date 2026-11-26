@@ -6,3 +6,4 @@ beautifulsoup4
 lxml
 plotly
 streamlit-keyup
+numpy

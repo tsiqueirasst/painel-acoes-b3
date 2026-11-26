@@ -1550,6 +1550,255 @@ def fmt_faixa_preco_modelo(r: dict) -> str:
     return f"{p1} | {p2}"
 
 
+def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
+    m_low = str(modo or "score_geral").lower()
+    eh_lp = ("lp" in m_low) or ("longo" in m_low)
+    eh_cp = ("cp" in m_low) or ("curto" in m_low)
+
+    cot = float(r.get("cotacao") or 0.0)
+    eh_banco_seg = bool(r.get("eh_banco_seg", False))
+    eh_value_trap = bool(r.get("eh_value_trap", False))
+
+    score_lp = float(r.get("score_lp") or 0.0)
+    score_cp = float(r.get("score_cp") or 0.0)
+
+    pl = r.get("pl")
+    pvp = r.get("pvp")
+    roe = r.get("roe")
+    roic = r.get("roic")
+    marg_liq = r.get("marg_liq")
+    div_brut_patrim = r.get("div_brut_patrim")
+    dy_12m = float(r.get("dy_12m") or 0.0)
+
+    avg_ms = r.get("avg_ms")
+    graham = r.get("graham")
+    detalhes = r.get("detalhes_score") or {}
+    n_metodos = int(detalhes.get("n_metodos") or 0)
+
+    ifr_14 = r.get("ifr_14")
+    dist_mm200 = r.get("dist_mm200_pct")
+    dist_52s = r.get("dist_max_52s_pct")
+    razao_vol = r.get("razao_volume")
+
+    news_score = float(r.get("news_score") or 0.0)
+    news_resumo = str(r.get("news_resumo") or "⚪ Neutro")
+    news_tem_rj = bool(r.get("news_tem_rj", False))
+
+    riscos_trap = []
+    if marg_liq is not None and marg_liq < 0:
+        riscos_trap.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
+    if roe is not None and roe < 0:
+        riscos_trap.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
+    if (not eh_banco_seg) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
+        riscos_trap.append(f"endividamento elevado (Dívida/PL de {fmt_num(div_brut_patrim)}x)")
+    if news_tem_rj:
+        riscos_trap.append("menção recente a recuperação judicial ou falência nas notícias")
+
+    tem_desc_patr = (
+        (pvp is not None and 0.0 < pvp <= 1.0)
+        or (graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham))
+        or (pl is not None and 0.0 < pl <= 8.0 and roe is not None and roe > 0.0)
+    )
+
+    if eh_lp:
+        partes = []
+        if eh_value_trap and riscos_trap:
+            partes.append(
+                "⚠️ Atenção nos fundamentos: o ativo acionou a trava anti-armadilha (score de longo prazo limitado a 50 pontos) "
+                f"em razão de {', '.join(riscos_trap)}."
+            )
+        else:
+            if roe is not None and roe >= 18.0:
+                frase_rent = f"Empresa de altíssima rentabilidade, entregando ROE de {fmt_num(roe, 1)}%"
+            elif roe is not None and roe >= 12.0:
+                frase_rent = f"Negócio sólido e rentável, com ROE consistente de {fmt_num(roe, 1)}%"
+            elif roe is not None and roe >= 6.0:
+                frase_rent = f"Empresa de rentabilidade moderada, com ROE de {fmt_num(roe, 1)}%"
+            elif roe is not None:
+                frase_rent = f"Rentabilidade ainda comprimida no momento (ROE de {fmt_num(roe, 1)}%)"
+            else:
+                frase_rent = "Rentabilidade em acompanhamento pelos múltiplos disponíveis"
+
+            if (not eh_banco_seg) and roic is not None and roic >= 12.0 and marg_liq is not None and marg_liq >= 10.0:
+                frase_rent += f", ROIC de {fmt_num(roic, 1)}% e margem líquida saudável de {fmt_num(marg_liq, 1)}%"
+            elif marg_liq is not None and marg_liq >= 10.0 and not (eh_banco_seg and marg_liq == 0.0):
+                frase_rent += f" e margem líquida saudável de {fmt_num(marg_liq, 1)}%"
+            elif marg_liq is not None and 0.0 < marg_liq < 5.0:
+                frase_rent += f", porém com margem líquida mais apertada ({fmt_num(marg_liq, 1)}%)"
+
+            if (not eh_banco_seg) and div_brut_patrim is not None:
+                if div_brut_patrim <= 0.8:
+                    frase_rent += ", aliada a balanço conservador e baixo endividamento"
+                elif div_brut_patrim <= 2.0:
+                    frase_rent += " e dívida sob controle"
+                else:
+                    frase_rent += f", embora peça atenção à alavancagem (Dív/PL de {fmt_num(div_brut_patrim)}x)"
+            partes.append(frase_rent + ".")
+
+        if avg_ms is not None and avg_ms >= 15.0:
+            frase_val = f"Negocia com ampla margem de segurança média de {avg_ms:+.1f}% abaixo dos preços-teto do modelo"
+        elif avg_ms is not None and avg_ms > 0.0:
+            frase_val = f"Negocia com desconto moderado ({avg_ms:+.1f}%) frente aos preços-teto estimados"
+        elif tem_desc_patr:
+            det_p = []
+            if pvp is not None and 0.0 < pvp <= 1.0:
+                det_p.append(f"P/VP de {fmt_num(pvp)}x")
+            if graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham):
+                det_p.append(f"abaixo do valor justo de Graham (R$ {fmt_num(graham)})")
+            if pl is not None and 0.0 < pl <= 8.0:
+                det_p.append(f"P/L de {fmt_num(pl)}x")
+            frase_val = (
+                "Mesmo com tetos de dividendos mais contidos, apresenta claro desconto patrimonial "
+                f"({', '.join(det_p)})"
+            )
+        elif avg_ms is not None:
+            frase_val = f"Cotação negocia {abs(avg_ms):.1f}% acima da média dos preços-teto do modelo"
+        else:
+            frase_val = "Cobertura parcial de preços-teto pelos dados atuais"
+
+        if n_metodos == 1:
+            frase_val += " (nota: cobertura de apenas 1 método de valuation, aplicando trava de confiança)"
+        elif n_metodos == 2:
+            frase_val += " (cobertura de 2 métodos de valuation)"
+        partes.append(frase_val + ".")
+
+        if dy_12m >= 6.0:
+            partes.append(f"Excelente perfil para acúmulo e renda passiva com dividendos de {fmt_num(dy_12m, 1)}% em 12 meses.")
+        elif dy_12m >= 3.5:
+            partes.append(f"Entrega retorno intermediário em proventos (DY de {fmt_num(dy_12m, 1)}%), equilibrando renda e crescimento.")
+        elif dy_12m > 0.0:
+            partes.append(f"Dividend yield ainda modesto ({fmt_num(dy_12m, 1)}%), com tese mais apoiada em valor patrimonial/lucro do que em renda imediata.")
+        else:
+            partes.append("Não distribui dividendos no momento (DY de 0%), zerando a parcela de renda na nota.")
+
+        return " ".join(partes)
+
+    if eh_cp:
+        partes = []
+        if ifr_14 is not None:
+            if 30.0 <= ifr_14 <= 48.0:
+                partes.append(
+                    f"Em excelente ponto de entrada técnico: o IFR está em {fmt_num(ifr_14, 1)} "
+                    "(região de sobrevenda/respiro favorável para retomada)."
+                )
+            elif ifr_14 < 30.0:
+                partes.append(
+                    f"IFR bastante pressionado em {fmt_num(ifr_14, 1)} (sobrevenda acentuada), sugerindo possível exaustão vendedora, "
+                    "mas exigindo confirmação de piso antes de acelerar compras."
+                )
+            elif ifr_14 <= 65.0:
+                partes.append(f"O IFR opera em {fmt_num(ifr_14, 1)}, em zona neutra e sem sinais de exaustão.")
+            else:
+                partes.append(
+                    f"Alerta de esticamento no curto prazo: o IFR já marca {fmt_num(ifr_14, 1)} (sobrecompra), "
+                    "elevando o risco de realização técnica."
+                )
+        else:
+            partes.append("Leitura de IFR indisponível para este ativo no momento.")
+
+        if dist_mm200 is not None:
+            if 0.0 <= dist_mm200 <= 18.0:
+                tr_txt = f"O preço segue {dist_mm200:+.1f}% acima da MM200 (tendência primária construtiva)"
+            elif dist_mm200 > 18.0:
+                tr_txt = f"O preço negocia bem esticado acima da MM200 ({dist_mm200:+.1f}%)"
+            elif dist_mm200 >= -12.0:
+                tr_txt = f"A cotação testa região próxima abaixo da MM200 ({dist_mm200:+.1f}%)"
+            else:
+                tr_txt = f"O papel segue {abs(dist_mm200):.1f}% abaixo da MM200, ainda em trajetória corretiva"
+            if dist_52s is not None:
+                if -25.0 <= dist_52s <= -5.0:
+                    tr_txt += f", com desconto de {abs(dist_52s):.1f}% frente à máxima de 52 semanas."
+                elif dist_52s > -5.0:
+                    tr_txt += ", encostado na máxima de 52 semanas."
+                else:
+                    tr_txt += f" e {abs(dist_52s):.1f}% distante do topo de 52 semanas."
+            else:
+                tr_txt += "."
+            partes.append(tr_txt)
+
+        if news_score >= 3.0:
+            partes.append(
+                f"O noticiário dos últimos 30 dias está muito positivo ({news_score:+.1f} — {news_resumo}), "
+                "oferecendo bom gatilho de reprecificação rápida."
+            )
+        elif news_score > 0.0:
+            partes.append(f"As manchetes recentes trazem viés construtivo ({news_score:+.1f} — {news_resumo}).")
+        elif news_score <= -3.0:
+            partes.append(
+                f"Há pressão negativa no fluxo de notícias recentes ({news_score:+.1f} — {news_resumo}), "
+                "o que pode gerar ruído e volatilidade no curtíssimo prazo."
+            )
+        elif news_score < 0.0:
+            partes.append(f"Notícias recentes sinalizam leve cautela ({news_score:+.1f} — {news_resumo}).")
+        else:
+            partes.append("Noticiário dos últimos 30 dias neutro, sem catalisadores fortes no radar.")
+
+        if razao_vol is not None and razao_vol >= 1.35:
+            partes.append(f"O volume de negócios acelerou ({fmt_num(razao_vol, 2)}x a média de 60 dias), confirmando maior interesse comprador.")
+
+        return " ".join(partes)
+
+    # Modo Geral (Combinado: Longo Prazo + Curto Prazo)
+    if eh_value_trap and riscos_trap:
+        base_lp = (
+            "⚠️ A tese exige cautela máxima nos fundamentos: a trava anti-armadilha foi acionada devido a "
+            f"{', '.join(riscos_trap)}"
+        )
+    else:
+        if score_lp >= 72.0:
+            abertura = "Combina números muito fortes de longo prazo"
+        elif score_lp >= 58.0:
+            abertura = "Apresenta boa consistência fundamentalista"
+        else:
+            abertura = "Mostra fundamentos mais moderados nesta leitura"
+
+        det_lp = []
+        if pl is not None and pl > 0:
+            det_lp.append(f"P/L de {fmt_num(pl)}x")
+        if roe is not None:
+            det_lp.append(f"ROE de {fmt_num(roe, 1)}%")
+        if pvp is not None and pvp > 0:
+            det_lp.append(f"P/VP de {fmt_num(pvp)}x")
+        if dy_12m >= 4.0:
+            det_lp.append(f"DY de {fmt_num(dy_12m, 1)}%")
+
+        base_lp = abertura + (f" com {', '.join(det_lp)}" if det_lp else "")
+        if avg_ms is not None and avg_ms > 5.0:
+            base_lp += f" e margem de segurança média de {avg_ms:+.1f}% nos preços-teto"
+        elif tem_desc_patr:
+            base_lp += " e negocia com claro desconto patrimonial"
+        elif avg_ms is not None and avg_ms < -5.0:
+            base_lp += f", embora negocie {abs(avg_ms):.1f}% acima da média dos preços-teto"
+
+    sinais_alerta_cp = []
+    if ifr_14 is not None and ifr_14 >= 68.0:
+        sinais_alerta_cp.append(f"IFR esticado em {fmt_num(ifr_14, 1)} (sobrecompra)")
+    elif ifr_14 is not None and ifr_14 < 30.0:
+        sinais_alerta_cp.append(f"IFR fortemente sobrevendido ({fmt_num(ifr_14, 1)})")
+    if news_score < 0.0:
+        sinais_alerta_cp.append(f"ruído de notícias negativas recentes ({news_score:+.1f} — {news_resumo})")
+    if dist_mm200 is not None and dist_mm200 < -12.0:
+        sinais_alerta_cp.append(f"preço ainda {abs(dist_mm200):.1f}% abaixo da MM200")
+
+    sinais_pos_cp = []
+    if ifr_14 is not None and 30.0 <= ifr_14 <= 48.0:
+        sinais_pos_cp.append(f"IFR em ponto técnico atrativo ({fmt_num(ifr_14, 1)})")
+    if news_score >= 2.0:
+        sinais_pos_cp.append(f"notícias recentes positivas ({news_score:+.1f} — {news_resumo})")
+    if razao_vol is not None and razao_vol >= 1.35:
+        sinais_pos_cp.append(f"volume em aceleração ({fmt_num(razao_vol, 2)}x)")
+
+    if (not eh_value_trap) and score_lp >= 58.0 and sinais_alerta_cp:
+        return f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
+    if sinais_pos_cp and not sinais_alerta_cp:
+        return f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
+    if sinais_alerta_cp:
+        return f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
+    if ifr_14 is not None:
+        return f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e noticiário {news_resumo.lower()}."
+    return f"{base_lp}, com noticiário {news_resumo.lower()}."
+
+
 def render_grafico_e_tabela_ativo(
     ticker: str,
     nome: str = "",
@@ -1579,8 +1828,7 @@ def render_grafico_e_tabela_ativo(
         ifr_r = base_ativo.get("ifr_14")
         dist_200_r = base_ativo.get("dist_mm200_pct")
         dist_52_r = base_ativo.get("dist_max_52s_pct")
-        motivos_r = base_ativo.get("motivos", [])
-        just_r = "; ".join(motivos_r).capitalize() + "." if motivos_r else "Sem dados suficientes."
+        just_r = gerar_justificativa_detalhada(base_ativo, modo_score_chave)
         ifr_txt_r = fmt_num(ifr_r, 1) if ifr_r is not None else "—"
         d200_txt_r = f"{dist_200_r:+.1f}%" if dist_200_r is not None else "—"
         d52_txt_r = f"{dist_52_r:+.1f}%" if dist_52_r is not None else "—"
@@ -1598,7 +1846,7 @@ def render_grafico_e_tabela_ativo(
             rx_m3.metric("📰 Notícias (30d)", f"{news_sc_r:+.1f}", news_res_r)
             rx_m4.metric("📊 IFR (14d)", ifr_txt_r, f"MM200: {d200_txt_r} | 52s: {d52_txt_r}")
             st.markdown(f"🎯 **Faixa de Preço do Modelo:** {fmt_faixa_preco_modelo(base_ativo)}")
-            st.markdown(f"📝 **Justificativa:** _{just_r}_")
+            st.markdown(f"📝 **Justificativa:** {just_r}")
 
     c_per, c_tipo = st.columns([3, 1.2])
     with c_per:
@@ -3461,17 +3709,43 @@ with tab1:
                 else:
                     qtd_ranking = total_rank
 
+                opcoes_rank_busca = []
+                mapa_lbl_para_tk_rank = {}
+                for r_op in lista_rank_base:
+                    lbl_rk = f"{r_op['ticker']} — {r_op['nome']}" if (r_op.get("nome") and r_op["nome"] != r_op["ticker"]) else r_op["ticker"]
+                    opcoes_rank_busca.append(lbl_rk)
+                    mapa_lbl_para_tk_rank[lbl_rk] = r_op["ticker"]
+
+                if "rank_filtro_ativos_esp" in st.session_state:
+                    set_opc_rk = set(opcoes_rank_busca)
+                    st.session_state["rank_filtro_ativos_esp"] = [
+                        x for x in st.session_state["rank_filtro_ativos_esp"] if x in set_opc_rk
+                    ]
+
+                sel_rank_esp = st.multiselect(
+                    "🔎 Filtrar / Comparar ativos específicos no Ranking (sigla ou nome):",
+                    options=opcoes_rank_busca,
+                    placeholder="Digite sigla ou nome (ex: PETR4, Petrobras, TAEE11, Taesa) — vazio mostra os Top N",
+                    key="rank_filtro_ativos_esp",
+                )
+
             if total_rank == 0:
                 st.info("Nenhum ativo corresponde aos filtros de Veredito ou busca selecionados.")
             else:
+                if sel_rank_esp:
+                    tks_sel_rk = {mapa_lbl_para_tk_rank[lbl] for lbl in sel_rank_esp if lbl in mapa_lbl_para_tk_rank}
+                    itens_exibir_rank = [r for r in lista_rank_base if r["ticker"] in tks_sel_rk]
+                else:
+                    itens_exibir_rank = lista_rank_base[:int(qtd_ranking)]
+
                 blocos_ranking = []
-                for r in lista_rank_base[:int(qtd_ranking)]:
+                for r in itens_exibir_rank:
                     score_at = r.get("score_ativo", r.get(chave_score_ativo, r["score_geral"]))
                     news_sc = float(r.get("news_score") or 0.0)
                     news_res = r.get("news_resumo", "⚪ Neutro")
                     quebra_txt = f"LP: **{r['score_lp']}** | CP: **{r['score_cp']}** | News: **{news_sc:+.1f}** ({news_res})"
                     faixa_txt = fmt_faixa_preco_modelo(r)
-                    justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
+                    justificativa = gerar_justificativa_detalhada(r, chave_score_ativo)
                     estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
                     blocos_ranking.append(
                         f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
@@ -3479,56 +3753,75 @@ with tab1:
                         f"**Score Ativo: {score_at}/100** | {r['veredito']}  \n"
                         f"📊 {quebra_txt}  \n"
                         f"🎯 Faixa do Modelo: {faixa_txt}  \n"
-                        f"_{justificativa}_"
+                        f"📝 {justificativa}"
                     )
                 st.markdown("\n\n".join(blocos_ranking))
 
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base
         with st.expander("📰 Últimas Informações e Notícias dos Ativos Pesquisados / Filtrados — clique para minimizar/maximizar", expanded=True):
-            limite_news = min(50, len(ativos_para_news))
-            if limite_news > 1:
-                if st.session_state.get("_last_limite_news") != limite_news:
-                    st.session_state["qtd_news_input"] = limite_news
-                    st.session_state["_last_limite_news"] = limite_news
-                c_nw1, c_nw2 = st.columns([1.4, 2.6])
-                with c_nw1:
-                    qtd_news = st.number_input(
-                        f"Buscar notícias para os primeiros N ativos (1 a {limite_news}):",
-                        min_value=1,
-                        max_value=limite_news,
-                        value=limite_news,
-                        step=1,
-                        key="qtd_news_input",
-                    )
-                with c_nw2:
-                    tks_news_opc = [r["ticker"] for r in ativos_para_news]
-                    tks_news_sel = st.multiselect(
-                        "Ou escolha ativos específicos da lista atual:",
-                        options=tks_news_opc,
-                        default=[],
-                        key="ms_news_sel",
-                    )
-                alvo_news = tks_news_sel if tks_news_sel else [r["ticker"] for r in ativos_para_news[:int(qtd_news)]]
+            if not ativos_para_news:
+                st.info("Nenhum ativo no filtro atual para exibir notícias.")
             else:
-                alvo_news = [r["ticker"] for r in ativos_para_news]
+                opcoes_news_lbl = []
+                mapa_news_lbl_para_tk = {}
+                for r_nw in ativos_para_news:
+                    lbl_nw = f"{r_nw['ticker']} — {r_nw['nome']}" if (r_nw.get("nome") and r_nw["nome"] != r_nw["ticker"]) else r_nw["ticker"]
+                    opcoes_news_lbl.append(lbl_nw)
+                    mapa_news_lbl_para_tk[lbl_nw] = r_nw["ticker"]
 
-            with st.spinner(f"Buscando últimas notícias no Google News para {len(alvo_news)} ativo(s)..."):
-                noticias_dict = buscar_noticias_lote(tuple(alvo_news))
+                if "ms_news_sel" in st.session_state:
+                    set_opc_nw = set(opcoes_news_lbl)
+                    st.session_state["ms_news_sel"] = [
+                        x for x in st.session_state["ms_news_sel"] if x in set_opc_nw
+                    ]
 
-            mapa_nomes_tab = {r["ticker"]: r["nome"] for r in resultados}
-            for t_n in alvo_news:
-                lista_n = noticias_dict.get(t_n, [])
-                nome_n = mapa_nomes_tab.get(t_n, t_n)
-                st.markdown(f"**🗞️ {t_n}** — _{nome_n}_")
-                if not lista_n:
-                    st.caption("Nenhuma notícia recente encontrada no Google News para este código.")
+                limite_news = min(50, len(ativos_para_news))
+                if limite_news > 1:
+                    if st.session_state.get("_last_limite_news") != limite_news:
+                        st.session_state["qtd_news_input"] = limite_news
+                        st.session_state["_last_limite_news"] = limite_news
+                    c_nw1, c_nw2 = st.columns([1.4, 2.6])
+                    with c_nw1:
+                        qtd_news = st.number_input(
+                            f"Buscar notícias para os primeiros N ativos (1 a {limite_news}):",
+                            min_value=1,
+                            max_value=limite_news,
+                            value=limite_news,
+                            step=1,
+                            key="qtd_news_input",
+                        )
+                    with c_nw2:
+                        tks_news_sel = st.multiselect(
+                            "Ou escolha ativos específicos da lista atual (sigla ou nome):",
+                            options=opcoes_news_lbl,
+                            placeholder="Digite sigla ou nome (ex: BBAS3, Banco do Brasil, CMIG, Cemig)",
+                            key="ms_news_sel",
+                        )
+                    alvo_news = (
+                        [mapa_news_lbl_para_tk[x] for x in tks_news_sel if x in mapa_news_lbl_para_tk]
+                        if tks_news_sel
+                        else [r["ticker"] for r in ativos_para_news[:int(qtd_news)]]
+                    )
                 else:
-                    for n_it in lista_n:
-                        fonte_txt = f" · **{n_it['fonte']}**" if n_it["fonte"] else ""
-                        dt_txt = f" ({n_it['data_str']})" if n_it["data_str"] else ""
-                        st.markdown(f"- `{n_it['tag']}` [{n_it['titulo']}]({n_it['link']}){fonte_txt}{dt_txt}")
-                st.markdown("---")
+                    alvo_news = [r["ticker"] for r in ativos_para_news]
+
+                with st.spinner(f"Buscando últimas notícias no Google News para {len(alvo_news)} ativo(s)..."):
+                    noticias_dict = buscar_noticias_lote(tuple(alvo_news))
+
+                mapa_nomes_tab = {r["ticker"]: r["nome"] for r in resultados}
+                for t_n in alvo_news:
+                    lista_n = noticias_dict.get(t_n, [])
+                    nome_n = mapa_nomes_tab.get(t_n, t_n)
+                    st.markdown(f"**🗞️ {t_n}** — _{nome_n}_")
+                    if not lista_n:
+                        st.caption("Nenhuma notícia recente encontrada no Google News para este código.")
+                    else:
+                        for n_it in lista_n:
+                            fonte_txt = f" · **{n_it['fonte']}**" if n_it["fonte"] else ""
+                            dt_txt = f" ({n_it['data_str']})" if n_it["data_str"] else ""
+                            st.markdown(f"- `{n_it['tag']}` [{n_it['titulo']}]({n_it['link']}){fonte_txt}{dt_txt}")
+                    st.markdown("---")
 
 # ==================== ABA 2: COMPARAR ATIVOS ====================
 with tab2:

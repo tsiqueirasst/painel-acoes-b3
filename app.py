@@ -228,16 +228,128 @@ def salvar_dados_usuario_nuvem():
         st.error("Erro ao salvar na nuvem. Confira suas credenciais nos Secrets.")
 
 
-# --- NOTÍCIAS (GOOGLE NEWS RSS PT-BR) ---
+# --- NOTÍCIAS (GOOGLE NEWS RSS PT-BR) & SENTIMENTO ---
+def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
+    t = _norm_txt(titulo)
+
+    critico_kw = (
+        "recuperacao judicial", "pedido de falencia", "falencia", "fraude",
+        "calote", "default", "cvm investiga", "investigada pela cvm",
+        "investigacao da cvm", "pf investiga", "mpf investiga", "inadimpl",
+        "rebaix", "rombo", "intervencao", "liquidacao extrajudicial",
+    )
+    if any(k in t for k in critico_kw):
+        return "🚨 Risco Crítico", "critico", -5.0
+
+    excecoes_prej = (
+        "reverte prejuizo", "revertendo prejuizo", "sai de prejuizo",
+        "saindo de prejuizo", "reduz prejuizo", "reduziu prejuizo",
+        "diminui prejuizo", "menor prejuizo",
+    )
+    tem_prej_neg = ("prejuizo" in t) and not any(ex in t for ex in excecoes_prej)
+    neg_kw = (
+        "reverte lucro", "frustra", "abaixo do esperado", "abaixo das estimativas",
+        "decepciona", "queda forte", "queda de receita", "queda na receita",
+        "receita cai", "lucro cai", "lucro recua", "lucro desaba",
+        "queda no lucro", "recuo no lucro", "corta dividendo", "suspende dividendo",
+        "desaba", "derrete", "despenc", "tombo", "crise", "multa", "queda ", "cai ",
+    )
+    if tem_prej_neg or any(k in t for k in neg_kw):
+        return "🔴 Atenção", "negativo", -2.5
+
+    pos_kw = (
+        "reverte prejuizo", "revertendo prejuizo", "sai de prejuizo", "reduz prejuizo",
+        "dividendo", "jcp", "juros sobre capital", "provento",
+        "lucro sobe", "lucro avanca", "lucro cresce", "lucro salta", "lucro dispara",
+        "lucro recorde", "resultado recorde", "supera estimativas", "acima do esperado",
+        "bate estimativas", "recorde", "dispara", "sobe ", "alta ", "aprova", "supera", "lucro",
+    )
+    if any(k in t for k in pos_kw):
+        return "🟢 Positivo/Provento", "positivo", 2.5
+
+    corp_kw = (
+        "privatiz", "leilao", "fusao", "aquisicao", "compra ", "venda ",
+        "fato relevante", "estatiz", "governo", "desestatiz", "recompra", "bonificacao",
+    )
+    if any(k in t for k in corp_kw):
+        return "🏛️ Fato/Corporativo", "corporativo", 0.0
+
+    return "📰 Notícia", "neutro", 0.0
+
+
 def _classificar_noticia(titulo: str) -> str:
-    t = titulo.lower()
-    if any(k in t for k in ("prejuízo", "prejuizo", "queda", "cai ", "desaba", "rombo", "crise", "investiga", "multa", "inadimpl", "calote", "rebaix")):
-        return "🔴 Atenção"
-    if any(k in t for k in ("privatiz", "leilão", "leilao", "fusão", "fusao", "aquisição", "aquisicao", "compra ", "venda ", "fato relevante", "estatiz", "governo", "desestatiz")):
-        return "🏛️ Fato/Corporativo"
-    if any(k in t for k in ("lucro", "dividendo", "jcp", "provento", "recorde", "dispara", "sobe ", "alta ", "aprova", "supera")):
-        return "🟢 Positivo/Provento"
-    return "📰 Notícia"
+    return _classificar_sentimento_noticia(titulo)[0]
+
+
+def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = None) -> dict:
+    if not itens:
+        return {"news_score": 0.0, "news_resumo": "⚪ Neutro", "qtd_30d": 0, "qtd_7d": 0}
+
+    agora = agora_ts if agora_ts is not None else time.time()
+    limite_30d = agora - (30 * 86400)
+    limite_7d = agora - (7 * 86400)
+
+    soma_pts = 0.0
+    qtd_30d = 0
+    qtd_7d = 0
+    cnt_critico = 0
+    cnt_neg = 0
+    cnt_pos = 0
+    tem_rj = False
+    tem_prej_ou_frustra = False
+    tem_provento = False
+    tem_balanco_pos = False
+
+    for it in itens:
+        ts = float(it.get("ts") or 0.0)
+        if ts <= 0.0 or ts < limite_30d:
+            continue
+
+        qtd_30d += 1
+        peso_tempo = 2.0 if ts >= limite_7d else 1.0
+        if ts >= limite_7d:
+            qtd_7d += 1
+
+        titulo = it.get("titulo") or ""
+        t_norm = _norm_txt(titulo)
+        cat = it.get("sentimento_cat")
+        pts = it.get("sentimento_pts")
+        if cat is None or pts is None:
+            _, cat, pts = _classificar_sentimento_noticia(titulo)
+
+        soma_pts += float(pts) * peso_tempo
+        if cat == "critico":
+            cnt_critico += 1
+            if "recuperacao judicial" in t_norm or "falencia" in t_norm:
+                tem_rj = True
+        elif cat == "negativo":
+            cnt_neg += 1
+            if any(k in t_norm for k in ("prejuizo", "reverte lucro", "frustra", "queda de receita", "queda na receita")):
+                tem_prej_ou_frustra = True
+        elif cat == "positivo":
+            cnt_pos += 1
+            if any(k in t_norm for k in ("dividendo", "jcp", "juros sobre capital", "provento")):
+                tem_provento = True
+            if any(k in t_norm for k in ("lucro", "resultado", "supera", "recorde", "reverte prejuizo")):
+                tem_balanco_pos = True
+
+    news_score = round(max(-10.0, min(10.0, soma_pts)), 1)
+
+    if cnt_critico > 0:
+        news_resumo = "🚨 Risco Crítico / RJ" if tem_rj else "🚨 Risco Crítico"
+    elif news_score <= -2.0 or (cnt_neg > cnt_pos and news_score < 0.0):
+        news_resumo = "🔴 Prejuízo Recente" if tem_prej_ou_frustra else "🔴 Notícias Negativas"
+    elif news_score >= 2.0 or (cnt_pos > cnt_neg and news_score > 0.0):
+        news_resumo = "🟢 Balanço / Proventos" if (tem_provento or tem_balanco_pos) else "🟢 Positivo"
+    else:
+        news_resumo = "⚪ Neutro"
+
+    return {
+        "news_score": news_score,
+        "news_resumo": news_resumo,
+        "qtd_30d": qtd_30d,
+        "qtd_7d": qtd_7d,
+    }
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -268,14 +380,16 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
                         except Exception:
                             dt_str = pub
                     if titulo and link:
+                        tag, cat, pts_s = _classificar_sentimento_noticia(titulo)
                         itens.append({
                             "titulo": titulo, "link": link, "fonte": fonte,
-                            "data_str": dt_str, "tag": _classificar_noticia(titulo),
+                            "data_str": dt_str, "tag": tag,
+                            "sentimento_cat": cat, "sentimento_pts": pts_s,
                             "ts": dt_obj.timestamp() if dt_obj else 0.0,
                         })
                 if itens:
                     itens.sort(key=lambda x: x["ts"], reverse=True)
-                    return ticker, itens[:5]
+                    return ticker, itens[:12]
             except Exception:
                 continue
         return ticker, []
@@ -286,6 +400,17 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
     with ThreadPoolExecutor(max_workers=12) as ex:
         for t, res in ex.map(_one, tickers_tuple):
             out[t] = res
+    return out
+
+
+def buscar_sentimento_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
+    noticias_lote = buscar_noticias_lote(tickers_tuple)
+    agora_ts = time.time()
+    out: dict[str, dict] = {}
+    for tk in tickers_tuple:
+        itens = noticias_lote.get(tk, [])
+        analise = analisar_sentimento_noticias(itens, agora_ts=agora_ts)
+        out[tk] = {**analise, "noticias": itens}
     return out
 
 
@@ -1577,23 +1702,43 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     cot = d["cotacao"]
     ms_lista = [x for x in [calc_ms(pt_med, cot), calc_ms(pt_proj, cot), calc_ms(pt_bazin, cot), calc_ms(graham, cot)] if x is not None]
 
+    n_metodos = len(ms_lista)
+    if n_metodos == 1:
+        fator_confianca = 0.60
+    elif n_metodos == 2:
+        fator_confianca = 0.85
+    else:
+        fator_confianca = 1.0
+
     if ms_lista:
         ms_limitadas = [max(-40.0, min(60.0, m)) for m in ms_lista]
-        avg_ms_lim = sum(ms_limitadas) / len(ms_limitadas)
-        avg_ms_real = sum(ms_lista) / len(ms_lista)
-        pts_ms = max(0.0, min(45.0, ((avg_ms_lim + 40.0) / 100.0) * 45.0))
+        avg_ms_lim = sum(ms_limitadas) / n_metodos
+        avg_ms_real = sum(ms_lista) / n_metodos
+        pts_ms_bruto = max(0.0, min(35.0, ((avg_ms_lim + 40.0) / 100.0) * 35.0))
+        pts_ms = pts_ms_bruto * fator_confianca
     else:
         avg_ms_real = None
         pts_ms = 0.0
 
+    dy_12m = float(d.get("dy_12m") or 0.0)
+    dpa_med_6a = float(d.get("dpa_med_6a") or 0.0)
+    anos_hist = int(d.get("anos_hist") or 0)
+    if dy_12m <= 0.0 and dpa_med_6a <= 0.0 and anos_hist <= 0:
+        pts_div = 0.0
+    else:
+        pts_dy12 = min(10.0, (max(0.0, dy_12m) / 10.0) * 10.0)
+        dy_6a = (dpa_med_6a / cot) * 100.0 if (dpa_med_6a > 0.0 and cot > 0.0) else 0.0
+        pts_hist_div = (min(3.0, (dy_6a / 8.0) * 3.0) if dy_6a > 0.0 else 0.0) + (min(2.0, (min(anos_hist, 6) / 6.0) * 2.0) if anos_hist > 0 else 0.0)
+        pts_div = min(15.0, pts_dy12 + pts_hist_div)
+
     pvp = d["pvp"]
-    pts_pvp = (max(0.0, min(15.0, ((2.5 - pvp) / 1.5) * 15.0)) + (5.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
+    pts_pvp = (max(0.0, min(11.0, ((2.5 - pvp) / 1.5) * 11.0)) + (4.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
     pl = d["pl"]
     pts_pl = max(0.0, min(15.0, ((20.0 - pl) / 15.0) * 15.0)) if (pl and pl > 0) else 0.0
     roe = d["roe"]
     pts_roe = min(20.0, (roe / 25.0) * 20.0) if (roe and roe > 0) else 0.0
 
-    score = round(pts_ms + pts_pvp + pts_pl + pts_roe, 1)
+    score = round(pts_ms + pts_div + pts_pvp + pts_pl + pts_roe, 1)
 
     motivos = []
     if avg_ms_real is not None:
@@ -1603,6 +1748,14 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
             motivos.append(f"margem de segurança média positiva ({avg_ms_real:+.1f}%)")
         else:
             motivos.append(f"negociada acima da média dos preços-teto ({avg_ms_real:+.1f}%)")
+    if n_metodos == 1:
+        motivos.append("cobertura limitada (apenas 1 método; trava -40%)")
+    elif n_metodos == 2:
+        motivos.append("cobertura parcial (2 métodos; trava -15%)")
+    if dy_12m <= 0.0 and dpa_med_6a <= 0.0 and anos_hist <= 0:
+        motivos.append("sem histórico de dividendos (DY 0%)")
+    elif dy_12m >= 6.0:
+        motivos.append(f"DY atrativo ({fmt_num(dy_12m, 1)}%)")
     if pvp is not None:
         if pvp < 1:
             motivos.append(f"P/VP descontado ({fmt_num(pvp)})")

@@ -311,12 +311,12 @@ def carregar_setores_fundamentus() -> dict[str, str]:
 
 def _ler_tabela_fundamentus(url: str, session: requests.Session | None = None) -> list[dict]:
     cliente = session or requests
-    resp = cliente.get(url, headers=HEADERS, timeout=20)
+    resp = cliente.get(url, headers=HEADERS, timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.content, "lxml")
     tabela = soup.find("table", {"id": "resultado"})
     if not tabela:
-        raise ValueError(f"Tabela #resultado ausente em {url}")
+        return []
     cabecalho = [th.get_text(strip=True) for th in tabela.find("thead").find_all("th")]
     registros = []
     tbody = tabela.find("tbody")
@@ -771,69 +771,35 @@ def carregar_todos_ativos_b3() -> list[dict]:
     return ativos
 
 
-def _executar_busca_setores(setor_ids: tuple[str, ...]) -> tuple[dict[str, str], list[str]]:
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 4) -> dict[str, str]:
+    if not setor_ids:
+        return {}
     mapa_setor: dict[str, str] = {}
     setores_dict = carregar_setores_fundamentus()
     id_para_nome = {v: k for k, v in setores_dict.items()}
-    session = requests.Session()
-    try:
-        session.get("https://www.fundamentus.com.br/buscaavancada.php", headers=HEADERS, timeout=10)
-    except Exception:
-        pass
 
     def _one_setor(sid: str):
         url_s = f"https://www.fundamentus.com.br/resultado.php?setor={sid}"
-        for tentativa in range(3):
+        for tentativa in range(2):
             try:
-                linhas = _ler_tabela_fundamentus(url_s, session=session)
-                return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()], True
+                linhas = _ler_tabela_fundamentus(url_s)
+                return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()]
             except Exception:
-                time.sleep(0.45 * (tentativa + 1))
-        return sid, [], False
+                if tentativa == 0:
+                    time.sleep(0.25)
+        return sid, []
 
-    falhos = []
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        for sid, papeis, ok in ex.map(_one_setor, setor_ids):
-            if not ok:
-                falhos.append(sid)
-                continue
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for sid, papeis in ex.map(_one_setor, setor_ids):
             nome_setor = id_para_nome.get(sid, f"Setor {sid}")
             for papel in papeis:
                 mapa_setor[papel] = nome_setor
-
-    ainda_falhos = []
-    for sid in falhos:
-        time.sleep(0.6)
-        _, papeis, ok = _one_setor(sid)
-        if ok:
-            nome_setor = id_para_nome.get(sid, f"Setor {sid}")
-            for papel in papeis:
-                mapa_setor[papel] = nome_setor
-        else:
-            ainda_falhos.append(sid)
-
-    return mapa_setor, ainda_falhos
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _carregar_tickers_por_setor_cached(setor_ids: tuple[str, ...], _v: int = 3) -> dict[str, str]:
-    mapa_setor, falhos = _executar_busca_setores(setor_ids)
-    if falhos:
-        raise RuntimeError(f"Setores incompletos ({len(falhos)})")
     return mapa_setor
 
 
-def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 3) -> dict[str, str]:
-    if not setor_ids:
-        return {}
-    try:
-        return _carregar_tickers_por_setor_cached(setor_ids, _v=_v)
-    except Exception:
-        mapa_parcial, _ = _executar_busca_setores(setor_ids)
-        return mapa_parcial
-
-
-def carregar_mapa_todos_setores(_v: int = 3) -> dict[str, str]:
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_mapa_todos_setores(_v: int = 4) -> dict[str, str]:
     setores_dict = carregar_setores_fundamentus()
     return carregar_tickers_por_setor(tuple(setores_dict.values()), _v=_v)
 

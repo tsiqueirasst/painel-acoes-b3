@@ -7,4 +7,3 @@ lxml
 plotly
 streamlit-keyup
 numpy
-numpy

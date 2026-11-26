@@ -1815,12 +1815,123 @@ def badge_veredito_html(veredito: str) -> str:
     )
 
 
-def fmt_faixa_preco_modelo(r: dict) -> str:
+def _dados_faixa_preco(r: dict) -> dict:
+    cot = float(r.get("cotacao") or 0.0)
     teto_m = r.get("preco_teto_modelo")
     sobre_m = r.get("preco_sobrepreco")
-    p1 = f"Teto com margem até **R$ {fmt_num(teto_m)}**" if (teto_m and teto_m > 0) else "Teto com margem: **—**"
-    p2 = f"Zona de Sobrepreço acima de **R$ {fmt_num(sobre_m)}**" if (sobre_m and sobre_m > 0) else "Zona de Sobrepreço: **—**"
-    return f"{p1} | {p2}"
+    teto_f = float(teto_m) if (teto_m and float(teto_m) > 0.0) else None
+    sobre_f = float(sobre_m) if (sobre_m and float(sobre_m) > 0.0) else None
+
+    if teto_f is not None and sobre_f is not None:
+        neutro_ini = teto_f + 0.01
+        neutro_fim = max(neutro_ini, sobre_f - 0.01)
+        z_desc = f"Até R$ {fmt_num(teto_f)}"
+        z_neutro = f"De R$ {fmt_num(neutro_ini)} até R$ {fmt_num(neutro_fim)}"
+        z_sobre = f"Acima de R$ {fmt_num(sobre_f)}"
+    elif teto_f is not None:
+        z_desc = f"Até R$ {fmt_num(teto_f)}"
+        z_neutro = f"Acima de R$ {fmt_num(teto_f + 0.01)}"
+        z_sobre = "Sem referência definida"
+    elif sobre_f is not None:
+        z_desc = "Sem teto conservador definido"
+        z_neutro = f"Até R$ {fmt_num(sobre_f)}"
+        z_sobre = f"Acima de R$ {fmt_num(sobre_f)}"
+    else:
+        z_desc = "Indisponível"
+        z_neutro = "Indisponível"
+        z_sobre = "Indisponível"
+
+    if teto_f is not None and cot > 0.0 and cot <= teto_f:
+        desconto_pct = ((teto_f - cot) / teto_f) * 100.0
+        veredito_px = (
+            f"Ação com **{fmt_num(desconto_pct, 1)}% de desconto** frente ao teto "
+            "(dentro da Zona de Oportunidade 🟢)."
+        )
+        veredito_px_html = (
+            f"Ação com <strong>{fmt_num(desconto_pct, 1)}% de desconto</strong> frente ao teto "
+            "(dentro da Zona de Oportunidade 🟢)."
+        )
+        cor_ver = "#22c55e"
+    elif sobre_f is not None and cot > 0.0 and cot > sobre_f:
+        sobre_pct = ((cot - sobre_f) / sobre_f) * 100.0
+        veredito_px = (
+            f"Ação **{fmt_num(sobre_pct, 1)}% acima** da zona segura "
+            "(em Zona de Sobrepreço 🔴)."
+        )
+        veredito_px_html = (
+            f"Ação <strong>{fmt_num(sobre_pct, 1)}% acima</strong> da zona segura "
+            "(em Zona de Sobrepreço 🔴)."
+        )
+        cor_ver = "#ef4444"
+    elif teto_f is not None or sobre_f is not None:
+        veredito_px = "Ação negociada próxima ao valor justo (Zona Neutra 🟡)."
+        veredito_px_html = veredito_px
+        cor_ver = "#eab308"
+    else:
+        veredito_px = "Sem dados suficientes de lucro ou dividendos para estimar faixas de preço."
+        veredito_px_html = veredito_px
+        cor_ver = "#94a3b8"
+
+    return {
+        "tem_dados": (teto_f is not None or sobre_f is not None),
+        "z_desc": z_desc,
+        "z_neutro": z_neutro,
+        "z_sobre": z_sobre,
+        "veredito_px": veredito_px,
+        "veredito_px_html": veredito_px_html,
+        "cor_ver": cor_ver,
+    }
+
+
+def fmt_faixa_preco_modelo(r: dict) -> str:
+    d_fp = _dados_faixa_preco(r)
+    if not d_fp["tem_dados"]:
+        return "🎯 **Faixa de Preço do Modelo:** Indisponível (sem lucro positivo ou histórico suficiente de dividendos)."
+    return (
+        "🎯 **Faixa de Preço do Modelo:**  \n"
+        f"- 🟢 **Zona de Desconto / Oportunidade:** {d_fp['z_desc']} _(Preço sugerido de entrada com margem de segurança)_  \n"
+        f"- 🟡 **Zona Neutra / Preço Justo:** {d_fp['z_neutro']}  \n"
+        f"- 🔴 **Zona de Sobrepreço / Alerta:** {d_fp['z_sobre']} _(Região de esticamento / risco de topo)_  \n"
+        f"- 📌 **Veredito do Preço:** {d_fp['veredito_px']}"
+    )
+
+
+def fmt_faixa_preco_html(r: dict) -> str:
+    d_fp = _dados_faixa_preco(r)
+    if not d_fp["tem_dados"]:
+        return (
+            "<div style='background:rgba(128,128,128,0.08); border:1px solid rgba(128,128,128,0.22); "
+            "border-radius:8px; padding:10px 12px; margin:8px 0; font-size:13px;'>"
+            "🎯 <strong>Faixa de Preço do Modelo:</strong> "
+            "<span style='opacity:0.8;'>Indisponível (sem lucro positivo ou histórico suficiente de dividendos).</span>"
+            "</div>"
+        )
+    return (
+        "<div style='background:rgba(128,128,128,0.07); border:1px solid rgba(128,128,128,0.24); "
+        "border-radius:8px; padding:10px 12px; margin:8px 0 10px 0;'>"
+        "<div style='font-weight:700; font-size:13px; margin-bottom:8px;'>🎯 Faixa de Preço do Modelo</div>"
+        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-bottom:8px;'>"
+        "<div style='background:rgba(34,197,94,0.12); border-left:4px solid #22c55e; border-radius:6px; padding:7px 10px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#22c55e;'>🟢 Zona de Desconto / Oportunidade</div>"
+        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_desc'])}</div>"
+        "<div style='font-size:11px; opacity:0.8;'>Preço sugerido de entrada com margem de segurança</div>"
+        "</div>"
+        "<div style='background:rgba(234,179,8,0.12); border-left:4px solid #eab308; border-radius:6px; padding:7px 10px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#eab308;'>🟡 Zona Neutra / Preço Justo</div>"
+        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_neutro'])}</div>"
+        "<div style='font-size:11px; opacity:0.8;'>Faixa intermediária próxima ao valor justo</div>"
+        "</div>"
+        "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:7px 10px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#ef4444;'>🔴 Zona de Sobrepreço / Alerta</div>"
+        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_sobre'])}</div>"
+        "<div style='font-size:11px; opacity:0.8;'>Região de esticamento / risco de topo</div>"
+        "</div>"
+        "</div>"
+        f"<div style='font-size:13px; padding:6px 10px; border-radius:6px; background:rgba(128,128,128,0.10); border-left:3px solid {d_fp['cor_ver']};'>"
+        f"📌 <strong>Veredito do Preço:</strong> {d_fp['veredito_px_html']}"
+        "</div>"
+        "</div>"
+    )
 
 
 def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
@@ -1859,27 +1970,31 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     top_neg = r.get("top_noticia_neg")
     top_pos = r.get("top_noticia_pos")
 
-    def _fmt_manchete(n: dict | None) -> str:
-        if not n or not n.get("titulo"):
-            return ""
-        tit = str(n["titulo"]).strip()
-        extras = [x for x in (n.get("fonte"), (n.get("data_str") or "")[:10]) if x]
-        suf = f" ({' · '.join(extras)})" if extras else ""
-        return f"'{tit}'{suf}"
-
-    def _bloco_noticias_reais() -> str:
-        txt_neg = _fmt_manchete(top_neg)
-        txt_pos = _fmt_manchete(top_pos)
-        if txt_neg and txt_pos:
-            return (
-                f"⚖️ Fatos recentes em foco: De um lado, o papel sofre pressão após notícias como: {txt_neg}; "
-                f"de outro, encontra suporte positivo em manchetes como: {txt_pos}."
-            )
-        if txt_neg:
-            return f"⚠️ Fato recente em foco: O papel sofre pressão após notícias como: {txt_neg}."
-        if txt_pos:
-            return f"🚀 Catalisador recente: O papel ganha fôlego impulsionado por notícias como: {txt_pos}."
+    def _fmt_meta_noticia(n: dict) -> str:
+        fonte = str(n.get("fonte") or "").strip()
+        data_s = str(n.get("data_str") or "").strip()
+        if fonte and data_s:
+            return f" ({fonte} · {data_s})"
+        if fonte:
+            return f" ({fonte})"
+        if data_s:
+            return f" ({data_s})"
         return ""
+
+    linhas_news = []
+    if top_neg and top_neg.get("titulo"):
+        linhas_news.append(
+            f"🔴 **Notícia Negativa Recente (Pressão de Queda):** '{str(top_neg['titulo']).strip()}'{_fmt_meta_noticia(top_neg)}"
+        )
+    if top_pos and top_pos.get("titulo"):
+        linhas_news.append(
+            f"🟢 **Notícia Positiva Recente (Catalisador de Alta):** '{str(top_pos['titulo']).strip()}'{_fmt_meta_noticia(top_pos)}"
+        )
+    if not linhas_news:
+        linhas_news.append(
+            "⚪ **Notícias Recentes:** Sem manchetes de forte impacto nos últimos 30 dias."
+        )
+    bloco_news_linhas = "  \n".join(linhas_news)
 
     riscos_trap = []
     if marg_liq is not None and marg_liq < 0:
@@ -1896,8 +2011,6 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         or (graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham))
         or (pl is not None and 0.0 < pl <= 8.0 and roe is not None and roe > 0.0)
     )
-
-    fatos_reais = _bloco_noticias_reais()
 
     if eh_lp:
         partes = []
@@ -1970,10 +2083,8 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         else:
             partes.append("Não distribui dividendos no momento (DY de 0%), zerando a parcela de renda na nota.")
 
-        if fatos_reais:
-            partes.append(fatos_reais)
-
-        return " ".join(partes)
+        texto_fundamentos = " ".join(partes)
+        return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
 
     if eh_cp:
         partes = []
@@ -2018,29 +2129,11 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
                 tr_txt += "."
             partes.append(tr_txt)
 
-        if fatos_reais:
-            partes.append(fatos_reais)
-        elif news_score >= 3.0:
-            partes.append(
-                f"O noticiário dos últimos 30 dias está muito positivo ({news_score:+.1f} — {news_resumo}), "
-                "oferecendo bom gatilho de reprecificação rápida."
-            )
-        elif news_score > 0.0:
-            partes.append(f"As manchetes recentes trazem viés construtivo ({news_score:+.1f} — {news_resumo}).")
-        elif news_score <= -3.0:
-            partes.append(
-                f"Há pressão negativa no fluxo de notícias recentes ({news_score:+.1f} — {news_resumo}), "
-                "o que pode gerar ruído e volatilidade no curtíssimo prazo."
-            )
-        elif news_score < 0.0:
-            partes.append(f"Notícias recentes sinalizam leve cautela ({news_score:+.1f} — {news_resumo}).")
-        else:
-            partes.append("Noticiário dos últimos 30 dias neutro, sem catalisadores fortes no radar.")
-
         if razao_vol is not None and razao_vol >= 1.35:
             partes.append(f"O volume de negócios acelerou ({fmt_num(razao_vol, 2)}x a média de 60 dias), confirmando maior interesse comprador.")
 
-        return " ".join(partes)
+        texto_fundamentos = " ".join(partes)
+        return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
 
     # Modo Geral (Combinado: Longo Prazo + Curto Prazo)
     if eh_value_trap and riscos_trap:
@@ -2080,7 +2173,7 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     elif ifr_14 is not None and ifr_14 < 30.0:
         sinais_alerta_cp.append(f"IFR fortemente sobrevendido ({fmt_num(ifr_14, 1)})")
     if news_score < 0.0:
-        sinais_alerta_cp.append(f"ruído de notícias negativas recentes ({news_score:+.1f} — {news_resumo})")
+        sinais_alerta_cp.append(f"pressão de notícias negativas recentes ({news_score:+.1f} — {news_resumo})")
     if dist_mm200 is not None and dist_mm200 < -12.0:
         sinais_alerta_cp.append(f"preço ainda {abs(dist_mm200):.1f}% abaixo da MM200")
 
@@ -2093,17 +2186,17 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         sinais_pos_cp.append(f"volume em aceleração ({fmt_num(razao_vol, 2)}x)")
 
     if (not eh_value_trap) and score_lp >= 58.0 and sinais_alerta_cp:
-        sintese = f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
+        texto_fundamentos = f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
     elif sinais_pos_cp and not sinais_alerta_cp:
-        sintese = f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
+        texto_fundamentos = f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
     elif sinais_alerta_cp:
-        sintese = f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
+        texto_fundamentos = f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
     elif ifr_14 is not None:
-        sintese = f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e noticiário {news_resumo.lower()}."
+        texto_fundamentos = f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e sentimento de mercado {news_resumo.lower()}."
     else:
-        sintese = f"{base_lp}, com noticiário {news_resumo.lower()}."
+        texto_fundamentos = f"{base_lp}, com sentimento de mercado {news_resumo.lower()}."
 
-    return f"{sintese} {fatos_reais}".strip() if fatos_reais else sintese
+    return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
 
 
 def render_grafico_e_tabela_ativo(
@@ -2191,8 +2284,8 @@ def render_grafico_e_tabela_ativo(
                 "</div>",
                 unsafe_allow_html=True,
             )
-            st.markdown(f"🎯 **Faixa de Preço do Modelo:** {fmt_faixa_preco_modelo(base_ativo)}")
-            st.markdown(f"📝 **Justificativa:** {just_r}")
+            st.markdown(fmt_faixa_preco_html(base_ativo), unsafe_allow_html=True)
+            st.markdown(just_r)
 
     c_per, c_tipo = st.columns([3, 1.2])
     with c_per:
@@ -4275,11 +4368,11 @@ with tab1:
                         f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
                         f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
                         f"**Score Ativo: {score_at}/100** | {r['veredito']}  \n"
-                        f"📊 {quebra_txt}  \n"
-                        f"🎯 Faixa do Modelo: {faixa_txt}  \n"
-                        f"📝 {justificativa}"
+                        f"📊 {quebra_txt}\n\n"
+                        f"{faixa_txt}\n\n"
+                        f"{justificativa}"
                     )
-                st.markdown("\n\n".join(blocos_ranking))
+                st.markdown("\n\n---\n\n".join(blocos_ranking))
 
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base

@@ -32,9 +32,7 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://www.fundamentus.com.br/buscaavancada.php",
+    )
 }
 
 BESST_SETORES = {
@@ -311,9 +309,11 @@ def carregar_setores_fundamentus() -> dict[str, str]:
 
 def _ler_tabela_fundamentus(url: str, session: requests.Session | None = None) -> list[dict]:
     cliente = session or requests
-    resp = cliente.get(url, headers=HEADERS, timeout=10)
+    resp = cliente.get(url, headers=HEADERS, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.content, "lxml")
+    if not resp.encoding or resp.encoding.lower() in ("ascii", "utf-8"):
+        resp.encoding = "ISO-8859-1"
+    soup = BeautifulSoup(resp.text, "lxml")
     tabela = soup.find("table", {"id": "resultado"})
     if not tabela:
         return []
@@ -744,7 +744,7 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def carregar_todos_ativos_b3() -> list[dict]:
+def _carregar_todos_ativos_b3_cached(_v: int = 2) -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
     ativos = []
     for row in linhas:
@@ -768,7 +768,13 @@ def carregar_todos_ativos_b3() -> list[dict]:
             "pl": pl, "pvp": pvp, "roe": roe, "lpa": lpa, "vpa": vpa,
             "dpa_12m": dpa_12m, "liq_2m": liq_2m,
         })
+    if not ativos:
+        raise RuntimeError("Lista de ativos vazia do Fundamentus")
     return ativos
+
+
+def carregar_todos_ativos_b3() -> list[dict]:
+    return _carregar_todos_ativos_b3_cached()
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -1832,13 +1838,17 @@ with st.sidebar:
 
     st.divider()
     st.subheader("⭐ Ações Favoritas")
-    if "ms_favs" not in st.session_state:
-        st.session_state["ms_favs"] = [f for f in st.session_state["favoritos"] if f in tickers_b3]
-    favs_sel = st.multiselect("Selecione suas favoritas:", options=tickers_b3, key="ms_favs")
-    if favs_sel != st.session_state["favoritos"]:
-        st.session_state["favoritos"] = favs_sel
-        salvar_dados_usuario_nuvem()
-        st.rerun()
+    if not tickers_b3:
+        st.caption("⚠️ Lista de ativos indisponível no momento; seus favoritos salvos foram preservados.")
+    else:
+        opcoes_favs = sorted(set(tickers_b3) | set(st.session_state["favoritos"]))
+        if "ms_favs" not in st.session_state:
+            st.session_state["ms_favs"] = list(st.session_state["favoritos"])
+        favs_sel = st.multiselect("Selecione suas favoritas:", options=opcoes_favs, key="ms_favs")
+        if favs_sel != st.session_state["favoritos"]:
+            st.session_state["favoritos"] = favs_sel
+            salvar_dados_usuario_nuvem()
+            st.rerun()
 
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()
@@ -1852,8 +1862,7 @@ elif "busca" in st.query_params:
 
 posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
-with st.spinner("Carregando setores da B3..."):
-    mapa_setores_ativos = dict(carregar_mapa_todos_setores())
+mapa_setores_ativos: dict[str, str] = {}
 
 ativos_filtrados = todos_ativos
 
@@ -1879,7 +1888,8 @@ if filtro_setores:
 if setores_alvo:
     ids_alvo = tuple(sorted({setores_dict[s] for s in setores_alvo if s in setores_dict}))
     if ids_alvo:
-        mapa_setores_ativos.update(carregar_tickers_por_setor(ids_alvo))
+        with st.spinner("Carregando setores selecionados..."):
+            mapa_setores_ativos.update(carregar_tickers_por_setor(ids_alvo))
 
     if 0 < len(ativos_filtrados) <= 35:
         falt_setor = [a["ticker"] for a in ativos_filtrados if not mapa_setores_ativos.get(a["ticker"])]

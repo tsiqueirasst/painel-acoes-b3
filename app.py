@@ -1675,7 +1675,7 @@ DICIONARIO_TERMOS = {
     "Faixa de Preço do Modelo": {
         "categoria": "💵 Dividendos & Preços-Teto",
         "nome_completo": "Teto com Margem de Segurança vs Zona de Sobrepreço",
-        "o_que_e": "Define duas faixas de referência: o Teto com Margem (menor valor entre Graham e o Preço-Teto médio de dividendos com 15% de desconto) e a Zona de Sobrepreço (preço onde o yield cai abaixo de 4% ou fica 25% acima de Graham).",
+        "o_que_e": "Define duas faixas de referência: o Teto com Margem (menor valor entre Graham e o Preço-Teto médio de dividendos com 15% de desconto) e a Zona de Sobrepreço calibrada por setor (para Bancos/Seguradoras: menor valor entre Graham e 1,15x o VPA, mínimo +15% sobre o teto; para demais empresas: menor valor entre 1,25x Graham e DY de 4%, mínimo +20% sobre o teto).",
         "como_interpretar": "Abaixo do Teto com Margem o ativo oferece ótimo desconto; entre o Teto e o Sobrepreço está em faixa intermediária; acima da Zona de Sobrepreço o preço já embute pouca margem de segurança.",
     },
     "ROE": {
@@ -1872,6 +1872,12 @@ def _dados_faixa_preco(r: dict) -> dict:
         veredito_px_html = veredito_px
         cor_ver = "#94a3b8"
 
+    setor_norm_fp = _norm_txt(str(r.get("setor_nome") or r.get("setor") or ""))
+    eh_banco_seg_fp = bool(r.get("eh_banco_seg", False)) or any(
+        k in setor_norm_fp for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
+    )
+    regra_sp_lbl = "P/VP 1,15x / Graham · Setor Financeiro" if eh_banco_seg_fp else "DY 4% / Graham 1,25x"
+
     return {
         "tem_dados": (teto_f is not None or sobre_f is not None),
         "z_desc": z_desc,
@@ -1880,6 +1886,8 @@ def _dados_faixa_preco(r: dict) -> dict:
         "veredito_px": veredito_px,
         "veredito_px_html": veredito_px_html,
         "cor_ver": cor_ver,
+        "eh_banco_seg": eh_banco_seg_fp,
+        "regra_sp_lbl": regra_sp_lbl,
     }
 
 
@@ -1891,7 +1899,7 @@ def fmt_faixa_preco_modelo(r: dict) -> str:
         "🎯 **Faixa de Preço do Modelo:**  \n"
         f"- 🟢 **Zona de Desconto / Oportunidade:** {d_fp['z_desc']} _(Preço sugerido de entrada com margem de segurança)_  \n"
         f"- 🟡 **Zona Neutra / Preço Justo:** {d_fp['z_neutro']}  \n"
-        f"- 🔴 **Zona de Sobrepreço / Alerta:** {d_fp['z_sobre']} _(Região de esticamento / risco de topo)_  \n"
+        f"- 🔴 **Zona de Sobrepreço / Alerta:** {d_fp['z_sobre']} _(Região de esticamento · {d_fp['regra_sp_lbl']})_  \n"
         f"- 📌 **Veredito do Preço:** {d_fp['veredito_px']}"
     )
 
@@ -1924,7 +1932,7 @@ def fmt_faixa_preco_html(r: dict) -> str:
         "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:7px 10px;'>"
         "<div style='font-size:11px; font-weight:700; color:#ef4444;'>🔴 Zona de Sobrepreço / Alerta</div>"
         f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_sobre'])}</div>"
-        "<div style='font-size:11px; opacity:0.8;'>Região de esticamento / risco de topo</div>"
+        f"<div style='font-size:11px; opacity:0.8;'>Região de esticamento ({html.escape(d_fp['regra_sp_lbl'])})</div>"
         "</div>"
         "</div>"
         f"<div style='font-size:13px; padding:6px 10px; border-radius:6px; background:rgba(128,128,128,0.10); border-left:3px solid {d_fp['cor_ver']};'>"
@@ -2626,7 +2634,10 @@ def html_preco_ms(preco_calc: float | None, cotacao: float, sufixo: str = "") ->
 
 def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazin: float | None, graham: float | None) -> dict:
     cot = float(d.get("cotacao") or 0.0)
-    eh_banco_seg = bool(d.get("eh_banco_seg", False))
+    setor_norm_d = _norm_txt(str(d.get("setor_nome") or d.get("setor") or ""))
+    eh_banco_seg = bool(d.get("eh_banco_seg", False)) or any(
+        k in setor_norm_d for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
+    )
 
     pl = d.get("pl")
     pvp = d.get("pvp")
@@ -2668,8 +2679,26 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     dpa_ref_sp = d.get("dpa_proj") if (d.get("dpa_proj") and d.get("dpa_proj") > 0) else (d.get("dpa_12m") if (d.get("dpa_12m") and d.get("dpa_12m") > 0) else None)
     p_yield_4pct = (float(dpa_ref_sp) / 0.04) if (dpa_ref_sp and dpa_ref_sp > 0) else None
     p_graham_125 = (float(graham) * 1.25) if (graham and graham > 0) else None
-    cands_sp = [x for x in (p_yield_4pct, p_graham_125) if x is not None]
-    preco_sobrepreco = max(cands_sp) if cands_sp else None
+
+    if eh_banco_seg:
+        vpa_val = d.get("vpa")
+        teto_patrimonial = (float(vpa_val) * 1.15) if (vpa_val is not None and float(vpa_val) > 0) else None
+        if graham and graham > 0:
+            if teto_patrimonial is not None:
+                preco_sobrepreco = min(float(graham), teto_patrimonial)
+            else:
+                preco_sobrepreco = float(graham) * 1.10
+        elif teto_patrimonial is not None:
+            preco_sobrepreco = teto_patrimonial
+        else:
+            preco_sobrepreco = p_yield_4pct
+        if preco_sobrepreco is not None and preco_teto_modelo is not None and preco_teto_modelo > 0:
+            preco_sobrepreco = max(preco_teto_modelo * 1.15, preco_sobrepreco)
+    else:
+        cands_sp = [x for x in (p_yield_4pct, p_graham_125) if x is not None]
+        preco_sobrepreco = min(cands_sp) if cands_sp else None
+        if preco_sobrepreco is not None and preco_teto_modelo is not None and preco_teto_modelo > 0:
+            preco_sobrepreco = max(preco_teto_modelo * 1.20, preco_sobrepreco)
 
     # === 2) SCORE LONGO PRAZO (0 a 100) ===
     # 2.1 Valuation com Fator de Confiança (35 pts)

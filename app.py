@@ -231,6 +231,7 @@ def salvar_dados_usuario_nuvem():
 # --- NOTÍCIAS (GOOGLE NEWS RSS PT-BR) & SENTIMENTO ---
 def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
     t = _norm_txt(titulo)
+    t_work = f" {' '.join(re.sub(r'[^a-z0-9%]+', ' ', t).split())} "
 
     critico_kw = (
         "recuperacao judicial", "pedido de falencia", "falencia", "fraude",
@@ -238,41 +239,174 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
         "investigacao da cvm", "pf investiga", "mpf investiga",
         "rombo", "intervencao", "liquidacao extrajudicial",
     )
-    if any(k in t for k in critico_kw):
+    if any(k in t_work for k in critico_kw):
         return "🚨 Risco Crítico", "critico", -5.0
 
-    excecoes_prej = (
-        "reverte prejuizo", "revertendo prejuizo", "sai de prejuizo",
-        "saindo de prejuizo", "reduz prejuizo", "reduziu prejuizo",
-        "diminui prejuizo", "menor prejuizo",
-    )
-    tem_prej_neg = ("prejuizo" in t) and not any(ex in t for ex in excecoes_prej)
-    neg_kw = (
-        "reverte lucro", "frustra", "abaixo do esperado", "abaixo das estimativas",
-        "decepciona", "queda forte", "queda de receita", "queda na receita",
-        "receita cai", "lucro cai", "lucro recua", "lucro desaba",
-        "queda no lucro", "recuo no lucro", "corta dividendo", "suspende dividendo",
-        "desaba", "derrete", "despenc", "tombo", "crise", "multa",
-        "inadimpl", "rebaix", "queda ", "cai ",
-    )
-    if tem_prej_neg or any(k in t for k in neg_kw):
-        return "🔴 Atenção", "negativo", -2.5
+    pts_pos = 0.0
+    pts_neg = 0.0
 
-    pos_kw = (
-        "reverte prejuizo", "revertendo prejuizo", "sai de prejuizo", "reduz prejuizo",
-        "dividendo", "jcp", "juros sobre capital", "provento",
-        "lucro sobe", "lucro avanca", "lucro cresce", "lucro salta", "lucro dispara",
-        "lucro recorde", "resultado recorde", "supera estimativas", "acima do esperado",
-        "bate estimativas", "recorde", "dispara", "sobe ", "alta ", "aprova", "supera", "lucro",
+    # 1) Expressões compostas positivas (redução de algo ruim / reversão de prejuízo)
+    compostos_pos = (
+        ("reverte prejuizo", 3.0),
+        ("revertendo prejuizo", 3.0),
+        ("sai de prejuizo", 3.0),
+        ("sai do prejuizo", 3.0),
+        ("saindo de prejuizo", 3.0),
+        ("saindo do prejuizo", 3.0),
+        ("reduz prejuizo", 2.5),
+        ("reduziu prejuizo", 2.5),
+        ("diminui prejuizo", 2.5),
+        ("menor prejuizo", 2.5),
+        ("prejuizo cai", 2.5),
+        ("prejuizo recua", 2.5),
+        ("sem prejuizo", 2.0),
+        ("queda de despesas", 2.5),
+        ("queda nas despesas", 2.5),
+        ("queda das despesas", 2.5),
+        ("queda de custos", 2.5),
+        ("queda nos custos", 2.5),
+        ("queda dos custos", 2.5),
+        ("reducao de custos", 2.5),
+        ("reducao nos custos", 2.5),
+        ("reducao de despesas", 2.5),
+        ("reducao nas despesas", 2.5),
+        ("queda da divida", 2.5),
+        ("queda na divida", 2.5),
+        ("queda de divida", 2.5),
+        ("reducao da divida", 2.5),
+        ("reducao de divida", 2.5),
+        ("queda de alavancagem", 2.5),
+        ("queda na alavancagem", 2.5),
+        ("queda da alavancagem", 2.5),
+        ("reducao de alavancagem", 2.5),
+        ("queda da inadimplencia", 2.5),
+        ("queda na inadimplencia", 2.5),
+        ("queda de inadimplencia", 2.5),
+        ("reducao da inadimplencia", 2.5),
     )
-    if any(k in t for k in pos_kw):
-        return "🟢 Positivo/Provento", "positivo", 2.5
+    for frase, peso in compostos_pos:
+        if frase in t_work:
+            pts_pos += peso
+            t_work = t_work.replace(frase, " ")
+
+    # Padrões flexíveis positivos (ex: "queda nas despesas operacionais", "redução dos custos fixos")
+    pat_pos_flex = re.compile(
+        r"\b(?:queda|reducao|diminuicao|corte)\s+(?:de|da|das|do|dos|na|nas|no|nos)\s+"
+        r"(?:despesas|custos|divida|alavancagem|inadimplencia)\b"
+    )
+    if pat_pos_flex.search(t_work):
+        pts_pos += 2.5
+        t_work = pat_pos_flex.sub(" ", t_work)
+
+    # 2) Expressões compostas negativas (aumento de algo ruim / queda de lucro, receita, margem, dividendos)
+    compostos_neg = (
+        ("reverte lucro", 3.5),
+        ("lucro desaba", 3.5),
+        ("lucro despenca", 3.5),
+        ("lucro cai", 3.0),
+        ("lucro recua", 2.5),
+        ("queda no lucro", 3.0),
+        ("queda do lucro", 3.0),
+        ("recuo no lucro", 2.5),
+        ("corta dividendo", 3.0),
+        ("suspende dividendo", 3.0),
+        ("prejuizo dispara", 3.5),
+        ("prejuizo sobe", 3.0),
+        ("prejuizo aumenta", 3.0),
+        ("prejuizo cresce", 3.0),
+        ("divida dispara", 3.0),
+        ("divida sobe", 2.5),
+        ("divida cresce", 2.5),
+        ("divida aumenta", 2.5),
+        ("inadimplencia dispara", 3.0),
+        ("inadimplencia sobe", 2.5),
+        ("inadimplencia cresce", 2.5),
+        ("despesas sobem", 2.5),
+        ("custos sobem", 2.5),
+        ("receita cai", 2.5),
+        ("queda de receita", 2.5),
+        ("queda na receita", 2.5),
+        ("margem cai", 2.5),
+        ("margem recua", 2.5),
+    )
+    for frase, peso in compostos_neg:
+        if frase in t_work:
+            pts_neg += peso
+            t_work = t_work.replace(frase, " ")
+
+    pat_lucro_neg = re.compile(r"\blucro(?:\s+\w+){0,2}\s+(?:cai|recua|desaba|despenca)\b")
+    if pat_lucro_neg.search(t_work):
+        pts_neg += 3.0
+        t_work = pat_lucro_neg.sub(" ", t_work)
+
+    # 3) Fatores positivos individuais sobre o texto restante
+    pos_simples = (
+        ("lucro recorde", 3.5),
+        ("resultado recorde", 3.5),
+        ("supera estimativas", 3.0),
+        ("acima do esperado", 3.0),
+        ("bate estimativas", 3.0),
+        ("lucro dispara", 3.5),
+        ("lucro salta", 3.5),
+        ("lucro sobe", 3.0),
+        ("lucro cresce", 3.0),
+        ("lucro avanca", 3.0),
+        ("melhora do resultado", 2.5),
+        ("juros sobre capital", 2.5),
+        ("dividendo", 2.5),
+        ("provento", 2.5),
+        (" jcp ", 2.5),
+        ("recorde", 2.0),
+        ("lucro", 2.0),
+        ("dispara", 2.0),
+        ("melhora", 1.5),
+        ("supera", 1.5),
+        ("aprova", 1.5),
+        (" sobe ", 1.5),
+        (" alta ", 1.5),
+    )
+    for kw, peso in pos_simples:
+        if kw in t_work:
+            pts_pos += peso
+            t_work = t_work.replace(kw, " ")
+
+    # 4) Fatores negativos individuais sobre o texto restante
+    neg_simples = (
+        ("abaixo do esperado", 2.5),
+        ("abaixo das estimativas", 2.5),
+        ("queda forte", 2.5),
+        ("prejuizo", 2.5),
+        ("decepciona", 2.5),
+        ("frustra", 2.5),
+        ("desaba", 2.5),
+        ("derrete", 2.5),
+        (" despenc", 2.5),
+        ("tombo", 2.5),
+        ("crise", 2.0),
+        ("multa", 2.0),
+        (" inadimpl", 2.0),
+        (" rebaix", 2.0),
+        (" queda ", 1.5),
+        (" cai ", 1.5),
+    )
+    for kw, peso in neg_simples:
+        if kw in t_work:
+            pts_neg += peso
+            t_work = t_work.replace(kw, " ")
+
+    saldo_manchete = round(pts_pos - pts_neg, 2)
+    if saldo_manchete > 0.0:
+        pts_final = round(min(4.0, max(1.5, saldo_manchete)), 1)
+        return "🟢 Positivo/Provento", "positivo", pts_final
+    if saldo_manchete < 0.0:
+        pts_final = round(max(-4.0, min(-1.5, saldo_manchete)), 1)
+        return "🔴 Atenção", "negativo", pts_final
 
     corp_kw = (
-        "privatiz", "leilao", "fusao", "aquisicao", "compra ", "venda ",
+        "privatiz", "leilao", "fusao", "aquisicao", " compra ", " venda ",
         "fato relevante", "estatiz", "governo", "desestatiz", "recompra", "bonificacao",
     )
-    if any(k in t for k in corp_kw):
+    if any(k in t_work for k in corp_kw):
         return "🏛️ Fato/Corporativo", "corporativo", 0.0
 
     return "📰 Notícia", "neutro", 0.0
@@ -326,16 +460,14 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
 
         titulo = it.get("titulo") or ""
         t_norm = _norm_txt(titulo)
-        cat = it.get("sentimento_cat")
-        pts = it.get("sentimento_pts")
-        if cat is None or pts is None:
-            _, cat, pts = _classificar_sentimento_noticia(titulo)
+        _, cat, saldo_manchete = _classificar_sentimento_noticia(titulo)
+        pts = float(saldo_manchete)
 
-        impacto = abs(float(pts)) * peso_tempo
-        soma_pts += float(pts) * peso_tempo
+        impacto = abs(pts) * peso_tempo
+        soma_pts += pts * peso_tempo
         if "recuperacao judicial" in t_norm or "pedido de falencia" in t_norm or "falencia" in t_norm:
             tem_rj = True
-        if cat in ("critico", "negativo"):
+        if cat in ("critico", "negativo") and saldo_manchete < 0.0:
             cand_n = (impacto, ts)
             if cand_n > best_neg_key:
                 best_neg_key = cand_n
@@ -347,11 +479,11 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
                 }
         if cat == "critico":
             cnt_critico += 1
-        elif cat == "negativo":
+        elif cat == "negativo" and saldo_manchete < 0.0:
             cnt_neg += 1
             if any(k in t_norm for k in ("prejuizo", "reverte lucro", "frustra", "queda de receita", "queda na receita")):
                 tem_prej_ou_frustra = True
-        elif cat == "positivo":
+        elif cat == "positivo" and saldo_manchete > 0.0:
             cnt_pos += 1
             cand_p = (impacto, ts)
             if cand_p > best_pos_key:
@@ -392,7 +524,7 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]]:
+def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, list[dict]]:
     def _one(ticker: str):
         for q_str in (f'"{ticker}"', f"{ticker} ações"):
             try:
@@ -424,6 +556,7 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
                             "titulo": titulo, "link": link, "fonte": fonte,
                             "data_str": dt_str, "tag": tag,
                             "sentimento_cat": cat, "sentimento_pts": pts_s,
+                            "saldo_manchete": pts_s,
                             "ts": dt_obj.timestamp() if dt_obj else 0.0,
                         })
                 if itens:

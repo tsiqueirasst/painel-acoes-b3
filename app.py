@@ -2762,25 +2762,43 @@ with tab1:
             "🔴 Crítico (Risco Alto)",
         ]
 
-        c_modo_sc, c_filt_ver = st.columns([2.2, 1.5])
-        with c_modo_sc:
-            modo_score_lbl = st.radio(
-                "🎯 Modo de Análise / Score:",
-                options=list(MODO_SCORE_OPCOES.keys()),
-                index=0,
-                horizontal=True,
-                key="tab1_modo_score",
-            )
-        with c_filt_ver:
-            filtro_vereditos = st.multiselect(
-                "🏷️ Filtrar por Veredito do Modelo:",
-                options=VEREDITOS_OPCOES,
-                default=[],
-                placeholder="Todos os vereditos (ex: 🟢 Excelente, 🔵 Bom)",
-                key="tab1_filtro_veredito",
-            )
+        if "tab1_modo_score_val" not in st.session_state:
+            st.session_state["tab1_modo_score_val"] = list(MODO_SCORE_OPCOES.keys())[0]
+        if "tab1_filtro_veredito_val" not in st.session_state:
+            st.session_state["tab1_filtro_veredito_val"] = []
+        if "tab1_modo_score_tab" not in st.session_state:
+            st.session_state["tab1_modo_score_tab"] = st.session_state["tab1_modo_score_val"]
+        if "tab1_modo_score_rank" not in st.session_state:
+            st.session_state["tab1_modo_score_rank"] = st.session_state["tab1_modo_score_val"]
+        if "tab1_filtro_ver_tab" not in st.session_state:
+            st.session_state["tab1_filtro_ver_tab"] = list(st.session_state["tab1_filtro_veredito_val"])
+        if "tab1_filtro_ver_rank" not in st.session_state:
+            st.session_state["tab1_filtro_ver_rank"] = list(st.session_state["tab1_filtro_veredito_val"])
 
-        chave_score_ativo = MODO_SCORE_OPCOES[modo_score_lbl]
+        def _sync_modo_tab():
+            val = st.session_state["tab1_modo_score_tab"]
+            st.session_state["tab1_modo_score_val"] = val
+            st.session_state["tab1_modo_score_rank"] = val
+
+        def _sync_modo_rank():
+            val = st.session_state["tab1_modo_score_rank"]
+            st.session_state["tab1_modo_score_val"] = val
+            st.session_state["tab1_modo_score_tab"] = val
+
+        def _sync_ver_tab():
+            val = list(st.session_state["tab1_filtro_ver_tab"])
+            st.session_state["tab1_filtro_veredito_val"] = val
+            st.session_state["tab1_filtro_ver_rank"] = val
+
+        def _sync_ver_rank():
+            val = list(st.session_state["tab1_filtro_ver_rank"])
+            st.session_state["tab1_filtro_veredito_val"] = val
+            st.session_state["tab1_filtro_ver_tab"] = val
+
+        modo_score_lbl = st.session_state["tab1_modo_score_val"]
+        filtro_vereditos = st.session_state["tab1_filtro_veredito_val"]
+        chave_score_ativo = MODO_SCORE_OPCOES.get(modo_score_lbl, "score_geral")
+
         resultados_tab = [
             {**r, "pos_ranking": idx_m, "score_ativo": r[chave_score_ativo]}
             for idx_m, r in enumerate(
@@ -2793,6 +2811,25 @@ with tab1:
             resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
+            with st.container(border=True):
+                c_modo_sc, c_filt_ver = st.columns([2.2, 1.5])
+                with c_modo_sc:
+                    st.radio(
+                        "🎯 Modo de Análise / Score:",
+                        options=list(MODO_SCORE_OPCOES.keys()),
+                        horizontal=True,
+                        key="tab1_modo_score_tab",
+                        on_change=_sync_modo_tab,
+                    )
+                with c_filt_ver:
+                    st.multiselect(
+                        "🏷️ Filtrar por Veredito do Modelo:",
+                        options=VEREDITOS_OPCOES,
+                        placeholder="Todos os vereditos (ex: 🟢 Excelente, 🔵 Bom)",
+                        key="tab1_filtro_ver_tab",
+                        on_change=_sync_ver_tab,
+                    )
+
             c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
             opcoes_ordenacao = {
                 "Atratividade (Score Ativo)": "score_ativo",
@@ -3388,21 +3425,45 @@ with tab1:
         lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados_tab
         total_rank = len(lista_rank_base)
         with st.expander(f"🏆 Ranking de Atratividade (Filtro Atual — até {total_rank} ativos) — clique para minimizar/maximizar", expanded=True):
-            if total_rank == 0:
-                st.info("Nenhum ativo corresponde aos filtros de Veredito ou busca selecionados.")
-            else:
+            with st.container(border=True):
                 if total_rank > 1:
-                    qtd_ranking = st.number_input(
-                        f"Quantos ativos mostrar no Ranking (de 1 até {total_rank}):",
-                        min_value=1,
-                        max_value=total_rank,
-                        value=min(100, total_rank),
-                        step=10,
-                        key="qtd_ranking_input",
+                    c_r_modo, c_r_ver, c_r_qtd = st.columns([2.1, 1.5, 1.1])
+                else:
+                    c_r_modo, c_r_ver = st.columns([2.2, 1.5])
+                with c_r_modo:
+                    st.radio(
+                        "🎯 Modo de Análise / Score:",
+                        options=list(MODO_SCORE_OPCOES.keys()),
+                        horizontal=True,
+                        key="tab1_modo_score_rank",
+                        on_change=_sync_modo_rank,
                     )
+                with c_r_ver:
+                    st.multiselect(
+                        "🏷️ Filtrar por Veredito do Modelo:",
+                        options=VEREDITOS_OPCOES,
+                        placeholder="Todos os vereditos (ex: 🟢 Excelente, 🔵 Bom)",
+                        key="tab1_filtro_ver_rank",
+                        on_change=_sync_ver_rank,
+                    )
+                if total_rank > 1:
+                    if "qtd_ranking_input" in st.session_state and st.session_state["qtd_ranking_input"] > total_rank:
+                        st.session_state["qtd_ranking_input"] = total_rank
+                    with c_r_qtd:
+                        qtd_ranking = st.number_input(
+                            f"Mostrar no Ranking (1 a {total_rank}):",
+                            min_value=1,
+                            max_value=total_rank,
+                            value=min(100, total_rank),
+                            step=10,
+                            key="qtd_ranking_input",
+                        )
                 else:
                     qtd_ranking = total_rank
 
+            if total_rank == 0:
+                st.info("Nenhum ativo corresponde aos filtros de Veredito ou busca selecionados.")
+            else:
                 blocos_ranking = []
                 for r in lista_rank_base[:int(qtd_ranking)]:
                     score_at = r.get("score_ativo", r.get(chave_score_ativo, r["score_geral"]))

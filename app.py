@@ -2384,6 +2384,8 @@ with st.sidebar:
     if not tickers_b3:
         st.caption("⚠️ Lista de ativos indisponível no momento; seus favoritos salvos foram preservados.")
     else:
+        if st.session_state.pop("_sync_ms_favs", False):
+            st.session_state["ms_favs"] = list(st.session_state["favoritos"])
         opcoes_favs = sorted(set(tickers_b3) | set(st.session_state["favoritos"]))
         if "ms_favs" not in st.session_state:
             st.session_state["ms_favs"] = list(st.session_state["favoritos"])
@@ -2392,6 +2394,63 @@ with st.sidebar:
             st.session_state["favoritos"] = favs_sel
             salvar_dados_usuario_nuvem()
             st.rerun()
+
+        msg_favs = st.session_state.pop("_favs_paste_msg", None)
+        if msg_favs:
+            tp_msg, txt_msg = msg_favs
+            if tp_msg == "success":
+                st.success(txt_msg)
+            else:
+                st.warning(txt_msg)
+
+        with st.expander("📋 Colar várias siglas de uma vez", expanded=False):
+            with st.form("form_colar_favs", clear_on_submit=True):
+                txt_colado = st.text_area(
+                    "Cole as siglas (uma por linha, vírgula ou espaço):",
+                    placeholder="CMIG4\nBBDC3\nBBAS3\nISAE4\nSANB11",
+                    height=110,
+                )
+                cf1, cf2 = st.columns(2)
+                btn_add_favs = cf1.form_submit_button("➕ Adicionar", use_container_width=True)
+                btn_sub_favs = cf2.form_submit_button("🔄 Substituir", use_container_width=True)
+
+            if btn_add_favs or btn_sub_favs:
+                set_b3 = set(tickers_b3)
+                encontrados: list[str] = []
+                ignorados: list[str] = []
+                vistos_f: set[str] = set()
+                for raw_tok in re.split(r"[\s,;|\t\r\n/\\]+", (txt_colado or "").upper()):
+                    tok = re.sub(r"^[^A-Z0-9.]+|[^A-Z0-9.]+$", "", raw_tok.strip())
+                    tok = re.sub(r"\.SA$", "", tok)
+                    tok = re.sub(r"^[^A-Z0-9]+|[^A-Z0-9]+$", "", tok)
+                    if not tok or tok in vistos_f:
+                        continue
+                    vistos_f.add(tok)
+                    if tok in set_b3:
+                        encontrados.append(tok)
+                    else:
+                        ignorados.append(tok)
+
+                if not encontrados:
+                    st.session_state["_favs_paste_msg"] = (
+                        "warning",
+                        "Nenhuma sigla válida da B3 encontrada no texto colado.",
+                    )
+                    st.rerun()
+                else:
+                    if btn_add_favs:
+                        nova_lista = list(dict.fromkeys(list(st.session_state["favoritos"]) + encontrados))
+                    else:
+                        nova_lista = encontrados
+                    st.session_state["favoritos"] = nova_lista
+                    st.session_state["_sync_ms_favs"] = True
+                    aviso_ig = f" | Não encontradas: {', '.join(ignorados)}" if ignorados else ""
+                    st.session_state["_favs_paste_msg"] = (
+                        "success",
+                        f"{len(encontrados)} sigla(s) aplicada(s): {', '.join(encontrados)}{aviso_ig}",
+                    )
+                    salvar_dados_usuario_nuvem()
+                    st.rerun()
 
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()

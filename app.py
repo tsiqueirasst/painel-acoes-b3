@@ -1515,7 +1515,42 @@ def toggle_favorito(ticker: str):
     salvar_dados_usuario_nuvem()
 
 
-def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict | None = None, key_prefix: str = "raiox"):
+def badge_veredito_html(veredito: str) -> str:
+    estilos = {
+        "🟢 Excelente": ("rgba(34,197,94,0.18)", "#22c55e", "rgba(34,197,94,0.45)", "🟢 Excelente"),
+        "🔵 Bom": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Bom (LP)"),
+        "🟣 Esticado": ("rgba(168,85,247,0.18)", "#c084fc", "rgba(168,85,247,0.45)", "🟣 Esticado"),
+        "🟠 Indeciso": ("rgba(249,115,22,0.18)", "#fb923c", "rgba(249,115,22,0.45)", "🟠 Indeciso"),
+        "🟡 Regular": ("rgba(234,179,8,0.18)", "#facc15", "rgba(234,179,8,0.45)", "🟡 Regular"),
+        "🔴 Crítico": ("rgba(239,68,68,0.18)", "#f87171", "rgba(239,68,68,0.45)", "🔴 Crítico"),
+    }
+    bg, fg, bd, lbl = ("rgba(148,163,184,0.18)", "#94a3b8", "rgba(148,163,184,0.4)", veredito)
+    for pref, cfg in estilos.items():
+        if veredito.startswith(pref):
+            bg, fg, bd, lbl = cfg
+            break
+    return (
+        f"<span title='{html.escape(veredito)}' style='display:inline-block; padding:1px 6px; "
+        f"border-radius:10px; font-size:11px; font-weight:700; background:{bg}; color:{fg}; "
+        f"border:1px solid {bd}; white-space:nowrap; margin:2px 0;'>{html.escape(lbl)}</span>"
+    )
+
+
+def fmt_faixa_preco_modelo(r: dict) -> str:
+    teto_m = r.get("preco_teto_modelo")
+    sobre_m = r.get("preco_sobrepreco")
+    p1 = f"Teto com margem até **R$ {fmt_num(teto_m)}**" if (teto_m and teto_m > 0) else "Teto com margem: **—**"
+    p2 = f"Zona de Sobrepreço acima de **R$ {fmt_num(sobre_m)}**" if (sobre_m and sobre_m > 0) else "Zona de Sobrepreço: **—**"
+    return f"{p1} | {p2}"
+
+
+def render_grafico_e_tabela_ativo(
+    ticker: str,
+    nome: str = "",
+    base_ativo: dict | None = None,
+    key_prefix: str = "raiox",
+    modo_score_chave: str = "score_geral",
+):
     c_tit, c_fav = st.columns([4, 1.3])
     eh_fav = ticker in st.session_state["favoritos"]
     with c_tit:
@@ -1525,6 +1560,39 @@ def render_grafico_e_tabela_ativo(ticker: str, nome: str = "", base_ativo: dict 
         if st.button(lbl_fav, key=f"{key_prefix}_favbtn_{ticker}", use_container_width=True):
             toggle_favorito(ticker)
             st.rerun(scope="app")
+
+    if base_ativo and "veredito" in base_ativo:
+        pos_r = base_ativo.get("pos_ranking", "-")
+        cot_r = float(base_ativo.get("cotacao") or 0.0)
+        score_at_r = base_ativo.get("score_ativo", base_ativo.get(modo_score_chave, base_ativo.get("score_geral", 0.0)))
+        score_lp_r = base_ativo.get("score_lp", 0.0)
+        score_cp_r = base_ativo.get("score_cp", 0.0)
+        news_sc_r = float(base_ativo.get("news_score") or 0.0)
+        news_res_r = base_ativo.get("news_resumo", "⚪ Neutro")
+        veredito_r = base_ativo.get("veredito", "🟡 Regular (Neutro)")
+        ifr_r = base_ativo.get("ifr_14")
+        dist_200_r = base_ativo.get("dist_mm200_pct")
+        dist_52_r = base_ativo.get("dist_max_52s_pct")
+        motivos_r = base_ativo.get("motivos", [])
+        just_r = "; ".join(motivos_r).capitalize() + "." if motivos_r else "Sem dados suficientes."
+        ifr_txt_r = fmt_num(ifr_r, 1) if ifr_r is not None else "—"
+        d200_txt_r = f"{dist_200_r:+.1f}%" if dist_200_r is not None else "—"
+        d52_txt_r = f"{dist_52_r:+.1f}%" if dist_52_r is not None else "—"
+
+        with st.container(border=True):
+            st.markdown(
+                f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
+                f"Cotação: **R$ {fmt_num(cot_r)}** | "
+                f"Score Ativo: **{score_at_r}/100** "
+                f"(LP: **{score_lp_r}** | CP: **{score_cp_r}** | News: **{news_sc_r:+.1f}**) | {veredito_r}"
+            )
+            rx_m1, rx_m2, rx_m3, rx_m4 = st.columns(4)
+            rx_m1.metric("🏛️ Longo Prazo (LP)", f"{score_lp_r}/100")
+            rx_m2.metric("⚡ Curto Prazo (CP)", f"{score_cp_r}/100")
+            rx_m3.metric("📰 Notícias (30d)", f"{news_sc_r:+.1f}", news_res_r)
+            rx_m4.metric("📊 IFR (14d)", ifr_txt_r, f"MM200: {d200_txt_r} | 52s: {d52_txt_r}")
+            st.markdown(f"🎯 **Faixa de Preço do Modelo:** {fmt_faixa_preco_modelo(base_ativo)}")
+            st.markdown(f"📝 **Justificativa:** _{just_r}_")
 
     c_per, c_tipo = st.columns([3, 1.2])
     with c_per:
@@ -2492,16 +2560,66 @@ with tab1:
     if not resultados:
         st.info("Nenhum ativo encontrado no filtro atual.")
     else:
-        with st.expander(f"📋 Tabela Comparativa ({len(resultados)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
+        MODO_SCORE_OPCOES = {
+            "🏆 Geral (Melhor Compra Equilibrada)": "score_geral",
+            "🏛️ Longo Prazo (Fundamentos & Dividendos)": "score_lp",
+            "⚡ Curto Prazo (Timing & Catalisadores)": "score_cp",
+        }
+        VEREDITOS_OPCOES = [
+            "🟢 Excelente (Forte Atratividade)",
+            "🔵 Bom (Acúmulo LP)",
+            "🟣 Esticado (Alerta Topo/Sobrepreço)",
+            "🟠 Indeciso (Sinais Mistos)",
+            "🟡 Regular (Neutro)",
+            "🔴 Crítico (Risco Alto)",
+        ]
+
+        c_modo_sc, c_filt_ver = st.columns([2.2, 1.5])
+        with c_modo_sc:
+            modo_score_lbl = st.radio(
+                "🎯 Modo de Análise / Score:",
+                options=list(MODO_SCORE_OPCOES.keys()),
+                index=0,
+                horizontal=True,
+                key="tab1_modo_score",
+            )
+        with c_filt_ver:
+            filtro_vereditos = st.multiselect(
+                "🏷️ Filtrar por Veredito do Modelo:",
+                options=VEREDITOS_OPCOES,
+                default=[],
+                placeholder="Todos os vereditos (ex: 🟢 Excelente, 🔵 Bom)",
+                key="tab1_filtro_veredito",
+            )
+
+        chave_score_ativo = MODO_SCORE_OPCOES[modo_score_lbl]
+        resultados_tab = [
+            {**r, "pos_ranking": idx_m, "score_ativo": r[chave_score_ativo]}
+            for idx_m, r in enumerate(
+                sorted(resultados, key=lambda x: x[chave_score_ativo], reverse=True),
+                start=1,
+            )
+        ]
+        if filtro_vereditos:
+            ver_set = set(filtro_vereditos)
+            resultados_tab = [r for r in resultados_tab if r.get("veredito") in ver_set]
+
+        with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
             opcoes_ordenacao = {
-                "Atratividade (Score)": "score",
+                "Atratividade (Score Ativo)": "score_ativo",
+                "Score Geral (60% LP + 40% CP)": "score_geral",
+                "Score Longo Prazo (LP)": "score_lp",
+                "Score Curto Prazo (CP)": "score_cp",
                 "Margem de Segurança Média (%)": "avg_ms",
+                "IFR (14 dias)": "ifr_14",
+                "Notícias 30d (News Score)": "news_score",
                 "Cotação (R$)": "cotacao",
                 "Dividend Yield 12m (%)": "dy_12m",
                 "P/L": "pl",
                 "P/VP": "pvp",
                 "ROE (%)": "roe",
+                "ROIC (%)": "roic",
                 "Preço Teto Médio (6a)": "pt_med",
                 "Preço Teto Projetivo": "pt_proj",
                 "Preço-Teto Bazin (12m)": "pt_bazin",
@@ -2518,10 +2636,10 @@ with tab1:
             with c_ord3:
                 max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, value=50, step=10)
 
-            lista_tab = resultados
+            lista_tab = resultados_tab
             if busca_tabela and busca_tabela.strip():
                 termo = busca_tabela.strip().upper()
-                lista_tab = [r for r in resultados if termo in r["ticker"] or termo in r["nome"].upper()]
+                lista_tab = [r for r in resultados_tab if termo in r["ticker"] or termo in r["nome"].upper()]
 
             chave_ord = opcoes_ordenacao[col_escolhida]
             reverso = direcao.startswith("Decrescente")
@@ -2616,7 +2734,7 @@ with tab1:
                         st.session_state["raiox_visivel"] = True
 
                 @st.fragment
-                def render_tabela_e_raiox(exibir_rows: list[dict], opcoes_rx: list[str], mapa_res: dict[str, dict], comp_ativos: set[str]):
+                def render_tabela_e_raiox(exibir_rows: list[dict], opcoes_rx: list[str], mapa_res: dict[str, dict], comp_ativos: set[str], modo_score_chave: str = "score_geral"):
                     st.text_input(
                         "raiox_bridge_input",
                         key="raiox_bridge",
@@ -2663,10 +2781,39 @@ with tab1:
                         if eh_linha_rx:
                             idx_split = i_row
 
+                        score_at = r.get("score_ativo", r.get(modo_score_chave, r.get("score_geral", r["score"])))
+                        veredito_r = r.get("veredito", "🟡 Regular (Neutro)")
+                        badge_v = badge_veredito_html(veredito_r)
+                        ifr_val = r.get("ifr_14")
+                        if ifr_val is None:
+                            ifr_ic = "📊 —"
+                        elif 30.0 <= ifr_val <= 48.0:
+                            ifr_ic = f"🎯 {fmt_num(ifr_val, 0)}"
+                        elif ifr_val < 30.0:
+                            ifr_ic = f"🧊 {fmt_num(ifr_val, 0)}"
+                        elif ifr_val >= 70.0:
+                            ifr_ic = f"🔥 {fmt_num(ifr_val, 0)}"
+                        else:
+                            ifr_ic = f"📊 {fmt_num(ifr_val, 0)}"
+                        news_res_r = r.get("news_resumo", "⚪ Neutro")
+                        news_sc_r = float(r.get("news_score") or 0.0)
+                        if "🚨" in news_res_r:
+                            news_ic = f"🚨 {news_sc_r:+.0f}"
+                        elif "🔴" in news_res_r:
+                            news_ic = f"📰🔴 {news_sc_r:+.0f}"
+                        elif "🟢" in news_res_r:
+                            news_ic = f"📰🟢 {news_sc_r:+.0f}"
+                        else:
+                            news_ic = "📰⚪ 0"
+
                         linha = (
                             f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
                             f"<td style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
-                            f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
+                            f"<td style='text-align:center; line-height:1.35;'>"
+                            f"<span style='font-weight:700;'>{r['pos_ranking']}º</span> · <strong>{fmt_num(score_at, 1)}</strong>"
+                            f"<br>{badge_v}"
+                            f"<br><small style='opacity:0.85; white-space:nowrap;' title='IFR 14d: {ifr_ic} | Notícias 30d: {html.escape(news_res_r)}'>{ifr_ic} | {news_ic}</small>"
+                            f"</td>"
                             f"<td><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
                             f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
                             f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
@@ -2682,7 +2829,7 @@ with tab1:
                     thead_html = (
                         "<thead><tr>"
                         "<th style='text-align:center;'>⚖️</th>"
-                        "<th style='text-align:center;'>Rank<br><small>Score</small></th>"
+                        "<th style='text-align:center;'>Rank / Score<br><small>Veredito | IFR | News</small></th>"
                         "<th>Ticker / Empresa</th>"
                         f"<th>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
                         "<th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
@@ -2725,7 +2872,13 @@ with tab1:
                                     unsafe_allow_html=True,
                                 )
                                 item_raiox = mapa_res[ativo_escolhido]
-                                render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+                                render_grafico_e_tabela_ativo(
+                                    ativo_escolhido,
+                                    item_raiox["nome"],
+                                    base_ativo=item_raiox,
+                                    key_prefix="tab1",
+                                    modo_score_chave=modo_score_chave,
+                                )
 
                             if idx_split + 1 < len(linhas_html):
                                 st.markdown(
@@ -2742,8 +2895,9 @@ with tab1:
                 render_tabela_e_raiox(
                     exibir,
                     [r["ticker"] for r in exibir],
-                    {r["ticker"]: r for r in resultados},
+                    {r["ticker"]: r for r in resultados_tab},
                     comp_set,
+                    chave_score_ativo,
                 )
 
         st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
@@ -3043,32 +3197,42 @@ with tab1:
             components.html(_js_tabela, height=0)
 
         # --- RANKING DE ATRATIVIDADE (EXPANDER + QUANTIDADE ESCOLHÍVEL) ---
-        lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados
+        lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados_tab
         total_rank = len(lista_rank_base)
         with st.expander(f"🏆 Ranking de Atratividade (Filtro Atual — até {total_rank} ativos) — clique para minimizar/maximizar", expanded=True):
-            if total_rank > 1:
-                qtd_ranking = st.number_input(
-                    f"Quantos ativos mostrar no Ranking (de 1 até {total_rank}):",
-                    min_value=1,
-                    max_value=total_rank,
-                    value=min(100, total_rank),
-                    step=10,
-                    key="qtd_ranking_input",
-                )
+            if total_rank == 0:
+                st.info("Nenhum ativo corresponde aos filtros de Veredito ou busca selecionados.")
             else:
-                qtd_ranking = total_rank
+                if total_rank > 1:
+                    qtd_ranking = st.number_input(
+                        f"Quantos ativos mostrar no Ranking (de 1 até {total_rank}):",
+                        min_value=1,
+                        max_value=total_rank,
+                        value=min(100, total_rank),
+                        step=10,
+                        key="qtd_ranking_input",
+                    )
+                else:
+                    qtd_ranking = total_rank
 
-            blocos_ranking = []
-            for r in lista_rank_base[:int(qtd_ranking)]:
-                justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
-                estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
-                blocos_ranking.append(
-                    f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
-                    f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
-                    f"**Score: {r['score']}/100**  \n"
-                    f"_{justificativa}_"
-                )
-            st.markdown("\n\n".join(blocos_ranking))
+                blocos_ranking = []
+                for r in lista_rank_base[:int(qtd_ranking)]:
+                    score_at = r.get("score_ativo", r.get(chave_score_ativo, r["score_geral"]))
+                    news_sc = float(r.get("news_score") or 0.0)
+                    news_res = r.get("news_resumo", "⚪ Neutro")
+                    quebra_txt = f"LP: **{r['score_lp']}** | CP: **{r['score_cp']}** | News: **{news_sc:+.1f}** ({news_res})"
+                    faixa_txt = fmt_faixa_preco_modelo(r)
+                    justificativa = "; ".join(r["motivos"]).capitalize() + "." if r["motivos"] else "Sem dados suficientes."
+                    estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
+                    blocos_ranking.append(
+                        f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
+                        f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
+                        f"**Score Ativo: {score_at}/100** | {r['veredito']}  \n"
+                        f"📊 {quebra_txt}  \n"
+                        f"🎯 Faixa do Modelo: {faixa_txt}  \n"
+                        f"_{justificativa}_"
+                    )
+                st.markdown("\n\n".join(blocos_ranking))
 
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base

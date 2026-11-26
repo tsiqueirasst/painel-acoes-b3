@@ -2588,7 +2588,7 @@ def render_grafico_e_tabela_ativo(
 
         css_h = (
             "<style>"
-            ".hist-wrap{width:100%;overflow-x:auto;margin:12px 0;}"
+            ".hist-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:12px 0;}"
             ".hist-table{width:100%;border-collapse:collapse;font-size:13px;text-align:center;}"
             ".hist-table th{background-color:rgba(128,128,128,0.18);padding:10px 8px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;white-space:nowrap;}"
             ".hist-table td{padding:9px 8px;border-bottom:1px solid rgba(128,128,128,0.2);white-space:nowrap;}"
@@ -3230,6 +3230,11 @@ st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
 st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
 st.markdown(
     "<style>"
+    "[data-testid='stAppViewContainer'],[data-testid='stMain'],section.main{"
+    "overflow-y:auto!important;overflow-anchor:none!important;}"
+    "[data-testid='stMainBlockContainer'],[data-baseweb='tab-panel'],"
+    "[data-testid='stExpander'],[data-testid='stExpanderDetails']{"
+    "overflow:visible!important;height:auto!important;max-height:none!important;}"
     "div[data-testid='stExpander']{margin-bottom:10px;border-radius:8px;}"
     "</style>",
     unsafe_allow_html=True,
@@ -3390,9 +3395,9 @@ with st.sidebar:
             "div.element-container:has(input[aria-label='favs_paste_bridge_input']),"
             "div[data-testid='stElementContainer']:has(iframe[height='0']),"
             "div.element-container:has(iframe[height='0']){"
-            "position:fixed!important;left:-9999px!important;top:50%!important;"
+            "position:fixed!important;left:-9999px!important;top:0!important;"
             "width:1px!important;height:1px!important;opacity:0!important;"
-            "overflow:hidden!important;margin:0!important;padding:0!important;}"
+            "pointer-events:none!important;overflow:hidden!important;margin:0!important;padding:0!important;}"
             "</style>",
             unsafe_allow_html=True,
         )
@@ -3717,6 +3722,80 @@ with tab1:
             ver_prefixos = tuple(" ".join(v.split()[:2]) for v in filtro_vereditos)
             resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
 
+        def _ao_clicar_comparar_tabela():
+            raw_c = st.session_state.get("comp_bridge", "").strip().upper()
+            st.session_state["comp_bridge"] = ""
+            if not raw_c:
+                return
+            tk_c = raw_c.split("|")[0].strip()
+            if not tk_c:
+                return
+            sel_c = list(st.session_state.get("comp_selecionados", []))
+            if tk_c in sel_c:
+                sel_c.remove(tk_c)
+            else:
+                sel_c.append(tk_c)
+            st.session_state["comp_selecionados"] = sel_c
+            st.session_state["ms_comp"] = sel_c
+
+        def _ao_clicar_ticker_tabela():
+            raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
+            st.session_state["raiox_bridge"] = ""
+            if not raw_rx:
+                return
+            tk_clicado = raw_rx.split("|")[0].strip()
+            if not tk_clicado:
+                return
+            if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
+                st.session_state["raiox_visivel"] = False
+            else:
+                st.session_state["raiox_ativo_sel"] = tk_clicado
+                st.session_state["raiox_visivel"] = True
+
+        st.text_input(
+            "comp_bridge_input",
+            key="comp_bridge",
+            label_visibility="collapsed",
+            on_change=_ao_clicar_comparar_tabela,
+        )
+        st.text_input(
+            "raiox_bridge_input",
+            key="raiox_bridge",
+            label_visibility="collapsed",
+            on_change=_ao_clicar_ticker_tabela,
+        )
+        st.markdown(
+            "<style>"
+            "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
+            "div.element-container:has(input[aria-label='raiox_bridge_input']),"
+            "div[data-testid='stElementContainer']:has(input[aria-label='comp_bridge_input']),"
+            "div.element-container:has(input[aria-label='comp_bridge_input']),"
+            "div[data-testid='stElementContainer']:has(iframe[height='0']),"
+            "div.element-container:has(iframe[height='0']){"
+            "position:fixed!important;left:-9999px!important;top:0!important;"
+            "width:1px!important;height:1px!important;opacity:0!important;"
+            "pointer-events:none!important;overflow:hidden!important;margin:0!important;padding:0!important;}"
+            "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
+            "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
+            ".val-table-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:0;padding:0;}"
+            ".val-table-wrap-top{margin-top:12px;}"
+            ".val-table-wrap-top:last-child,.val-table-wrap-bot{margin-bottom:12px;}"
+            ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
+            ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
+            ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
+            ".val-table tbody tr.raiox-row{cursor:pointer;}"
+            ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+            ".val-table tr.raiox-active-row td{background-color:rgba(59,130,246,0.14)!important;border-bottom-color:rgba(59,130,246,0.45)!important;}"
+            ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
+            ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
+            ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;min-width:18px;min-height:18px;border-radius:4px!important;border:1.5px solid rgba(148,163,184,0.75);background:transparent;cursor:pointer;user-select:none;outline:none!important;transition:background-color 0.12s ease,border-color 0.12s ease;}"
+            ".comp-chk-btn:hover{border-color:#60a5fa;}"
+            ".comp-chk-btn.checked{background:#3b82f6!important;border-color:#3b82f6!important;}"
+            ".comp-chk-btn.checked::after{content:'';display:block;width:5px;height:9px;border:solid #ffffff;border-width:0 2.2px 2.2px 0;transform:rotate(45deg);margin-bottom:2px;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
         if len(resultados_tab) >= 2:
             with st.expander("📡 Radar de Destaques Rápidos — clique para minimizar/maximizar", expanded=True):
                 rc1, rc2, rc3, rc4 = st.columns(4)
@@ -3938,29 +4017,6 @@ with tab1:
             if not exibir:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")
             else:
-                def _ao_clicar_comparar_tabela():
-                    raw_c = st.session_state.get("comp_bridge", "").strip().upper()
-                    st.session_state["comp_bridge"] = ""
-                    if not raw_c:
-                        return
-                    tk_c = raw_c.split("|")[0].strip()
-                    if not tk_c:
-                        return
-                    sel_c = list(st.session_state.get("comp_selecionados", []))
-                    if tk_c in sel_c:
-                        sel_c.remove(tk_c)
-                    else:
-                        sel_c.append(tk_c)
-                    st.session_state["comp_selecionados"] = sel_c
-                    st.session_state["ms_comp"] = sel_c
-
-                st.text_input(
-                    "comp_bridge_input",
-                    key="comp_bridge",
-                    label_visibility="collapsed",
-                    on_change=_ao_clicar_comparar_tabela,
-                )
-
                 comp_set = set(st.session_state.get("comp_selecionados", []))
                 if comp_set:
                     c_info_cmp, c_btn_cmp = st.columns([4, 1])
@@ -3976,60 +4032,8 @@ with tab1:
                             st.session_state["ms_comp"] = []
                             st.rerun()
 
-                st.markdown(
-                    "<style>"
-                    "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
-                    "div.element-container:has(input[aria-label='raiox_bridge_input']),"
-                    "div[data-testid='stElementContainer']:has(input[aria-label='comp_bridge_input']),"
-                    "div.element-container:has(input[aria-label='comp_bridge_input']),"
-                    "div[data-testid='stElementContainer']:has(iframe[height='0']),"
-                    "div.element-container:has(iframe[height='0']){"
-                    "position:fixed!important;left:-9999px!important;top:50%!important;"
-                    "width:1px!important;height:1px!important;opacity:0!important;"
-                    "overflow:hidden!important;margin:0!important;padding:0!important;}"
-                    "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
-                    "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
-                    ".val-table-wrap{width:100%;overflow-x:auto;margin:0;padding:0;}"
-                    ".val-table-wrap-top{margin-top:12px;}"
-                    ".val-table-wrap-top:last-child,.val-table-wrap-bot{margin-bottom:12px;}"
-                    ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
-                    ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
-                    ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
-                    ".val-table tbody tr.raiox-row{cursor:pointer;}"
-                    ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
-                    ".val-table tr.raiox-active-row td{background-color:rgba(59,130,246,0.14)!important;border-bottom-color:rgba(59,130,246,0.45)!important;}"
-                    ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
-                    ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
-                    ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;min-width:18px;min-height:18px;border-radius:4px!important;border:1.5px solid rgba(148,163,184,0.75);background:transparent;cursor:pointer;user-select:none;outline:none!important;transition:background-color 0.12s ease,border-color 0.12s ease;}"
-                    ".comp-chk-btn:hover{border-color:#60a5fa;}"
-                    ".comp-chk-btn.checked{background:#3b82f6!important;border-color:#3b82f6!important;}"
-                    ".comp-chk-btn.checked::after{content:'';display:block;width:5px;height:9px;border:solid #ffffff;border-width:0 2.2px 2.2px 0;transform:rotate(45deg);margin-bottom:2px;}"
-                    "</style>",
-                    unsafe_allow_html=True,
-                )
-
-                def _ao_clicar_ticker_tabela():
-                    raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
-                    st.session_state["raiox_bridge"] = ""
-                    if not raw_rx:
-                        return
-                    tk_clicado = raw_rx.split("|")[0].strip()
-                    if not tk_clicado:
-                        return
-                    if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
-                        st.session_state["raiox_visivel"] = False
-                    else:
-                        st.session_state["raiox_ativo_sel"] = tk_clicado
-                        st.session_state["raiox_visivel"] = True
-
                 @st.fragment
                 def render_tabela_e_raiox(exibir_rows: list[dict], opcoes_rx: list[str], mapa_res: dict[str, dict], comp_ativos: set[str], modo_score_chave: str = "score_geral"):
-                    st.text_input(
-                        "raiox_bridge_input",
-                        key="raiox_bridge",
-                        label_visibility="collapsed",
-                        on_change=_ao_clicar_ticker_tabela,
-                    )
                     if "raiox_ativo_sel" not in st.session_state:
                         st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_rx else opcoes_rx[0]
                         if ativo_url and ativo_url in opcoes_rx:
@@ -4279,8 +4283,10 @@ with tab1:
 
             pWin.__initValTableResize = function() {
                 const topTable = pDoc.querySelector("table.val-table-top") || pDoc.querySelector("table.val-table");
+                if (!topTable || topTable.offsetParent === null) return;
+                const rectTop = topTable.getBoundingClientRect();
+                if (!rectTop || rectTop.width === 0 || rectTop.height === 0) return;
                 const botTable = pDoc.querySelector("table.val-table-bot");
-                if (!topTable) return;
                 const ths = Array.from(topTable.querySelectorAll("thead tr th"));
                 if (!ths.length) return;
 
@@ -4411,22 +4417,31 @@ with tab1:
             pWin.__initValTableResize();
 
             if (!pWin.__valTableObserver) {
+                let resizeTimer = null;
                 pWin.__valTableObserver = new MutationObserver(function() {
-                    if (pWin.__initValTableResize) {
-                        pWin.__initValTableResize();
+                    if (resizeTimer) {
+                        clearTimeout(resizeTimer);
                     }
-                    if (pWin.__raioxPendingScroll) {
-                        const mk = pDoc.getElementById("raiox-current-" + pWin.__raioxPendingScroll);
-                        if (mk) {
-                            pWin.__raioxPendingScroll = null;
-                            const activeRow = pDoc.querySelector("tr.raiox-active-row");
-                            if (activeRow) {
-                                setTimeout(function() {
-                                    activeRow.scrollIntoView({ behavior: "smooth", block: "start" });
-                                }, 80);
+                    resizeTimer = setTimeout(function() {
+                        resizeTimer = null;
+                        pWin.requestAnimationFrame(function() {
+                            if (pWin.__initValTableResize) {
+                                pWin.__initValTableResize();
                             }
-                        }
-                    }
+                            if (pWin.__raioxPendingScroll) {
+                                const mk = pDoc.getElementById("raiox-current-" + pWin.__raioxPendingScroll);
+                                if (mk) {
+                                    pWin.__raioxPendingScroll = null;
+                                    const activeRow = pDoc.querySelector("tr.raiox-active-row");
+                                    if (activeRow) {
+                                        setTimeout(function() {
+                                            activeRow.scrollIntoView({ behavior: "smooth", block: "start" });
+                                        }, 80);
+                                    }
+                                }
+                            }
+                        });
+                    }, 60);
                 });
                 pWin.__valTableObserver.observe(pDoc.body, { childList: true, subtree: true });
             }
@@ -4996,7 +5011,7 @@ with tab3:
 
             css_c = (
                 "<style>"
-                ".cart-wrap{width:100%;overflow-x:auto;margin:12px 0;}"
+                ".cart-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:12px 0;}"
                 ".cart-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
                 ".cart-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
                 ".cart-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"

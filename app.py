@@ -2384,16 +2384,136 @@ with st.sidebar:
     if not tickers_b3:
         st.caption("⚠️ Lista de ativos indisponível no momento; seus favoritos salvos foram preservados.")
     else:
-        if st.session_state.pop("_sync_ms_favs", False):
-            st.session_state["ms_favs"] = list(st.session_state["favoritos"])
+        def _ao_colar_favs_bridge(tickers_validos: list[str]):
+            raw_fp = st.session_state.get("favs_paste_bridge", "").strip()
+            st.session_state["favs_paste_bridge"] = ""
+            if not raw_fp:
+                return
+            texto_siglas = raw_fp.rsplit("|", 1)[0] if "|" in raw_fp else raw_fp
+            set_b3 = set(tickers_validos)
+            encontrados: list[str] = []
+            ignorados: list[str] = []
+            vistos_f: set[str] = set()
+            for raw_tok in re.split(r"[\s,;|\t\r\n/\\]+", texto_siglas.upper()):
+                tok = re.sub(r"^[^A-Z0-9.]+|[^A-Z0-9.]+$", "", raw_tok.strip())
+                tok = re.sub(r"\.SA$", "", tok)
+                tok = re.sub(r"^[^A-Z0-9]+|[^A-Z0-9]+$", "", tok)
+                if not tok or tok in vistos_f:
+                    continue
+                vistos_f.add(tok)
+                if tok in set_b3:
+                    encontrados.append(tok)
+                else:
+                    ignorados.append(tok)
+
+            if not encontrados:
+                st.session_state["_favs_paste_msg"] = (
+                    "warning",
+                    "Nenhuma sigla válida da B3 encontrada no texto colado.",
+                )
+                return
+
+            nova_lista = list(dict.fromkeys(list(st.session_state.get("favoritos", [])) + encontrados))
+            st.session_state["favoritos"] = nova_lista
+            st.session_state["ms_favs"] = list(nova_lista)
+            aviso_ig = f" | Não encontradas: {', '.join(ignorados)}" if ignorados else ""
+            st.session_state["_favs_paste_msg"] = (
+                "success",
+                f"{len(encontrados)} sigla(s) adicionada(s): {', '.join(encontrados)}{aviso_ig}",
+            )
+            salvar_dados_usuario_nuvem()
+
         opcoes_favs = sorted(set(tickers_b3) | set(st.session_state["favoritos"]))
         if "ms_favs" not in st.session_state:
             st.session_state["ms_favs"] = list(st.session_state["favoritos"])
-        favs_sel = st.multiselect("Selecione suas favoritas:", options=opcoes_favs, key="ms_favs")
+        favs_sel = st.multiselect(
+            "Selecione suas favoritas:",
+            options=opcoes_favs,
+            key="ms_favs",
+            help="Você pode digitar ou colar várias siglas de uma vez (uma por linha, vírgula ou espaço) direto aqui.",
+        )
         if favs_sel != st.session_state["favoritos"]:
             st.session_state["favoritos"] = favs_sel
             salvar_dados_usuario_nuvem()
             st.rerun()
+
+        st.text_input(
+            "favs_paste_bridge_input",
+            key="favs_paste_bridge",
+            label_visibility="collapsed",
+            on_change=_ao_colar_favs_bridge,
+            args=(tickers_b3,),
+        )
+
+        st.markdown(
+            "<style>"
+            "div[data-testid='stElementContainer']:has(input[aria-label='favs_paste_bridge_input']),"
+            "div.element-container:has(input[aria-label='favs_paste_bridge_input']),"
+            "div[data-testid='stElementContainer']:has(iframe[height='0']),"
+            "div.element-container:has(iframe[height='0']){"
+            "position:fixed!important;left:-9999px!important;top:50%!important;"
+            "width:1px!important;height:1px!important;opacity:0!important;"
+            "overflow:hidden!important;margin:0!important;padding:0!important;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
+        _usa_st_html_fav = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+        _js_favs_paste = """
+        <script>
+        (function() {
+            const pWin = __USE_PARENT__ ? window.parent : window;
+            const pDoc = pWin.document;
+
+            if (pWin.__favsPasteHandlerAttached) return;
+            pWin.__favsPasteHandlerAttached = true;
+
+            pDoc.addEventListener("paste", function(e) {
+                const ms = e.target && e.target.closest ? e.target.closest('div[data-testid="stMultiSelect"]') : null;
+                if (!ms) return;
+                const lbl = ms.querySelector('[data-testid="stWidgetLabel"], label');
+                const lblTxt = lbl ? (lbl.innerText || lbl.textContent || "") : "";
+                if (lblTxt.indexOf("Selecione suas favoritas") === -1) return;
+
+                const cd = e.clipboardData || pWin.clipboardData;
+                const pasted = cd ? (cd.getData("text") || "") : "";
+                if (!pasted) return;
+
+                const tokens = pasted.toUpperCase().replace(/\\.SA\\b/g, "").split(/[\\s,;|\\t\\r\\n/\\\\]+/).filter(Boolean);
+                const multiOuSep = tokens.length >= 2 || (tokens.length === 1 && /[,;\\r\\n]|\\.SA\\b/i.test(pasted));
+                if (!multiOuSep) return;
+
+                e.preventDefault();
+                e.stopPropagation();
+
+                if (e.target && e.target.blur) {
+                    try { e.target.blur(); } catch (err) {}
+                }
+
+                const inp = pDoc.querySelector('input[aria-label="favs_paste_bridge_input"]');
+                if (!inp) return;
+                const payload = pasted.replace(/[\\r\\n\\t]+/g, " ").trim() + "|" + Date.now();
+                const setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, "value").set;
+                try { inp.focus({ preventScroll: true }); } catch (err) {}
+                setter.call(inp, payload);
+                inp.dispatchEvent(new Event("input", { bubbles: true }));
+                inp.dispatchEvent(new Event("change", { bubbles: true }));
+                setTimeout(function() {
+                    const evInit = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
+                    inp.dispatchEvent(new KeyboardEvent("keydown", evInit));
+                    inp.dispatchEvent(new KeyboardEvent("keypress", evInit));
+                    inp.dispatchEvent(new KeyboardEvent("keyup", evInit));
+                    inp.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+                }, 50);
+            }, true);
+        })();
+        </script>
+        """.replace("__USE_PARENT__", "false" if _usa_st_html_fav else "true")
+
+        if _usa_st_html_fav:
+            st.html(_js_favs_paste, unsafe_allow_javascript=True)
+        else:
+            components.html(_js_favs_paste, height=0)
 
         msg_favs = st.session_state.pop("_favs_paste_msg", None)
         if msg_favs:
@@ -2402,55 +2522,6 @@ with st.sidebar:
                 st.success(txt_msg)
             else:
                 st.warning(txt_msg)
-
-        with st.expander("📋 Colar várias siglas de uma vez", expanded=False):
-            with st.form("form_colar_favs", clear_on_submit=True):
-                txt_colado = st.text_area(
-                    "Cole as siglas (uma por linha, vírgula ou espaço):",
-                    placeholder="CMIG4\nBBDC3\nBBAS3\nISAE4\nSANB11",
-                    height=110,
-                )
-                cf1, cf2 = st.columns(2)
-                btn_add_favs = cf1.form_submit_button("➕ Adicionar", use_container_width=True)
-                btn_sub_favs = cf2.form_submit_button("🔄 Substituir", use_container_width=True)
-
-            if btn_add_favs or btn_sub_favs:
-                set_b3 = set(tickers_b3)
-                encontrados: list[str] = []
-                ignorados: list[str] = []
-                vistos_f: set[str] = set()
-                for raw_tok in re.split(r"[\s,;|\t\r\n/\\]+", (txt_colado or "").upper()):
-                    tok = re.sub(r"^[^A-Z0-9.]+|[^A-Z0-9.]+$", "", raw_tok.strip())
-                    tok = re.sub(r"\.SA$", "", tok)
-                    tok = re.sub(r"^[^A-Z0-9]+|[^A-Z0-9]+$", "", tok)
-                    if not tok or tok in vistos_f:
-                        continue
-                    vistos_f.add(tok)
-                    if tok in set_b3:
-                        encontrados.append(tok)
-                    else:
-                        ignorados.append(tok)
-
-                if not encontrados:
-                    st.session_state["_favs_paste_msg"] = (
-                        "warning",
-                        "Nenhuma sigla válida da B3 encontrada no texto colado.",
-                    )
-                    st.rerun()
-                else:
-                    if btn_add_favs:
-                        nova_lista = list(dict.fromkeys(list(st.session_state["favoritos"]) + encontrados))
-                    else:
-                        nova_lista = encontrados
-                    st.session_state["favoritos"] = nova_lista
-                    st.session_state["_sync_ms_favs"] = True
-                    aviso_ig = f" | Não encontradas: {', '.join(ignorados)}" if ignorados else ""
-                    st.session_state["_favs_paste_msg"] = (
-                        "success",
-                        f"{len(encontrados)} sigla(s) aplicada(s): {', '.join(encontrados)}{aviso_ig}",
-                    )
-                    salvar_dados_usuario_nuvem()
-                    st.rerun()
 
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()

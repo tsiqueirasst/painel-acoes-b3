@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import html
+import inspect
 import io
 import json
 import math
@@ -31,7 +32,9 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://www.fundamentus.com.br/buscaavancada.php",
 }
 
 BESST_SETORES = {
@@ -310,13 +313,16 @@ def _ler_tabela_fundamentus(url: str, session: requests.Session | None = None) -
     cliente = session or requests
     resp = cliente.get(url, headers=HEADERS, timeout=20)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
+    soup = BeautifulSoup(resp.content, "lxml")
     tabela = soup.find("table", {"id": "resultado"})
     if not tabela:
-        return []
+        raise ValueError(f"Tabela #resultado ausente em {url}")
     cabecalho = [th.get_text(strip=True) for th in tabela.find("thead").find_all("th")]
     registros = []
-    for tr in tabela.find("tbody").find_all("tr"):
+    tbody = tabela.find("tbody")
+    if not tbody:
+        return []
+    for tr in tbody.find_all("tr"):
         celulas = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(celulas) == len(cabecalho):
             registros.append(dict(zip(cabecalho, celulas)))
@@ -765,12 +771,15 @@ def carregar_todos_ativos_b3() -> list[dict]:
     return ativos
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 2) -> dict[str, str]:
-    mapa_setor = {}
+def _executar_busca_setores(setor_ids: tuple[str, ...]) -> tuple[dict[str, str], list[str]]:
+    mapa_setor: dict[str, str] = {}
     setores_dict = carregar_setores_fundamentus()
     id_para_nome = {v: k for k, v in setores_dict.items()}
     session = requests.Session()
+    try:
+        session.get("https://www.fundamentus.com.br/buscaavancada.php", headers=HEADERS, timeout=10)
+    except Exception:
+        pass
 
     def _one_setor(sid: str):
         url_s = f"https://www.fundamentus.com.br/resultado.php?setor={sid}"
@@ -779,11 +788,11 @@ def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 2) -> dict[
                 linhas = _ler_tabela_fundamentus(url_s, session=session)
                 return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()], True
             except Exception:
-                time.sleep(0.35 * (tentativa + 1))
+                time.sleep(0.45 * (tentativa + 1))
         return sid, [], False
 
     falhos = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         for sid, papeis, ok in ex.map(_one_setor, setor_ids):
             if not ok:
                 falhos.append(sid)
@@ -792,19 +801,39 @@ def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 2) -> dict[
             for papel in papeis:
                 mapa_setor[papel] = nome_setor
 
+    ainda_falhos = []
     for sid in falhos:
-        time.sleep(0.5)
+        time.sleep(0.6)
         _, papeis, ok = _one_setor(sid)
         if ok:
             nome_setor = id_para_nome.get(sid, f"Setor {sid}")
             for papel in papeis:
                 mapa_setor[papel] = nome_setor
+        else:
+            ainda_falhos.append(sid)
 
-    return mapa_setor
+    return mapa_setor, ainda_falhos
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def carregar_mapa_todos_setores(_v: int = 2) -> dict[str, str]:
+def _carregar_tickers_por_setor_cached(setor_ids: tuple[str, ...], _v: int = 3) -> dict[str, str]:
+    mapa_setor, falhos = _executar_busca_setores(setor_ids)
+    if falhos:
+        raise RuntimeError(f"Setores incompletos ({len(falhos)})")
+    return mapa_setor
+
+
+def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 3) -> dict[str, str]:
+    if not setor_ids:
+        return {}
+    try:
+        return _carregar_tickers_por_setor_cached(setor_ids, _v=_v)
+    except Exception:
+        mapa_parcial, _ = _executar_busca_setores(setor_ids)
+        return mapa_parcial
+
+
+def carregar_mapa_todos_setores(_v: int = 3) -> dict[str, str]:
     setores_dict = carregar_setores_fundamentus()
     return carregar_tickers_por_setor(tuple(setores_dict.values()), _v=_v)
 
@@ -1858,7 +1887,7 @@ elif "busca" in st.query_params:
 posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
 with st.spinner("Carregando setores da B3..."):
-    mapa_setores_ativos = carregar_mapa_todos_setores()
+    mapa_setores_ativos = dict(carregar_mapa_todos_setores())
 
 ativos_filtrados = todos_ativos
 
@@ -1868,6 +1897,13 @@ if "⭐ Apenas Meus Favoritos" in filtro_listas:
 if "💼 Apenas Minha Carteira" in filtro_listas:
     ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in posicoes_carteira]
 
+if busca_tickers.strip():
+    lista_busca = {x.strip().upper().replace(".SA", "") for x in busca_tickers.split(",") if x.strip()}
+    ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in lista_busca]
+
+if liq_min > 0:
+    ativos_filtrados = [a for a in ativos_filtrados if a["liq_2m"] >= liq_min]
+
 setores_alvo: set[str] = set()
 if "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)" in filtro_listas:
     setores_alvo |= BESST_SETORES
@@ -1875,14 +1911,23 @@ if filtro_setores:
     setores_alvo |= {ALIAS_PARA_SETOR.get(s, s) for s in filtro_setores}
 
 if setores_alvo:
+    ids_alvo = tuple(sorted({setores_dict[s] for s in setores_alvo if s in setores_dict}))
+    if ids_alvo:
+        mapa_setores_ativos.update(carregar_tickers_por_setor(ids_alvo))
+
+    if 0 < len(ativos_filtrados) <= 35:
+        falt_setor = [a["ticker"] for a in ativos_filtrados if not mapa_setores_ativos.get(a["ticker"])]
+        if falt_setor:
+            def _fetch_setor_det(tk_s: str):
+                det_s = buscar_detalhes_fundamentus(tk_s)
+                return tk_s, " ".join((det_s.get("Setor") or "").split())
+
+            with ThreadPoolExecutor(max_workers=4) as ex_s:
+                for tk_s, st_nome in ex_s.map(_fetch_setor_det, falt_setor):
+                    if st_nome:
+                        mapa_setores_ativos[tk_s] = st_nome
+
     ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in setores_alvo]
-
-if busca_tickers.strip():
-    lista_busca = {x.strip().upper().replace(".SA", "") for x in busca_tickers.split(",") if x.strip()}
-    ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in lista_busca]
-
-if liq_min > 0:
-    ativos_filtrados = [a for a in ativos_filtrados if a["liq_2m"] >= liq_min]
 
 preliminares = []
 for a in ativos_filtrados:
@@ -1966,7 +2011,7 @@ with tab1:
     if not resultados:
         st.info("Nenhum ativo encontrado no filtro atual.")
     else:
-        with st.expander(f"📋 Tabela Comparativa ({len(resultados)} ativos no filtro) — clique para minimizar/maximizar | clique em um Ticker para abrir o Raio-X", expanded=True):
+        with st.expander(f"📋 Tabela Comparativa ({len(resultados)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
             opcoes_ordenacao = {
                 "Atratividade (Score)": "score",
@@ -2053,28 +2098,24 @@ with tab1:
                     "div.element-container:has(input[aria-label='comp_bridge_input']),"
                     "div[data-testid='stElementContainer']:has(iframe[height='0']),"
                     "div.element-container:has(iframe[height='0']){"
-                    "position:fixed!important;left:-9999px!important;top:0!important;"
+                    "position:fixed!important;left:-9999px!important;top:50%!important;"
                     "width:1px!important;height:1px!important;opacity:0!important;"
-                    "overflow:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;}"
+                    "overflow:hidden!important;margin:0!important;padding:0!important;}"
                     "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
                     "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
-                    "div[data-testid='stVerticalBlockBorderWrapper']:has(.raiox-current-marker),"
-                    "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host) > div:has(.raiox-current-marker){"
-                    "border-left:4px solid #3b82f6!important;border-radius:0 8px 8px 0!important;"
-                    "background-color:rgba(59,130,246,0.04)!important;margin:0!important;}"
                     ".val-table-wrap{width:100%;overflow-x:auto;margin:0;padding:0;}"
                     ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
                     ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
                     ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
+                    ".val-table tbody tr.raiox-row{cursor:pointer;}"
                     ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
                     ".val-table tr.raiox-active-row td{background-color:rgba(59,130,246,0.14)!important;border-bottom-color:rgba(59,130,246,0.45)!important;}"
-                    ".val-table tr.raiox-active-row td:first-child{border-left:4px solid #3b82f6;}"
                     ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
                     ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
-                    ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;border:1.5px solid rgba(148,163,184,0.75);background:transparent;text-decoration:none!important;cursor:pointer;transition:all 0.12s ease;}"
+                    ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;min-width:18px;min-height:18px;border-radius:4px!important;border:1.5px solid rgba(148,163,184,0.75);background:transparent;cursor:pointer;user-select:none;outline:none!important;transition:background-color 0.12s ease,border-color 0.12s ease;}"
                     ".comp-chk-btn:hover{border-color:#60a5fa;}"
-                    ".comp-chk-btn.checked{background:#3b82f6;border-color:#3b82f6;}"
-                    ".comp-chk-btn.checked::after{content:'';width:5px;height:9px;border:solid #ffffff;border-width:0 2.2px 2.2px 0;transform:rotate(45deg);margin-bottom:2px;}"
+                    ".comp-chk-btn.checked{background:#3b82f6!important;border-color:#3b82f6!important;}"
+                    ".comp-chk-btn.checked::after{content:'';display:block;width:5px;height:9px;border:solid #ffffff;border-width:0 2.2px 2.2px 0;transform:rotate(45deg);margin-bottom:2px;}"
                     "</style>",
                     unsafe_allow_html=True,
                 )
@@ -2137,16 +2178,15 @@ with tab1:
                         estrela = " ⭐" if r["ticker"] in fav_set else ""
                         chk_cls = "comp-chk-btn checked" if r["ticker"] in comp_ativos else "comp-chk-btn"
                         eh_linha_rx = visivel and r["ticker"] == ativo_escolhido
-                        tr_cls = " class='raiox-active-row'" if eh_linha_rx else ""
+                        tr_cls = " class='raiox-row raiox-active-row'" if eh_linha_rx else " class='raiox-row'"
                         if eh_linha_rx:
                             idx_split = i_row
 
-                        href = f"#raiox-{r['ticker']}"
                         linha = (
-                            f"<tr{tr_cls}>"
-                            f"<td style='text-align:center;'><a href='#comp-{r['ticker']}' class='{chk_cls}' title='Selecionar para Comparar Ativos'></a></td>"
+                            f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
+                            f"<td style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
                             f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
-                            f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>{r['ticker']}</a>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
+                            f"<td><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
                             f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
                             f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
                             f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
@@ -2217,19 +2257,6 @@ with tab1:
                             "<span class='raiox-current-marker' id='raiox-closed' style='display:none;'></span>",
                             unsafe_allow_html=True,
                         )
-                        c_msg_rx, c_btn_rx = st.columns([4, 1.2])
-                        with c_msg_rx:
-                            st.caption("💡 Clique em qualquer **Ticker** na tabela comparativa acima para abrir o **Raio-X do Ativo** logo abaixo da linha dele (clique novamente para fechar).")
-                        with c_btn_rx:
-                            if st.button("🔎 Abrir Raio-X", key="btn_abrir_raiox", use_container_width=True):
-                                st.session_state["raiox_visivel"] = True
-                                st.rerun()
-
-                    st.caption(
-                        "**Legenda siglas B3:** `ON` = Ordinária (voto) · `PN` = Preferencial (dividendos) · `UNT` = Unit (ON+PN) · "
-                        "`ED/EJ` = Ex-Dividendo/JCP · `N1/N2/NM` = Nível 1, Nível 2 e Novo Mercado (governança).  \n"
-                        "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
-                    )
 
                 render_tabela_e_raiox(
                     exibir,
@@ -2240,274 +2267,299 @@ with tab1:
 
         st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
 
-        components.html(
-            """
-            <script>
-            (function() {
-                const pWin = window.parent;
-                const pDoc = pWin.document;
-                const STORAGE_KEY = "painel_b3_val_col_widths_v1";
+        _usa_st_html = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+        _js_tabela = """
+        <script>
+        (function() {
+            const pWin = __USE_PARENT__ ? window.parent : window;
+            const pDoc = pWin.document;
+            const STORAGE_KEY = "painel_b3_val_col_widths_v1";
 
-                function sendBridgeInput(ariaLabel, payload) {
-                    const inp = pDoc.querySelector('input[aria-label="' + ariaLabel + '"]');
-                    if (!inp) return;
-                    const setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, "value").set;
-                    setter.call(inp, payload);
-                    inp.dispatchEvent(new Event("input", { bubbles: true }));
-                    setTimeout(function() {
-                        inp.dispatchEvent(new KeyboardEvent("keydown", {
-                            key: "Enter",
-                            code: "Enter",
-                            keyCode: 13,
-                            which: 13,
-                            bubbles: true,
-                            cancelable: true
-                        }));
-                        inp.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-                    }, 60);
+            function sendBridgeInput(ariaLabel, payload) {
+                const inp = pDoc.querySelector('input[aria-label="' + ariaLabel + '"]');
+                if (!inp) return;
+                const setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, "value").set;
+                try { inp.focus({ preventScroll: true }); } catch (e) {}
+                setter.call(inp, payload);
+                inp.dispatchEvent(new Event("input", { bubbles: true }));
+                inp.dispatchEvent(new Event("change", { bubbles: true }));
+                setTimeout(function() {
+                    const evInit = {
+                        key: "Enter",
+                        code: "Enter",
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true,
+                        cancelable: true
+                    };
+                    inp.dispatchEvent(new KeyboardEvent("keydown", evInit));
+                    inp.dispatchEvent(new KeyboardEvent("keypress", evInit));
+                    inp.dispatchEvent(new KeyboardEvent("keyup", evInit));
+                    inp.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+                }, 50);
+            }
+
+            pWin.__raioxSyncBridge = function(ticker) {
+                const marker = pDoc.querySelector(".raiox-current-marker");
+                const atual = marker && marker.id.startsWith("raiox-current-")
+                    ? marker.id.replace("raiox-current-", "").trim().toUpperCase()
+                    : "";
+                const vaiFechar = (atual === ticker);
+                pWin.__raioxPendingScroll = vaiFechar ? null : ticker;
+                sendBridgeInput("raiox_bridge_input", ticker + "|" + Date.now());
+            };
+
+            pWin.__compSyncBridge = function(ticker) {
+                sendBridgeInput("comp_bridge_input", ticker + "|" + Date.now());
+            };
+
+            function applyColgroupToTable(tbl, widthsArr, totW) {
+                if (!tbl) return;
+                let cg = tbl.querySelector("colgroup");
+                if (!cg) {
+                    cg = pDoc.createElement("colgroup");
+                    tbl.insertBefore(cg, tbl.firstChild);
                 }
+                cg.innerHTML = "";
+                widthsArr.forEach(function(w) {
+                    const col = pDoc.createElement("col");
+                    col.style.width = w + "px";
+                    cg.appendChild(col);
+                });
+                tbl.style.tableLayout = "fixed";
+                tbl.style.width = totW + "px";
+                tbl.style.minWidth = totW + "px";
+            }
 
-                pWin.__raioxSyncBridge = function(ticker) {
-                    const marker = pDoc.querySelector(".raiox-current-marker");
-                    const atual = marker && marker.id.startsWith("raiox-current-")
-                        ? marker.id.replace("raiox-current-", "").trim().toUpperCase()
-                        : "";
-                    const vaiFechar = (atual === ticker);
-                    pWin.__raioxPendingScroll = vaiFechar ? null : ticker;
-                    sendBridgeInput("raiox_bridge_input", ticker + "|" + Date.now());
-                };
-
-                pWin.__compSyncBridge = function(ticker) {
-                    sendBridgeInput("comp_bridge_input", ticker + "|" + Date.now());
-                };
-
-                function applyColgroupToTable(tbl, widthsArr, totW) {
-                    if (!tbl) return;
-                    let cg = tbl.querySelector("colgroup");
-                    if (!cg) {
-                        cg = pDoc.createElement("colgroup");
-                        tbl.insertBefore(cg, tbl.firstChild);
-                    }
-                    cg.innerHTML = "";
-                    widthsArr.forEach(function(w) {
-                        const col = pDoc.createElement("col");
-                        col.style.width = w + "px";
-                        cg.appendChild(col);
+            function syncWrapScroll() {
+                const wrapTop = pDoc.querySelector(".val-table-wrap-top");
+                const wrapBot = pDoc.querySelector(".val-table-wrap-bot");
+                if (!wrapTop || !wrapBot) return;
+                if (!wrapTop.dataset.scrollSync) {
+                    wrapTop.dataset.scrollSync = "1";
+                    wrapTop.addEventListener("scroll", function() {
+                        if (wrapBot && wrapBot.scrollLeft !== wrapTop.scrollLeft) {
+                            wrapBot.scrollLeft = wrapTop.scrollLeft;
+                        }
                     });
-                    tbl.style.tableLayout = "fixed";
-                    tbl.style.width = totW + "px";
-                    tbl.style.minWidth = totW + "px";
+                }
+                if (!wrapBot.dataset.scrollSync) {
+                    wrapBot.dataset.scrollSync = "1";
+                    wrapBot.addEventListener("scroll", function() {
+                        if (wrapTop && wrapTop.scrollLeft !== wrapBot.scrollLeft) {
+                            wrapTop.scrollLeft = wrapBot.scrollLeft;
+                        }
+                    });
+                }
+            }
+
+            pWin.__initValTableResize = function() {
+                const topTable = pDoc.querySelector("table.val-table-top") || pDoc.querySelector("table.val-table");
+                const botTable = pDoc.querySelector("table.val-table-bot");
+                if (!topTable) return;
+                const ths = Array.from(topTable.querySelectorAll("thead tr th"));
+                if (!ths.length) return;
+
+                syncWrapScroll();
+
+                if (topTable.dataset.resizeReady && (!botTable || botTable.dataset.resizeReady)) return;
+
+                let widths = [];
+                let totalW = 0;
+
+                if (topTable.dataset.resizeReady) {
+                    const colsTop = Array.from(topTable.querySelectorAll("colgroup col"));
+                    widths = colsTop.map(function(c, i) {
+                        return Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
+                    });
+                    totalW = widths.reduce(function(a, b) { return a + b; }, 0);
+                    if (botTable && !botTable.dataset.resizeReady) {
+                        applyColgroupToTable(botTable, widths, totalW);
+                        botTable.dataset.resizeReady = "1";
+                    }
+                    return;
                 }
 
-                function syncWrapScroll() {
-                    const wrapTop = pDoc.querySelector(".val-table-wrap-top");
-                    const wrapBot = pDoc.querySelector(".val-table-wrap-bot");
-                    if (!wrapTop || !wrapBot) return;
-                    if (!wrapTop.dataset.scrollSync) {
-                        wrapTop.dataset.scrollSync = "1";
-                        wrapTop.addEventListener("scroll", function() {
-                            if (wrapBot && wrapBot.scrollLeft !== wrapTop.scrollLeft) {
-                                wrapBot.scrollLeft = wrapTop.scrollLeft;
-                            }
-                        });
-                    }
-                    if (!wrapBot.dataset.scrollSync) {
-                        wrapBot.dataset.scrollSync = "1";
-                        wrapBot.addEventListener("scroll", function() {
-                            if (wrapTop && wrapTop.scrollLeft !== wrapBot.scrollLeft) {
-                                wrapTop.scrollLeft = wrapBot.scrollLeft;
-                            }
-                        });
-                    }
+                let saved = {};
+                try {
+                    saved = JSON.parse(pWin.localStorage.getItem(STORAGE_KEY) || "{}") || {};
+                } catch (err) {
+                    saved = {};
+                }
+                const hasSaved = Object.keys(saved).length === ths.length;
+
+                if (hasSaved) {
+                    widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
+                } else {
+                    topTable.style.tableLayout = "auto";
+                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : 54, Math.round(th.getBoundingClientRect().width)));
                 }
 
-                pWin.__initValTableResize = function() {
-                    const topTable = pDoc.querySelector("table.val-table-top") || pDoc.querySelector("table.val-table");
-                    const botTable = pDoc.querySelector("table.val-table-bot");
-                    if (!topTable) return;
-                    const ths = Array.from(topTable.querySelectorAll("thead tr th"));
-                    if (!ths.length) return;
+                totalW = widths.reduce((a, b) => a + b, 0);
+                applyColgroupToTable(topTable, widths, totalW);
+                widths.forEach((w, idx) => { ths[idx].style.width = w + "px"; });
 
-                    syncWrapScroll();
+                if (botTable) {
+                    applyColgroupToTable(botTable, widths, totalW);
+                    botTable.dataset.resizeReady = "1";
+                }
 
-                    if (topTable.dataset.resizeReady && (!botTable || botTable.dataset.resizeReady)) return;
+                ths.forEach((th, idx) => {
+                    if (th.querySelector(".col-resizer")) return;
+                    const resizer = pDoc.createElement("div");
+                    resizer.className = "col-resizer";
+                    resizer.title = "Arraste para redimensionar (duplo clique para resetar)";
 
-                    let widths = [];
-                    let totalW = 0;
-
-                    if (topTable.dataset.resizeReady) {
-                        const colsTop = Array.from(topTable.querySelectorAll("colgroup col"));
-                        widths = colsTop.map(function(c, i) {
-                            return Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
+                    resizer.addEventListener("dblclick", function(ev) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        try { pWin.localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+                        const bTbl = pDoc.querySelector("table.val-table-bot");
+                        [topTable, bTbl].forEach(function(tbl) {
+                            if (!tbl) return;
+                            tbl.style.tableLayout = "auto";
+                            tbl.style.width = "100%";
+                            tbl.style.minWidth = "";
+                            const cg = tbl.querySelector("colgroup");
+                            if (cg) cg.remove();
+                            delete tbl.dataset.resizeReady;
                         });
-                        totalW = widths.reduce(function(a, b) { return a + b; }, 0);
-                        if (botTable && !botTable.dataset.resizeReady) {
-                            applyColgroupToTable(botTable, widths, totalW);
-                            botTable.dataset.resizeReady = "1";
+                        ths.forEach(function(t) { t.style.width = ""; });
+                        setTimeout(pWin.__initValTableResize, 30);
+                    });
+
+                    resizer.addEventListener("mousedown", function(ev) {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        const startX = ev.clientX;
+                        const cgCols = Array.from(topTable.querySelectorAll("colgroup col"));
+                        const startW = cgCols[idx] ? parseFloat(cgCols[idx].style.width) : th.getBoundingClientRect().width;
+                        const startTotalW = cgCols.reduce(function(acc, c) {
+                            return acc + (parseFloat(c.style.width) || 80);
+                        }, 0);
+                        resizer.classList.add("resizing");
+                        pDoc.body.style.cursor = "col-resize";
+
+                        function onMove(mv) {
+                            const delta = mv.clientX - startX;
+                            const newW = Math.max(40, Math.round(startW + delta));
+                            const diff = newW - startW;
+                            const newTotal = Math.max(200, Math.round(startTotalW + diff));
+                            if (cgCols[idx]) cgCols[idx].style.width = newW + "px";
+                            th.style.width = newW + "px";
+                            topTable.style.width = newTotal + "px";
+                            topTable.style.minWidth = newTotal + "px";
+
+                            const bTbl = pDoc.querySelector("table.val-table-bot");
+                            if (bTbl) {
+                                const bCols = Array.from(bTbl.querySelectorAll("colgroup col"));
+                                if (bCols[idx]) bCols[idx].style.width = newW + "px";
+                                bTbl.style.width = newTotal + "px";
+                                bTbl.style.minWidth = newTotal + "px";
+                            }
+                        }
+
+                        function onUp() {
+                            resizer.classList.remove("resizing");
+                            pDoc.body.style.cursor = "";
+                            pDoc.removeEventListener("mousemove", onMove);
+                            pDoc.removeEventListener("mouseup", onUp);
+                            const obj = {};
+                            const colsNow = Array.from(topTable.querySelectorAll("colgroup col"));
+                            colsNow.forEach(function(c, i) {
+                                obj[i] = Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
+                            });
+                            try {
+                                pWin.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+                            } catch (e) {}
+                        }
+
+                        pDoc.addEventListener("mousemove", onMove);
+                        pDoc.addEventListener("mouseup", onUp);
+                    });
+
+                    th.appendChild(resizer);
+                });
+
+                topTable.dataset.resizeReady = "1";
+            };
+
+            pWin.__initValTableResize();
+
+            if (!pWin.__valTableObserver) {
+                pWin.__valTableObserver = new MutationObserver(function() {
+                    if (pWin.__initValTableResize) {
+                        pWin.__initValTableResize();
+                    }
+                    if (pWin.__raioxPendingScroll) {
+                        const mk = pDoc.getElementById("raiox-current-" + pWin.__raioxPendingScroll);
+                        if (mk) {
+                            pWin.__raioxPendingScroll = null;
+                            const activeRow = pDoc.querySelector("tr.raiox-active-row");
+                            if (activeRow) {
+                                setTimeout(function() {
+                                    activeRow.scrollIntoView({ behavior: "smooth", block: "start" });
+                                }, 80);
+                            }
+                        }
+                    }
+                });
+                pWin.__valTableObserver.observe(pDoc.body, { childList: true, subtree: true });
+            }
+
+            if (!pWin.__raioxClickHandlerAttached) {
+                pWin.__raioxClickHandlerAttached = true;
+                pDoc.addEventListener("click", function(e) {
+                    const chk = e.target && e.target.closest ? e.target.closest(".comp-chk-btn") : null;
+                    if (chk) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        chk.classList.toggle("checked");
+                        chk.setAttribute("aria-checked", chk.classList.contains("checked") ? "true" : "false");
+                        const tkCmp = (chk.getAttribute("data-comp-ticker") || "").trim().toUpperCase();
+                        if (tkCmp && pWin.__compSyncBridge) {
+                            pWin.__compSyncBridge(tkCmp);
                         }
                         return;
                     }
 
-                    let saved = {};
-                    try {
-                        saved = JSON.parse(pWin.localStorage.getItem(STORAGE_KEY) || "{}") || {};
-                    } catch (err) {
-                        saved = {};
-                    }
-                    const hasSaved = Object.keys(saved).length === ths.length;
-
-                    if (hasSaved) {
-                        widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
-                    } else {
-                        topTable.style.tableLayout = "auto";
-                        widths = ths.map((th, i) => Math.max(i === 0 ? 42 : 54, Math.round(th.getBoundingClientRect().width)));
-                    }
-
-                    totalW = widths.reduce((a, b) => a + b, 0);
-                    applyColgroupToTable(topTable, widths, totalW);
-                    widths.forEach((w, idx) => { ths[idx].style.width = w + "px"; });
-
-                    if (botTable) {
-                        applyColgroupToTable(botTable, widths, totalW);
-                        botTable.dataset.resizeReady = "1";
-                    }
-
-                    ths.forEach((th, idx) => {
-                        if (th.querySelector(".col-resizer")) return;
-                        const resizer = pDoc.createElement("div");
-                        resizer.className = "col-resizer";
-                        resizer.title = "Arraste para redimensionar (duplo clique para resetar)";
-
-                        resizer.addEventListener("dblclick", function(ev) {
-                            ev.preventDefault();
-                            ev.stopPropagation();
-                            try { pWin.localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-                            const bTbl = pDoc.querySelector("table.val-table-bot");
-                            [topTable, bTbl].forEach(function(tbl) {
-                                if (!tbl) return;
-                                tbl.style.tableLayout = "auto";
-                                tbl.style.width = "100%";
-                                tbl.style.minWidth = "";
-                                const cg = tbl.querySelector("colgroup");
-                                if (cg) cg.remove();
-                                delete tbl.dataset.resizeReady;
-                            });
-                            ths.forEach(function(t) { t.style.width = ""; });
-                            setTimeout(pWin.__initValTableResize, 30);
-                        });
-
-                        resizer.addEventListener("mousedown", function(ev) {
-                            ev.preventDefault();
-                            ev.stopPropagation();
-                            const startX = ev.clientX;
-                            const cgCols = Array.from(topTable.querySelectorAll("colgroup col"));
-                            const startW = cgCols[idx] ? parseFloat(cgCols[idx].style.width) : th.getBoundingClientRect().width;
-                            const startTotalW = cgCols.reduce(function(acc, c) {
-                                return acc + (parseFloat(c.style.width) || 80);
-                            }, 0);
-                            resizer.classList.add("resizing");
-                            pDoc.body.style.cursor = "col-resize";
-
-                            function onMove(mv) {
-                                const delta = mv.clientX - startX;
-                                const newW = Math.max(40, Math.round(startW + delta));
-                                const diff = newW - startW;
-                                const newTotal = Math.max(200, Math.round(startTotalW + diff));
-                                if (cgCols[idx]) cgCols[idx].style.width = newW + "px";
-                                th.style.width = newW + "px";
-                                topTable.style.width = newTotal + "px";
-                                topTable.style.minWidth = newTotal + "px";
-
-                                const bTbl = pDoc.querySelector("table.val-table-bot");
-                                if (bTbl) {
-                                    const bCols = Array.from(bTbl.querySelectorAll("colgroup col"));
-                                    if (bCols[idx]) bCols[idx].style.width = newW + "px";
-                                    bTbl.style.width = newTotal + "px";
-                                    bTbl.style.minWidth = newTotal + "px";
-                                }
-                            }
-
-                            function onUp() {
-                                resizer.classList.remove("resizing");
-                                pDoc.body.style.cursor = "";
-                                pDoc.removeEventListener("mousemove", onMove);
-                                pDoc.removeEventListener("mouseup", onUp);
-                                const obj = {};
-                                const colsNow = Array.from(topTable.querySelectorAll("colgroup col"));
-                                colsNow.forEach(function(c, i) {
-                                    obj[i] = Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
-                                });
-                                try {
-                                    pWin.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
-                                } catch (e) {}
-                            }
-
-                            pDoc.addEventListener("mousemove", onMove);
-                            pDoc.addEventListener("mouseup", onUp);
-                        });
-
-                        th.appendChild(resizer);
-                    });
-
-                    topTable.dataset.resizeReady = "1";
-                };
-
-                pWin.__initValTableResize();
-
-                if (!pWin.__valTableObserver) {
-                    pWin.__valTableObserver = new MutationObserver(function() {
-                        if (pWin.__initValTableResize) {
-                            pWin.__initValTableResize();
-                        }
-                        if (pWin.__raioxPendingScroll) {
-                            const mk = pDoc.getElementById("raiox-current-" + pWin.__raioxPendingScroll);
-                            if (mk) {
-                                pWin.__raioxPendingScroll = null;
-                                const activeRow = pDoc.querySelector("tr.raiox-active-row");
-                                if (activeRow) {
-                                    setTimeout(function() {
-                                        activeRow.scrollIntoView({ behavior: "smooth", block: "start" });
-                                    }, 80);
-                                }
-                            }
-                        }
-                    });
-                    pWin.__valTableObserver.observe(pDoc.body, { childList: true, subtree: true });
-                }
-
-                if (!pWin.__raioxClickHandlerAttached) {
-                    pWin.__raioxClickHandlerAttached = true;
-                    pDoc.addEventListener("click", function(e) {
-                        const linkRx = e.target && e.target.closest ? e.target.closest('a[href^="#raiox-"]') : null;
-                        if (linkRx) {
+                    const tdCell = e.target && e.target.closest ? e.target.closest("table.val-table tbody tr td") : null;
+                    if (tdCell && tdCell.cellIndex === 0) {
+                        const innerChk = tdCell.querySelector(".comp-chk-btn");
+                        if (innerChk) {
                             e.preventDefault();
                             e.stopPropagation();
-                            const href = linkRx.getAttribute("href") || "";
-                            const ticker = href.replace("#raiox-", "").trim().toUpperCase();
-                            if (ticker && pWin.__raioxSyncBridge) {
-                                pWin.__raioxSyncBridge(ticker);
+                            innerChk.classList.toggle("checked");
+                            innerChk.setAttribute("aria-checked", innerChk.classList.contains("checked") ? "true" : "false");
+                            const tkCmp = (innerChk.getAttribute("data-comp-ticker") || "").trim().toUpperCase();
+                            if (tkCmp && pWin.__compSyncBridge) {
+                                pWin.__compSyncBridge(tkCmp);
                             }
-                            return;
                         }
+                        return;
+                    }
 
-                        const linkCmp = e.target && e.target.closest ? e.target.closest('a[href^="#comp-"]') : null;
-                        if (linkCmp) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            linkCmp.classList.toggle("checked");
-                            const href = linkCmp.getAttribute("href") || "";
-                            const ticker = href.replace("#comp-", "").trim().toUpperCase();
-                            if (ticker && pWin.__compSyncBridge) {
-                                pWin.__compSyncBridge(ticker);
-                            }
+                    const rowRx = e.target && e.target.closest ? e.target.closest("table.val-table tbody tr[data-raiox-ticker]") : null;
+                    if (rowRx) {
+                        const selTxt = pWin.getSelection ? pWin.getSelection().toString() : "";
+                        if (selTxt && selTxt.length > 0) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const tickerRx = (rowRx.getAttribute("data-raiox-ticker") || "").trim().toUpperCase();
+                        if (tickerRx && pWin.__raioxSyncBridge) {
+                            pWin.__raioxSyncBridge(tickerRx);
                         }
-                    }, true);
-                }
-            })();
-            </script>
-            """,
-            height=0,
-        )
+                    }
+                }, true);
+            }
+        })();
+        </script>
+        """.replace("__USE_PARENT__", "false" if _usa_st_html else "true")
+
+        if _usa_st_html:
+            st.html(_js_tabela, unsafe_allow_javascript=True)
+        else:
+            components.html(_js_tabela, height=0)
 
         # --- RANKING DE ATRATIVIDADE (EXPANDER + QUANTIDADE ESCOLHÍVEL) ---
         lista_rank_base = lista_tab if (busca_tabela and busca_tabela.strip() and lista_tab) else resultados

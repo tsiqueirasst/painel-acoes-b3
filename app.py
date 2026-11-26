@@ -235,8 +235,8 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
     critico_kw = (
         "recuperacao judicial", "pedido de falencia", "falencia", "fraude",
         "calote", "default", "cvm investiga", "investigada pela cvm",
-        "investigacao da cvm", "pf investiga", "mpf investiga", "inadimpl",
-        "rebaix", "rombo", "intervencao", "liquidacao extrajudicial",
+        "investigacao da cvm", "pf investiga", "mpf investiga",
+        "rombo", "intervencao", "liquidacao extrajudicial",
     )
     if any(k in t for k in critico_kw):
         return "🚨 Risco Crítico", "critico", -5.0
@@ -252,7 +252,8 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
         "decepciona", "queda forte", "queda de receita", "queda na receita",
         "receita cai", "lucro cai", "lucro recua", "lucro desaba",
         "queda no lucro", "recuo no lucro", "corta dividendo", "suspende dividendo",
-        "desaba", "derrete", "despenc", "tombo", "crise", "multa", "queda ", "cai ",
+        "desaba", "derrete", "despenc", "tombo", "crise", "multa",
+        "inadimpl", "rebaix", "queda ", "cai ",
     )
     if tem_prej_neg or any(k in t for k in neg_kw):
         return "🔴 Atenção", "negativo", -2.5
@@ -283,7 +284,7 @@ def _classificar_noticia(titulo: str) -> str:
 
 def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = None) -> dict:
     if not itens:
-        return {"news_score": 0.0, "news_resumo": "⚪ Neutro", "qtd_30d": 0, "qtd_7d": 0}
+        return {"news_score": 0.0, "news_resumo": "⚪ Neutro", "qtd_30d": 0, "qtd_7d": 0, "tem_rj": False}
 
     agora = agora_ts if agora_ts is not None else time.time()
     limite_30d = agora - (30 * 86400)
@@ -318,10 +319,10 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
             _, cat, pts = _classificar_sentimento_noticia(titulo)
 
         soma_pts += float(pts) * peso_tempo
+        if "recuperacao judicial" in t_norm or "pedido de falencia" in t_norm or "falencia" in t_norm:
+            tem_rj = True
         if cat == "critico":
             cnt_critico += 1
-            if "recuperacao judicial" in t_norm or "falencia" in t_norm:
-                tem_rj = True
         elif cat == "negativo":
             cnt_neg += 1
             if any(k in t_norm for k in ("prejuizo", "reverte lucro", "frustra", "queda de receita", "queda na receita")):
@@ -335,8 +336,10 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
 
     news_score = round(max(-10.0, min(10.0, soma_pts)), 1)
 
-    if cnt_critico > 0:
-        news_resumo = "🚨 Risco Crítico / RJ" if tem_rj else "🚨 Risco Crítico"
+    if tem_rj:
+        news_resumo = "🚨 Risco Crítico / RJ"
+    elif cnt_critico > 0:
+        news_resumo = "🔴 Alerta em Notícias"
     elif news_score <= -2.0 or (cnt_neg > cnt_pos and news_score < 0.0):
         news_resumo = "🔴 Prejuízo Recente" if tem_prej_ou_frustra else "🔴 Notícias Negativas"
     elif news_score >= 2.0 or (cnt_pos > cnt_neg and news_score > 0.0):
@@ -349,6 +352,7 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         "news_resumo": news_resumo,
         "qtd_30d": qtd_30d,
         "qtd_7d": qtd_7d,
+        "tem_rj": tem_rj,
     }
 
 
@@ -1518,9 +1522,11 @@ def toggle_favorito(ticker: str):
 def badge_veredito_html(veredito: str) -> str:
     estilos = {
         "🟢 Excelente": ("rgba(34,197,94,0.18)", "#22c55e", "rgba(34,197,94,0.45)", "🟢 Excelente"),
+        "🔵 Bom (Desconto": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Desc. Patr."),
         "🔵 Bom": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Bom (LP)"),
         "🟣 Esticado": ("rgba(168,85,247,0.18)", "#c084fc", "rgba(168,85,247,0.45)", "🟣 Esticado"),
         "🟠 Indeciso": ("rgba(249,115,22,0.18)", "#fb923c", "rgba(249,115,22,0.45)", "🟠 Indeciso"),
+        "🟡 Regular (Yield": ("rgba(234,179,8,0.18)", "#facc15", "rgba(234,179,8,0.45)", "🟡 Yield Baixo"),
         "🟡 Regular": ("rgba(234,179,8,0.18)", "#facc15", "rgba(234,179,8,0.45)", "🟡 Regular"),
         "🔴 Crítico": ("rgba(239,68,68,0.18)", "#f87171", "rgba(239,68,68,0.45)", "🔴 Crítico"),
     }
@@ -1796,6 +1802,7 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
 
     news_score = float(d.get("news_score") or 0.0)
     news_resumo = str(d.get("news_resumo") or "⚪ Neutro")
+    news_tem_rj = bool(d.get("news_tem_rj", False)) or ("/ RJ" in news_resumo)
 
     # === 1) FAIXAS DE PREÇO DO MODELO (CVM COMPLIANT) ===
     div_teto_ref = pt_med if (pt_med and pt_med > 0) else (pt_bazin if (pt_bazin and pt_bazin > 0) else None)
@@ -1911,7 +1918,7 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
 
     score_lp_bruto = pts_val_lp + pts_rent_lp + pts_saude_lp + pts_news_lp
 
-    # Trava Anti-Armadilha (Value Trap)
+    # Trava Anti-Armadilha (Value Trap — Regra Universal de Solvência)
     armadilha_motivos = []
     if marg_liq is not None and marg_liq < 0:
         armadilha_motivos.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
@@ -1919,8 +1926,8 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         armadilha_motivos.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
     if (not eh_banco_seg) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
         armadilha_motivos.append(f"Dív/Patrim elevada ({fmt_num(div_brut_patrim)}x > 3,0x)")
-    if "🚨" in news_resumo:
-        armadilha_motivos.append("risco crítico em notícias (RJ/fraude/alerta)")
+    if news_tem_rj:
+        armadilha_motivos.append("menção comprovada a recuperação judicial / falência")
 
     eh_value_trap = len(armadilha_motivos) > 0
     score_lp = round(min(score_lp_bruto, 50.0) if eh_value_trap else min(100.0, score_lp_bruto), 1)
@@ -2001,23 +2008,52 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     score_cp = round(min(100.0, pts_ifr + pts_medias + pts_news_cp + pts_vol), 1)
     score_geral = round((0.60 * score_lp) + (0.40 * score_cp), 1)
 
-    # === 4) VEREDITO QUANTITATIVO DO MODELO (6 SELOS) ===
-    esta_esticado = (
-        (preco_sobrepreco is not None and cot > 0 and cot >= preco_sobrepreco)
-        or (avg_ms_real is not None and avg_ms_real < -15.0)
-        or (ifr_14 is not None and ifr_14 >= 72.0 and (avg_ms_real is None or avg_ms_real < 5.0))
-        or (dist_mm200_pct is not None and dist_mm200_pct > 30.0 and (avg_ms_real is None or avg_ms_real < 0.0))
+    # === 4) VEREDITO QUANTITATIVO DO MODELO (BLINDAGEM UNIVERSAL) ===
+    if eh_banco_seg and (marg_liq is None or marg_liq == 0.0):
+        lucro_solido = (roe is not None and roe >= 10.0) and (pl is None or pl > 0.0)
+    else:
+        lucro_solido = (roe is not None and roe >= 10.0) and (marg_liq is not None and marg_liq >= 5.0)
+
+    cond_pvp_desc = (pvp is not None and 0.0 < pvp <= 1.0)
+    cond_graham_desc = (graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham))
+    cond_pl_desc = (pl is not None and 0.0 < pl <= 8.0 and roe is not None and roe > 0.0)
+    tem_desconto_patrimonial = cond_pvp_desc or cond_graham_desc or cond_pl_desc
+
+    multiplos_esticados = (
+        (pvp is not None and pvp > 1.25)
+        or (pl is not None and pl > 16.0)
+        or (ifr_14 is not None and ifr_14 >= 68.0)
+    )
+    acima_media_tetos = (avg_ms_real is not None and avg_ms_real < 0.0)
+    esta_esticado = (not tem_desconto_patrimonial) and multiplos_esticados and acima_media_tetos
+
+    div_baixo_ou_distorcido = (
+        dy_12m < 4.5
+        or (div_teto_ref is None)
+        or (cot > 0.0 and float(div_teto_ref) < cot)
     )
 
-    if eh_value_trap or score_lp < 38.0 or (score_geral < 42.0 and not esta_esticado):
+    if eh_value_trap:
         veredito = "🔴 Crítico (Risco Alto)"
+    elif lucro_solido and news_score < 0.0:
+        veredito = "🟠 Indeciso (Sinais Mistos)"
     elif esta_esticado:
         veredito = "🟣 Esticado (Alerta Topo/Sobrepreço)"
     elif score_geral >= 72.0 and score_lp >= 70.0 and (avg_ms_real is None or avg_ms_real > 0.0):
         veredito = "🟢 Excelente (Forte Atratividade)"
     elif score_lp >= 62.0 and score_geral >= 58.0:
-        veredito = "🔵 Bom (Acúmulo LP)"
-    elif abs(score_lp - score_cp) >= 20.0 or (score_lp >= 58.0 and news_score <= -2.5) or (score_cp >= 65.0 and score_lp < 55.0):
+        if tem_desconto_patrimonial and div_baixo_ou_distorcido:
+            veredito = "🔵 Bom (Desconto Patrimonial)"
+        else:
+            veredito = "🔵 Bom (Acúmulo LP)"
+    elif tem_desconto_patrimonial:
+        if score_lp >= 55.0 and (cond_pvp_desc or cond_graham_desc):
+            veredito = "🔵 Bom (Desconto Patrimonial)"
+        elif div_baixo_ou_distorcido:
+            veredito = "🟡 Regular (Yield Baixo)"
+        else:
+            veredito = "🟡 Regular (Neutro)"
+    elif abs(score_lp - score_cp) >= 20.0 or news_score <= -2.5 or (score_cp >= 65.0 and score_lp < 55.0):
         veredito = "🟠 Indeciso (Sinais Mistos)"
     else:
         veredito = "🟡 Regular (Neutro)"
@@ -2622,11 +2658,32 @@ def montar_item_completo(a: dict) -> dict:
     pl = (cot / lpa) if (cot > 0 and lpa is not None and lpa != 0) else a.get("pl")
     pvp = (cot / vpa) if (cot > 0 and vpa is not None and vpa != 0) else a.get("pvp")
 
-    dpa_12m = yf_info.get("dpa_12m_yf") if yf_info.get("dpa_12m_yf") is not None else (a.get("dpa_12m") or 0.0)
-    dy_12m = (dpa_12m / cot) * 100 if (dpa_12m and cot > 0) else (a.get("dy_12m") or 0.0)
+    dy_fund = float(a.get("dy_12m") or 0.0)
+    dpa_confiavel = (cot * (dy_fund / 100.0)) if (cot > 0 and dy_fund > 0) else 0.0
+
+    dpa_12m_yf = yf_info.get("dpa_12m_yf")
+    if dpa_12m_yf is not None and cot > 0:
+        dy_yf_12m = (float(dpa_12m_yf) / cot) * 100.0
+        if dy_fund > 0:
+            dpa_12m = dpa_confiavel if (abs(dy_yf_12m - dy_fund) / dy_fund > 0.40) else float(dpa_12m_yf)
+        else:
+            dpa_12m = 0.0 if dy_yf_12m > 1.0 else float(dpa_12m_yf)
+    else:
+        dpa_12m = dpa_confiavel if dpa_confiavel > 0 else float(a.get("dpa_12m") or 0.0)
+
+    dy_12m = (dpa_12m / cot) * 100.0 if (dpa_12m and cot > 0) else dy_fund
     dpa_med_6a = yf_info.get("dpa_med_6a")
     anos_hist = yf_info.get("anos_hist", 0)
-    dpa_proj = yf_info.get("dpa_proj")
+
+    dpa_proj_yf = yf_info.get("dpa_proj")
+    if dpa_proj_yf is not None and cot > 0:
+        dy_yf_proj = (float(dpa_proj_yf) / cot) * 100.0
+        if dy_fund > 0:
+            dpa_proj = dpa_confiavel if (abs(dy_yf_proj - dy_fund) / dy_fund > 0.40) else float(dpa_proj_yf)
+        else:
+            dpa_proj = 0.0 if (dpa_12m == 0.0 and dy_yf_proj > 1.0) else float(dpa_proj_yf)
+    else:
+        dpa_proj = dpa_confiavel if dpa_confiavel > 0 else None
 
     pt_med = (dpa_med_6a / 0.06) if (dpa_med_6a and dpa_med_6a > 0) else None
     pt_proj = (dpa_proj / 0.06) if (dpa_proj and dpa_proj > 0) else None
@@ -2658,6 +2715,7 @@ def montar_item_completo(a: dict) -> dict:
         "news_resumo": news_info.get("news_resumo", "⚪ Neutro"),
         "news_qtd_30d": news_info.get("qtd_30d", 0),
         "news_qtd_7d": news_info.get("qtd_7d", 0),
+        "news_tem_rj": news_info.get("tem_rj", False),
     }
     res_score = calcular_score(item, pt_med, pt_proj, pt_bazin, graham)
     item["score_lp"] = res_score["score_lp"]
@@ -2697,10 +2755,10 @@ with tab1:
         }
         VEREDITOS_OPCOES = [
             "🟢 Excelente (Forte Atratividade)",
-            "🔵 Bom (Acúmulo LP)",
+            "🔵 Bom (Acúmulo LP / Desconto)",
             "🟣 Esticado (Alerta Topo/Sobrepreço)",
             "🟠 Indeciso (Sinais Mistos)",
-            "🟡 Regular (Neutro)",
+            "🟡 Regular (Neutro / Yield Baixo)",
             "🔴 Crítico (Risco Alto)",
         ]
 
@@ -2731,8 +2789,8 @@ with tab1:
             )
         ]
         if filtro_vereditos:
-            ver_set = set(filtro_vereditos)
-            resultados_tab = [r for r in resultados_tab if r.get("veredito") in ver_set]
+            ver_prefixos = tuple(" ".join(v.split()[:2]) for v in filtro_vereditos)
+            resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])

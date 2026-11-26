@@ -3671,6 +3671,111 @@ with tab1:
             ver_prefixos = tuple(" ".join(v.split()[:2]) for v in filtro_vereditos)
             resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
 
+        if len(resultados_tab) >= 2:
+            st.markdown("#### 📡 Radar de Destaques Rápidos")
+            rc1, rc2, rc3, rc4 = st.columns(4)
+
+            # Card 1: Líder de Atratividade
+            lider_atr = resultados_tab[0]
+            with rc1:
+                with st.container(border=True):
+                    st.markdown("**🏆 Líder de Atratividade**")
+                    st.markdown(
+                        f"<div style='font-size:20px; font-weight:700; color:#60a5fa;'>{lider_atr['ticker']}</div>"
+                        f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(lider_atr['nome'][:28])}</div>"
+                        f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(lider_atr['cotacao'])}</strong></div>"
+                        f"<div style='font-size:13px;'>Score Ativo: <strong>{fmt_num(lider_atr['score_ativo'], 1)}/100</strong></div>"
+                        f"<div style='margin-top:4px;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            # Card 2: Maior DY Sustentável
+            cands_dy = [
+                r for r in resultados_tab
+                if float(r.get("dy_12m") or 0.0) > 0.0
+                and not r.get("eh_value_trap")
+                and (r.get("roe") is not None and float(r["roe"]) > 10.0)
+                and (
+                    (r.get("marg_liq") is not None and float(r["marg_liq"]) > 0.0)
+                    or (r.get("eh_banco_seg") and (r.get("marg_liq") is None or float(r["marg_liq"]) == 0.0) and (r.get("pl") is None or float(r["pl"]) > 0.0))
+                )
+            ]
+            with rc2:
+                with st.container(border=True):
+                    st.markdown("**💰 Maior DY Sustentável**")
+                    if cands_dy:
+                        top_dy = max(cands_dy, key=lambda x: float(x["dy_12m"]))
+                        bz_dy = top_dy.get("pt_bazin")
+                        bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
+                        st.markdown(
+                            f"<div style='font-size:20px; font-weight:700; color:#22c55e;'>{top_dy['ticker']}</div>"
+                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_dy['nome'][:28])}</div>"
+                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_dy['cotacao'])}</strong></div>"
+                            f"<div style='font-size:13px;'>DY 12m: <strong>{fmt_num(top_dy['dy_12m'], 2)}%</strong></div>"
+                            f"<div style='font-size:12px; opacity:0.85;'>Teto Bazin: <strong>{bz_txt}</strong></div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Sem ativo elegível com ROE > 10% e DY > 0% neste filtro.")
+
+            # Card 3: Oportunidade Técnica (Sobrevendida)
+            cands_ifr = [
+                r for r in resultados_tab
+                if r.get("ifr_14") is not None
+                and not r.get("eh_value_trap")
+                and (r.get("roe") is not None and float(r["roe"]) > 0.0)
+                and (r.get("pl") is None or float(r["pl"]) > 0.0)
+                and float(r.get("score_lp") or 0.0) >= 50.0
+            ]
+            if not cands_ifr:
+                cands_ifr = [
+                    r for r in resultados_tab
+                    if r.get("ifr_14") is not None
+                    and not r.get("eh_value_trap")
+                    and (r.get("roe") is None or float(r["roe"]) > 0.0)
+                ]
+            with rc3:
+                with st.container(border=True):
+                    st.markdown("**⚡ Oportunidade Técnica**")
+                    if cands_ifr:
+                        top_ifr = min(cands_ifr, key=lambda x: float(x["ifr_14"]))
+                        d200_i = top_ifr.get("dist_mm200_pct")
+                        d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
+                        st.markdown(
+                            f"<div style='font-size:20px; font-weight:700; color:#facc15;'>{top_ifr['ticker']}</div>"
+                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_ifr['nome'][:28])}</div>"
+                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_ifr['cotacao'])}</strong></div>"
+                            f"<div style='font-size:13px;'>IFR (14d): <strong>{fmt_num(top_ifr['ifr_14'], 1)}</strong></div>"
+                            f"<div style='font-size:12px; opacity:0.85;'>Dist. MM200: <strong>{d200_s}</strong></div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Indicadores técnicos não carregados para este filtro.")
+
+            # Card 4: Maior Desconto Graham
+            cands_gr = []
+            for r_g in resultados_tab:
+                if r_g.get("eh_value_trap"):
+                    continue
+                ms_g = calc_ms(r_g.get("graham"), r_g["cotacao"])
+                if ms_g is not None and ms_g > 0.0:
+                    cands_gr.append((ms_g, r_g))
+            with rc4:
+                with st.container(border=True):
+                    st.markdown("**🛡️ Maior Desconto Graham**")
+                    if cands_gr:
+                        ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
+                        st.markdown(
+                            f"<div style='font-size:20px; font-weight:700; color:#38bdf8;'>{top_gr['ticker']}</div>"
+                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_gr['nome'][:28])}</div>"
+                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_gr['cotacao'])}</strong></div>"
+                            f"<div style='font-size:13px;'>Graham: <strong>R$ {fmt_num(top_gr['graham'])}</strong></div>"
+                            f"<div style='font-size:12px; color:#22c55e; font-weight:700;'>Margem: +{fmt_num(ms_best, 1)}%</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.caption("Nenhum ativo abaixo do valor de Graham neste filtro.")
+
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             with st.container(border=True):
                 c_modo_sc, c_filt_ver, c_dic_tab = st.columns([2.0, 1.35, 0.9])
@@ -4797,6 +4902,191 @@ with tab3:
                 f"</tr></thead><tbody>{''.join(rows_c)}</tbody></table></div>"
             )
             st.markdown(html_c, unsafe_allow_html=True)
+
+            with st.expander("🧭 Assistente de Aporte Inteligente — Sugestão de Onde Aportar este Mês", expanded=False):
+                ca1, ca2 = st.columns([1.4, 2.2])
+                with ca1:
+                    valor_aporte = st.number_input(
+                        "Valor disponível para aporte este mês (R$):",
+                        min_value=50.0,
+                        value=1500.0,
+                        step=100.0,
+                        format="%.2f",
+                        key="cart_aporte_valor",
+                    )
+                with ca2:
+                    op_origem_ap = [
+                        "Aportar apenas em ativos já presentes na carteira",
+                        "Permitir sugestões incluindo minhas Ações Favoritas",
+                    ]
+                    origem_ap = st.radio(
+                        "Universo de sugestões:",
+                        options=op_origem_ap,
+                        index=0,
+                        horizontal=True,
+                        key="cart_aporte_origem",
+                    )
+
+                incluir_favs_ap = (origem_ap == op_origem_ap[1])
+                pool_bruto = [dict(x) for x in itens_tabela_cart]
+                tks_no_pool = {x["ticker"] for x in pool_bruto}
+
+                if incluir_favs_ap:
+                    favs_extras = [tf for tf in st.session_state.get("favoritos", []) if tf not in tks_no_pool and tf in mapa_todos]
+                    if favs_extras:
+                        falt_fy = tuple(t for t in favs_extras if t not in dados_yf)
+                        if falt_fy:
+                            dados_yf.update(buscar_yahoo_lote(falt_fy))
+                        falt_fn = tuple(t for t in favs_extras if t not in dados_news)
+                        if falt_fn:
+                            dados_news.update(buscar_sentimento_noticias_lote(falt_fn))
+                        for tf in favs_extras:
+                            it_fav_ap = montar_item_completo(mapa_todos[tf])
+                            it_fav_ap["saldo"] = 0.0
+                            pool_bruto.append(it_fav_ap)
+
+                chave_sc_ap = {
+                    "🏆 Geral (Melhor Compra Equilibrada)": "score_geral",
+                    "🏛️ Longo Prazo (Fundamentos & Dividendos)": "score_lp",
+                    "⚡ Curto Prazo (Timing & Catalisadores)": "score_cp",
+                }.get(st.session_state.get("tab1_modo_score_val", ""), "score_geral")
+
+                elegiveis_ap = [
+                    x for x in pool_bruto
+                    if float(x.get("cotacao") or 0.0) > 0.0
+                    and not x.get("eh_value_trap")
+                    and not str(x.get("veredito", "")).startswith(("🔴 Crítico", "🟣 Esticado"))
+                ]
+
+                if not elegiveis_ap:
+                    st.warning(
+                        "⚠️ Nenhum ativo elegível para aporte seguro no momento: os ativos avaliados estão "
+                        "classificados como **🔴 Crítico** ou **🟣 Esticado**. Considere aguardar melhores pontos de entrada."
+                    )
+                else:
+                    n_base_peso = max(1, len(pool_bruto))
+                    peso_alvo_eq = 100.0 / n_base_peso
+
+                    cands_ranqueados = []
+                    for c_ap in elegiveis_ap:
+                        cot_ap = float(c_ap["cotacao"])
+                        sc_ap = float(c_ap.get(chave_sc_ap, c_ap.get("score_geral") or 0.0))
+                        teto_ap = c_ap.get("preco_teto_modelo")
+                        if teto_ap and float(teto_ap) > 0.0:
+                            desc_teto_pct = ((float(teto_ap) - cot_ap) / float(teto_ap)) * 100.0
+                            pts_desc = max(0.0, min(100.0, ((desc_teto_pct + 20.0) / 70.0) * 100.0))
+                        else:
+                            desc_teto_pct = c_ap.get("avg_ms")
+                            pts_desc = max(0.0, min(100.0, (((desc_teto_pct or 0.0) + 20.0) / 70.0) * 100.0))
+
+                        saldo_ap = float(c_ap.get("saldo") or 0.0)
+                        peso_atual_ap = (saldo_ap / total_atual * 100.0) if total_atual > 0.0 else 0.0
+                        gap_peso = max(0.0, peso_alvo_eq - peso_atual_ap)
+                        pts_rebal = min(100.0, (gap_peso / max(5.0, peso_alvo_eq)) * 100.0)
+
+                        prioridade = (0.50 * sc_ap) + (0.30 * pts_desc) + (0.20 * pts_rebal)
+                        cands_ranqueados.append({
+                            **c_ap,
+                            "_prioridade": prioridade,
+                            "_sc_ativo": sc_ap,
+                            "_desc_teto_pct": desc_teto_pct,
+                            "_peso_atual": peso_atual_ap,
+                            "_eh_novo_fav": (saldo_ap == 0.0),
+                        })
+
+                    cands_ranqueados.sort(key=lambda x: x["_prioridade"], reverse=True)
+                    compraveis = [c for c in cands_ranqueados if float(c["cotacao"]) <= valor_aporte]
+
+                    if not compraveis:
+                        menor_px = min(float(c["cotacao"]) for c in cands_ranqueados)
+                        st.info(
+                            f"O valor disponível (R$ {fmt_num(valor_aporte)}) é inferior à cotação do ativo elegível "
+                            f"mais acessível (R$ {fmt_num(menor_px)})."
+                        )
+                    else:
+                        top_ap = compraveis[:3]
+                        pesos_dist = {1: [1.0], 2: [0.60, 0.40], 3: [0.45, 0.35, 0.20]}[len(top_ap)]
+
+                        qtds_ap = [0] * len(top_ap)
+                        saldo_restante = float(valor_aporte)
+
+                        # Pass 1: distribuição proporcional inicial
+                        for idx_a, (cand_a, w_a) in enumerate(zip(top_ap, pesos_dist)):
+                            fatia = valor_aporte * w_a
+                            px_a = float(cand_a["cotacao"])
+                            q_a = int(min(fatia, saldo_restante) // px_a)
+                            if q_a > 0:
+                                qtds_ap[idx_a] += q_a
+                                saldo_restante -= q_a * px_a
+
+                        # Pass 2: aproveitamento do troco priorizando os melhores ranqueados
+                        comprou_extra = True
+                        while comprou_extra:
+                            comprou_extra = False
+                            for idx_a, cand_a in enumerate(top_ap):
+                                px_a = float(cand_a["cotacao"])
+                                if saldo_restante >= px_a:
+                                    qtds_ap[idx_a] += 1
+                                    saldo_restante -= px_a
+                                    comprou_extra = True
+
+                        sugestoes_finais = []
+                        total_alocado = 0.0
+                        for idx_a, cand_a in enumerate(top_ap):
+                            q_f = qtds_ap[idx_a]
+                            if q_f <= 0:
+                                continue
+                            px_a = float(cand_a["cotacao"])
+                            custo_lote = q_f * px_a
+                            total_alocado += custo_lote
+
+                            motivos_ap = []
+                            dt_pct = cand_a["_desc_teto_pct"]
+                            if dt_pct is not None:
+                                if dt_pct >= 0:
+                                    motivos_ap.append(f"desconto de {fmt_num(dt_pct, 1)}% frente ao teto")
+                                else:
+                                    motivos_ap.append(f"{fmt_num(abs(dt_pct), 1)}% acima do teto conservador")
+                            if cand_a["_eh_novo_fav"]:
+                                motivos_ap.append("nova entrada via Favoritas")
+                            elif cand_a["_peso_atual"] < peso_alvo_eq:
+                                motivos_ap.append(f"rebalanceamento (peso atual {fmt_num(cand_a['_peso_atual'], 1)}%)")
+                            ifr_a = cand_a.get("ifr_14")
+                            if ifr_a is not None and 30.0 <= float(ifr_a) <= 48.0:
+                                motivos_ap.append(f"IFR favorável ({fmt_num(ifr_a, 1)})")
+                            motivos_ap.append(f"Score {fmt_num(cand_a['_sc_ativo'], 1)}/100")
+
+                            teto_a = cand_a.get("preco_teto_modelo")
+                            teto_a_txt = f"R$ {fmt_num(teto_a)}" if (teto_a and float(teto_a) > 0) else "—"
+                            sugestoes_finais.append({
+                                "cand": cand_a,
+                                "qtd": q_f,
+                                "custo": custo_lote,
+                                "teto_txt": teto_a_txt,
+                                "motivo": "; ".join(motivos_ap).capitalize() + ".",
+                            })
+
+                        pct_alocado = (total_alocado / valor_aporte * 100.0) if valor_aporte > 0 else 0.0
+                        ap_m1, ap_m2, ap_m3 = st.columns(3)
+                        ap_m1.metric("💵 Valor Disponível", f"R$ {fmt_num(valor_aporte)}")
+                        ap_m2.metric("✅ Total Alocado", f"R$ {fmt_num(total_alocado)}", f"{fmt_num(pct_alocado, 1)}% do aporte")
+                        ap_m3.metric("💰 Troco em Caixa", f"R$ {fmt_num(saldo_restante)}")
+
+                        cols_sug = st.columns(len(sugestoes_finais))
+                        for col_s, sug in zip(cols_sug, sugestoes_finais):
+                            ca = sug["cand"]
+                            with col_s:
+                                with st.container(border=True):
+                                    st.markdown(
+                                        f"<div style='font-size:19px; font-weight:700; color:#60a5fa;'>{ca['ticker']}</div>"
+                                        f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(ca['nome'])}</div>"
+                                        f"<div style='margin-bottom:6px;'>{badge_veredito_html(ca.get('veredito', ''))}</div>"
+                                        f"<div style='font-size:15px; font-weight:700; color:#22c55e;'>Comprar: {sug['qtd']} ações</div>"
+                                        f"<div style='font-size:14px; margin-bottom:6px;'>Custo do lote: <strong>R$ {fmt_num(sug['custo'])}</strong></div>"
+                                        f"<div style='font-size:12px; opacity:0.9;'>Cotação: <strong>R$ {fmt_num(ca['cotacao'])}</strong> vs Teto: <strong>{sug['teto_txt']}</strong></div>"
+                                        f"<div style='font-size:12px; opacity:0.85; margin-top:6px;'>📝 {html.escape(sug['motivo'])}</div>",
+                                        unsafe_allow_html=True,
+                                    )
 
             with st.expander("🔎 Abrir Gráfico & Histórico Fundamentalista de um ativo da carteira", expanded=False):
                 tk_c_sel = st.selectbox("Escolha o ativo da carteira:", options=[x["ticker"] for x in itens_tabela_cart], key="cart_raiox_sel")

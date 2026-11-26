@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
+import unicodedata
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -39,6 +40,62 @@ BESST_SETORES = {
     "Previdência e Seguros",
     "Telecomunicações",
 }
+
+SETOR_ALIAS = {
+    "Intermediários Financeiros": "Bancos (Intermediários Financeiros)",
+    "Água e Saneamento": "Saneamento (Água e Saneamento)",
+    "Previdência e Seguros": "Seguros e Previdência",
+}
+ALIAS_PARA_SETOR = {v: k for k, v in SETOR_ALIAS.items()}
+
+SETOR_CURTO = {
+    "Intermediários Financeiros": "Bancos",
+    "Energia Elétrica": "Energia Elétrica",
+    "Água e Saneamento": "Saneamento",
+    "Previdência e Seguros": "Seguros",
+    "Telecomunicações": "Telecomunicações",
+}
+
+
+def _norm_txt(s: str) -> str:
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower()
+
+
+def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
+    ln = " ".join((long_name or "").split())
+    sn = " ".join((short_name or "").split())
+    ln_low = ln.lower()
+
+    if ln and (ln_low.startswith("banco ") or "banco " in ln_low or "unibanco" in ln_low or ln_low.startswith("caixa ")):
+        limpo = re.sub(r"\((Brasil|Brazil)\)", "", ln, flags=re.IGNORECASE)
+        limpo = re.sub(r"\b(Holding|S\.A\.|S/A|S\.A|SA|Ltda\.?)\b", "", limpo, flags=re.IGNORECASE)
+        limpo = re.sub(r"[,\-\s]+$", "", " ".join(limpo.split())).strip()
+        if limpo:
+            return limpo
+
+    if sn:
+        raw_sn = " ".join((short_name or "").split(" "))
+        # Trata casos onde a B3/Yahoo cola o tipo (ON/PN/UNT) na 13ª posição
+        if len(short_name or "") >= 13:
+            s_pad = short_name
+            if s_pad[12:15] in ("ON ", "PN ", "UNT", "PNA", "PNB", "PNC", "PND") or s_pad[12:14] in ("ON", "PN"):
+                raw_sn = s_pad[:12] + " " + s_pad[12:]
+        tokens_remover = {
+            "ON", "PN", "PNA", "PNB", "PNC", "PND", "UNT",
+            "N1", "N2", "NM", "MA", "MB", "ED", "EJ", "EDJ",
+            "EB", "ES", "EX", "CI", "BDR", "DR1", "DR2", "DR3", "ATZ", "REC", "DIR",
+        }
+        partes = [p for p in raw_sn.split() if p.upper() not in tokens_remover]
+        res = " ".join(partes).strip()
+        if res:
+            return res
+
+    if ln:
+        limpo = re.sub(r"\b(S\.A\.|S/A|S\.A|SA|Ltda\.?)\b", "", ln, flags=re.IGNORECASE)
+        limpo = re.sub(r"[,\-\s]+$", "", " ".join(limpo.split())).strip()
+        if limpo:
+            return limpo
+    return ticker
 
 
 # --- UTILITÁRIOS DE FORMATAÇÃO ---
@@ -224,7 +281,7 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, list[dict]
     out = {}
     if not tickers_tuple:
         return out
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=12) as ex:
         for t, res in ex.map(_one, tickers_tuple):
             out[t] = res
     return out
@@ -706,17 +763,23 @@ def carregar_todos_ativos_b3() -> list[dict]:
     return ativos
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def carregar_tickers_por_setor(setor_ids: tuple[str, ...]) -> dict[str, str]:
     mapa_setor = {}
     setores_dict = carregar_setores_fundamentus()
     id_para_nome = {v: k for k, v in setores_dict.items()}
-    for sid in setor_ids:
-        linhas = _ler_tabela_fundamentus(f"https://www.fundamentus.com.br/resultado.php?setor={sid}")
-        nome_setor = id_para_nome.get(sid, f"Setor {sid}")
-        for row in linhas:
-            papel = row.get("Papel", "").strip().upper()
-            if papel:
+
+    def _one_setor(sid: str):
+        try:
+            linhas = _ler_tabela_fundamentus(f"https://www.fundamentus.com.br/resultado.php?setor={sid}")
+            return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()]
+        except Exception:
+            return sid, []
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        for sid, papeis in ex.map(_one_setor, setor_ids):
+            nome_setor = id_para_nome.get(sid, f"Setor {sid}")
+            for papel in papeis:
                 mapa_setor[papel] = nome_setor
     return mapa_setor
 
@@ -731,8 +794,7 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
     try:
         tk = yf.Ticker(f"{ticker}.SA")
         info = tk.info or {}
-        nome_raw = info.get("shortName") or info.get("longName") or ticker
-        nome = " ".join(nome_raw.split())
+        nome = limpar_nome_empresa(info.get("shortName", ""), info.get("longName", ""), ticker)
 
         cot_yf = None
         try:
@@ -1654,6 +1716,10 @@ if "lancamentos" not in st.session_state:
     st.session_state["lancamentos"] = []
 if "favoritos" not in st.session_state:
     st.session_state["favoritos"] = []
+if "comp_selecionados" not in st.session_state:
+    st.session_state["comp_selecionados"] = []
+if "raiox_visivel" not in st.session_state:
+    st.session_state["raiox_visivel"] = False
 
 try:
     if getattr(st.user, "is_logged_in", False) and getattr(st.user, "email", None):
@@ -1702,17 +1768,34 @@ with st.sidebar:
 
     st.divider()
     st.header("🔍 Filtros da Bolsa")
+    st.caption("Combine quantos filtros desejar ao mesmo tempo.")
 
-    opcoes_filtro = [
-        "Todos os Ativos da B3",
+    opcoes_listas = [
         "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)",
         "⭐ Apenas Meus Favoritos",
         "💼 Apenas Minha Carteira",
-    ] + sorted(setores_dict.keys())
+    ]
+    opcoes_setores_exibir = sorted(
+        [SETOR_ALIAS.get(s, s) for s in setores_dict.keys()],
+        key=_norm_txt,
+    )
 
-    setor_url = st.query_params.get("setor", "Todos os Ativos da B3")
-    idx_setor = opcoes_filtro.index(setor_url) if setor_url in opcoes_filtro else 0
-    filtro_setor = st.selectbox("Filtrar por Setor:", opcoes_filtro, index=idx_setor)
+    setor_url = st.query_params.get("setor", "")
+    default_listas = [setor_url] if setor_url in opcoes_listas else []
+    default_setores = [SETOR_ALIAS.get(setor_url, setor_url)] if SETOR_ALIAS.get(setor_url, setor_url) in opcoes_setores_exibir else []
+
+    filtro_listas = st.multiselect(
+        "Listas rápidas (interseção):",
+        options=opcoes_listas,
+        default=default_listas,
+        placeholder="Todas (ou escolha 1 ou mais)",
+    )
+    filtro_setores = st.multiselect(
+        "Setores específicos:",
+        options=opcoes_setores_exibir,
+        default=default_setores,
+        placeholder="Todos os setores",
+    )
 
     liq_min_opcoes = {
         "R$ 0 (mostrar literalmente todas)": 0,
@@ -1745,7 +1828,6 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-st.query_params["setor"] = filtro_setor
 st.query_params["liq"] = liq_label
 if busca_tickers.strip():
     st.query_params["busca"] = busca_tickers.strip()
@@ -1754,31 +1836,28 @@ elif "busca" in st.query_params:
 
 posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
-mapa_setores_ativos = {}
+with st.spinner("Carregando setores da B3..."):
+    mapa_setores_ativos = carregar_mapa_todos_setores()
+
 ativos_filtrados = todos_ativos
 
-if filtro_setor == "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)":
-    ids_besst = tuple(setores_dict[s] for s in BESST_SETORES if s in setores_dict)
-    if ids_besst:
-        with st.spinner("Filtrando empresas do setor BESST..."):
-            mapa_setores_ativos = carregar_tickers_por_setor(ids_besst)
-        ativos_filtrados = [a for a in todos_ativos if a["ticker"] in mapa_setores_ativos]
-elif filtro_setor == "⭐ Apenas Meus Favoritos":
+if "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)" in filtro_listas:
+    ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in BESST_SETORES]
+if "⭐ Apenas Meus Favoritos" in filtro_listas:
     fav_set = set(st.session_state["favoritos"])
-    ativos_filtrados = [a for a in todos_ativos if a["ticker"] in fav_set]
-elif filtro_setor == "💼 Apenas Minha Carteira":
-    ativos_filtrados = [a for a in todos_ativos if a["ticker"] in posicoes_carteira]
-elif filtro_setor != "Todos os Ativos da B3":
-    sid = setores_dict.get(filtro_setor)
-    if sid:
-        with st.spinner(f"Filtrando setor {filtro_setor}..."):
-            mapa_setores_ativos = carregar_tickers_por_setor((sid,))
-        ativos_filtrados = [a for a in todos_ativos if a["ticker"] in mapa_setores_ativos]
+    ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in fav_set]
+if "💼 Apenas Minha Carteira" in filtro_listas:
+    ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in posicoes_carteira]
+
+if filtro_setores:
+    setores_oficiais_sel = {ALIAS_PARA_SETOR.get(s, s) for s in filtro_setores}
+    ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in setores_oficiais_sel]
 
 if busca_tickers.strip():
     lista_busca = {x.strip().upper().replace(".SA", "") for x in busca_tickers.split(",") if x.strip()}
     ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in lista_busca]
-elif filtro_setor not in ("💼 Apenas Minha Carteira", "⭐ Apenas Meus Favoritos"):
+
+if liq_min > 0:
     ativos_filtrados = [a for a in ativos_filtrados if a["liq_2m"] >= liq_min]
 
 preliminares = []
@@ -1830,9 +1909,11 @@ def montar_item_completo(a: dict) -> dict:
     pt_bazin = (dpa_12m / 0.06) if (dpa_12m and dpa_12m > 0) else None
     graham = math.sqrt(22.5 * lpa * vpa) if (lpa and vpa and lpa > 0 and vpa > 0) else None
 
+    setor_oficial_t = mapa_setores_ativos.get(t, "")
+    setor_exib_t = SETOR_CURTO.get(setor_oficial_t, setor_oficial_t)
     item = {
         **a,
-        "cotacao": cot, "nome": nome, "setor_nome": mapa_setores_ativos.get(t, ""),
+        "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t,
         "pl": pl, "pvp": pvp, "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
@@ -1903,6 +1984,44 @@ with tab1:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")
             else:
                 linhas_html = []
+                def _ao_clicar_comparar_tabela():
+                    raw_c = st.session_state.get("comp_bridge", "").strip().upper()
+                    st.session_state["comp_bridge"] = ""
+                    if not raw_c:
+                        return
+                    tk_c = raw_c.split("|")[0].strip()
+                    if not tk_c:
+                        return
+                    sel_c = list(st.session_state.get("comp_selecionados", []))
+                    if tk_c in sel_c:
+                        sel_c.remove(tk_c)
+                    else:
+                        sel_c.append(tk_c)
+                    st.session_state["comp_selecionados"] = sel_c
+                    st.session_state["ms_comp"] = sel_c
+
+                st.text_input(
+                    "comp_bridge_input",
+                    key="comp_bridge",
+                    label_visibility="collapsed",
+                    on_change=_ao_clicar_comparar_tabela,
+                )
+
+                comp_set = set(st.session_state.get("comp_selecionados", []))
+                if comp_set:
+                    c_info_cmp, c_btn_cmp = st.columns([4, 1])
+                    with c_info_cmp:
+                        st.info(
+                            f"⚖️ **{len(comp_set)} ativo(s) selecionado(s) para comparar:** "
+                            f"{', '.join(st.session_state['comp_selecionados'])} — "
+                            "acesse a aba **⚖️ Comparar Ativos** para visualizar (e adicionar mais se quiser)."
+                        )
+                    with c_btn_cmp:
+                        if st.button("🧹 Limpar seleção", key="btn_limpar_comp", use_container_width=True):
+                            st.session_state["comp_selecionados"] = []
+                            st.session_state["ms_comp"] = []
+                            st.rerun()
+
                 fav_set = set(st.session_state["favoritos"])
                 for r in exibir:
                     cot = r["cotacao"]
@@ -1923,15 +2042,17 @@ with tab1:
                     dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
 
                     nome_esc = html.escape(r["nome"])
-                    setor_badge = f"<br><small style='opacity:0.65;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
+                    setor_badge = f"<br><small style='opacity:0.72;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
                     estrela = " ⭐" if r["ticker"] in fav_set else ""
+                    chk_cls = "comp-chk-btn checked" if r["ticker"] in comp_set else "comp-chk-btn"
 
                     href = f"#raiox-{r['ticker']}"
 
                     linha = (
                         "<tr>"
+                        f"<td style='text-align:center;'><a href='#comp-{r['ticker']}' class='{chk_cls}' title='Selecionar para Comparar Ativos'>✓</a></td>"
                         f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
-                        f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>🔎 {r['ticker']}</a>{estrela}<br><small style='opacity:0.8;'>{nome_esc}</small>{setor_badge}</td>"
+                        f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>{r['ticker']}</a>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
                         f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
                         f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
                         f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
@@ -1947,14 +2068,20 @@ with tab1:
                     "<style>"
                     ".val-table-wrap{width:100%;overflow-x:auto;}"
                     ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
-                    ".val-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
-                    ".val-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"
+                    ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
+                    ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
                     ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+                    ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
+                    ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
+                    ".comp-chk-btn{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;border:1.5px solid rgba(148,163,184,0.75);background:transparent;color:transparent;font-size:12px;font-weight:700;text-decoration:none!important;cursor:pointer;transition:all 0.12s ease;}"
+                    ".comp-chk-btn:hover{border-color:#60a5fa;}"
+                    ".comp-chk-btn.checked{background:#3b82f6;border-color:#3b82f6;color:#ffffff;}"
                     "</style>"
                 )
                 tabela_html = (
                     f"{css_tabela}"
                     "<div class='val-table-wrap'><table class='val-table'><thead><tr>"
+                    "<th style='text-align:center;'>⚖️</th>"
                     "<th style='text-align:center;'>Rank<br><small>Score</small></th>"
                     "<th>Ticker / Empresa</th>"
                     f"<th>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
@@ -1973,24 +2100,36 @@ with tab1:
                     "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
                 )
 
-        # --- RAIO-X DO ATIVO (EXPANDER MINIMIZÁVEL) ---
+        # --- RAIO-X DO ATIVO (ABRE/FECHA AO CLICAR NA TABELA) ---
         st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
         opcoes_raiox = [r["ticker"] for r in (exibir if exibir else resultados)]
         if "raiox_ativo_sel" not in st.session_state:
             st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_raiox else opcoes_raiox[0]
+            if ativo_url and ativo_url in opcoes_raiox:
+                st.session_state["raiox_visivel"] = True
         elif st.session_state["raiox_ativo_sel"] not in opcoes_raiox:
             st.session_state["raiox_ativo_sel"] = opcoes_raiox[0]
 
         def _ao_clicar_ticker_tabela():
-            tk_clicado = st.session_state.get("raiox_bridge", "").strip().upper()
-            if tk_clicado:
+            raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
+            st.session_state["raiox_bridge"] = ""
+            if not raw_rx:
+                return
+            tk_clicado = raw_rx.split("|")[0].strip()
+            if not tk_clicado:
+                return
+            if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
+                st.session_state["raiox_visivel"] = False
+            else:
                 st.session_state["raiox_ativo_sel"] = tk_clicado
-                st.session_state["raiox_bridge"] = ""
+                st.session_state["raiox_visivel"] = True
 
         st.markdown(
             "<style>"
             "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
             "div.element-container:has(input[aria-label='raiox_bridge_input']),"
+            "div[data-testid='stElementContainer']:has(input[aria-label='comp_bridge_input']),"
+            "div.element-container:has(input[aria-label='comp_bridge_input']),"
             "div[data-testid='stElementContainer']:has(iframe[height='0']),"
             "div.element-container:has(iframe[height='0']){"
             "position:fixed!important;left:-9999px!important;top:0!important;"
@@ -2010,18 +2149,41 @@ with tab1:
             )
             if st.session_state.get("raiox_ativo_sel") not in opcoes_rx:
                 st.session_state["raiox_ativo_sel"] = opcoes_rx[0]
-            with st.expander("🔎 Raio-X do Ativo (ou clique diretamente no código azul da tabela acima) — clique para minimizar/maximizar", expanded=True):
-                ativo_escolhido = st.selectbox(
-                    "Ativo selecionado:",
-                    options=opcoes_rx,
-                    key="raiox_ativo_sel",
-                )
+
+            visivel = st.session_state.get("raiox_visivel", False)
+            if not visivel:
                 st.markdown(
-                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                    "<span class='raiox-current-marker' id='raiox-closed' style='display:none;'></span>",
                     unsafe_allow_html=True,
                 )
-                item_raiox = mapa_res[ativo_escolhido]
-                render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+                c_msg_rx, c_btn_rx = st.columns([4, 1.2])
+                with c_msg_rx:
+                    st.caption("💡 Clique em qualquer **Ticker** na tabela comparativa acima para abrir o **Raio-X do Ativo** aqui embaixo (clique novamente nele para fechar).")
+                with c_btn_rx:
+                    if st.button("🔎 Abrir Raio-X", key="btn_abrir_raiox", use_container_width=True):
+                        st.session_state["raiox_visivel"] = True
+                        st.rerun()
+            else:
+                with st.container(border=True):
+                    c_rx1, c_rx2 = st.columns([3.8, 1])
+                    with c_rx1:
+                        ativo_escolhido = st.selectbox(
+                            "🔎 Raio-X do Ativo selecionado:",
+                            options=opcoes_rx,
+                            key="raiox_ativo_sel",
+                        )
+                    with c_rx2:
+                        st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
+                        if st.button("✖️ Fechar Raio-X", key="btn_fechar_raiox", use_container_width=True):
+                            st.session_state["raiox_visivel"] = False
+                            st.rerun()
+
+                    st.markdown(
+                        f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                        unsafe_allow_html=True,
+                    )
+                    item_raiox = mapa_res[ativo_escolhido]
+                    render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
 
         render_secao_raiox(opcoes_raiox, {r["ticker"]: r for r in resultados})
 
@@ -2031,26 +2193,14 @@ with tab1:
             (function() {
                 const pWin = window.parent;
                 const pDoc = pWin.document;
+                const STORAGE_KEY = "painel_b3_val_col_widths_v1";
 
-                pWin.__raioxSyncBridge = function(ticker) {
-                    const marker = pDoc.querySelector(".raiox-current-marker");
-                    const atual = marker ? marker.id.replace("raiox-current-", "").trim().toUpperCase() : "";
-                    const targetEl = pDoc.getElementById("raiox");
-
-                    if (atual === ticker) {
-                        if (targetEl) {
-                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                        }
-                        return;
-                    }
-
-                    const inp = pDoc.querySelector('input[aria-label="raiox_bridge_input"]');
+                function sendBridgeInput(ariaLabel, payload) {
+                    const inp = pDoc.querySelector('input[aria-label="' + ariaLabel + '"]');
                     if (!inp) return;
-
                     const setter = Object.getOwnPropertyDescriptor(pWin.HTMLInputElement.prototype, "value").set;
-                    setter.call(inp, ticker);
+                    setter.call(inp, payload);
                     inp.dispatchEvent(new Event("input", { bubbles: true }));
-
                     setTimeout(function() {
                         inp.dispatchEvent(new KeyboardEvent("keydown", {
                             key: "Enter",
@@ -2061,23 +2211,175 @@ with tab1:
                             cancelable: true
                         }));
                         inp.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-                        if (targetEl) {
-                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                        }
                     }, 60);
+                }
+
+                pWin.__raioxSyncBridge = function(ticker) {
+                    const marker = pDoc.querySelector(".raiox-current-marker");
+                    const atual = marker && marker.id.startsWith("raiox-current-")
+                        ? marker.id.replace("raiox-current-", "").trim().toUpperCase()
+                        : "";
+                    const targetEl = pDoc.getElementById("raiox");
+                    const vaiFechar = (atual === ticker);
+
+                    sendBridgeInput("raiox_bridge_input", ticker + "|" + Date.now());
+
+                    if (!vaiFechar && targetEl) {
+                        setTimeout(function() {
+                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }, 120);
+                    }
                 };
+
+                pWin.__compSyncBridge = function(ticker) {
+                    sendBridgeInput("comp_bridge_input", ticker + "|" + Date.now());
+                };
+
+                pWin.__initValTableResize = function() {
+                    const table = pDoc.querySelector("table.val-table");
+                    if (!table || table.dataset.resizeReady) return;
+                    const ths = Array.from(table.querySelectorAll("thead tr th"));
+                    if (!ths.length) return;
+
+                    let saved = {};
+                    try {
+                        saved = JSON.parse(pWin.localStorage.getItem(STORAGE_KEY) || "{}") || {};
+                    } catch (err) {
+                        saved = {};
+                    }
+                    const hasSaved = Object.keys(saved).length === ths.length;
+
+                    let widths = [];
+                    if (hasSaved) {
+                        widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
+                    } else {
+                        table.style.tableLayout = "auto";
+                        widths = ths.map((th, i) => Math.max(i === 0 ? 42 : 54, Math.round(th.getBoundingClientRect().width)));
+                    }
+
+                    let colgroup = table.querySelector("colgroup");
+                    if (!colgroup) {
+                        colgroup = pDoc.createElement("colgroup");
+                        table.insertBefore(colgroup, table.firstChild);
+                    }
+                    colgroup.innerHTML = "";
+                    let totalW = 0;
+                    widths.forEach((w, idx) => {
+                        const col = pDoc.createElement("col");
+                        col.style.width = w + "px";
+                        colgroup.appendChild(col);
+                        ths[idx].style.width = w + "px";
+                        totalW += w;
+                    });
+
+                    table.style.tableLayout = "fixed";
+                    table.style.width = totalW + "px";
+                    table.style.minWidth = totalW + "px";
+
+                    ths.forEach((th, idx) => {
+                        if (th.querySelector(".col-resizer")) return;
+                        const resizer = pDoc.createElement("div");
+                        resizer.className = "col-resizer";
+                        resizer.title = "Arraste para redimensionar (duplo clique para resetar)";
+
+                        resizer.addEventListener("dblclick", function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            try { pWin.localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+                            table.style.tableLayout = "auto";
+                            table.style.width = "100%";
+                            table.style.minWidth = "";
+                            const cg = table.querySelector("colgroup");
+                            if (cg) cg.remove();
+                            ths.forEach(function(t) { t.style.width = ""; });
+                            delete table.dataset.resizeReady;
+                            setTimeout(pWin.__initValTableResize, 30);
+                        });
+
+                        resizer.addEventListener("mousedown", function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            const startX = ev.clientX;
+                            const cgCols = Array.from(table.querySelectorAll("colgroup col"));
+                            const startW = cgCols[idx] ? parseFloat(cgCols[idx].style.width) : th.getBoundingClientRect().width;
+                            const startTotalW = cgCols.reduce(function(acc, c) {
+                                return acc + (parseFloat(c.style.width) || 80);
+                            }, 0);
+                            resizer.classList.add("resizing");
+                            pDoc.body.style.cursor = "col-resize";
+
+                            function onMove(mv) {
+                                const delta = mv.clientX - startX;
+                                const newW = Math.max(40, Math.round(startW + delta));
+                                const diff = newW - startW;
+                                if (cgCols[idx]) cgCols[idx].style.width = newW + "px";
+                                th.style.width = newW + "px";
+                                const newTotal = Math.max(200, Math.round(startTotalW + diff));
+                                table.style.width = newTotal + "px";
+                                table.style.minWidth = newTotal + "px";
+                            }
+
+                            function onUp() {
+                                resizer.classList.remove("resizing");
+                                pDoc.body.style.cursor = "";
+                                pDoc.removeEventListener("mousemove", onMove);
+                                pDoc.removeEventListener("mouseup", onUp);
+                                const obj = {};
+                                const colsNow = Array.from(table.querySelectorAll("colgroup col"));
+                                colsNow.forEach(function(c, i) {
+                                    obj[i] = Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
+                                });
+                                try {
+                                    pWin.localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+                                } catch (e) {}
+                            }
+
+                            pDoc.addEventListener("mousemove", onMove);
+                            pDoc.addEventListener("mouseup", onUp);
+                        });
+
+                        th.appendChild(resizer);
+                    });
+
+                    table.dataset.resizeReady = "1";
+                };
+
+                pWin.__initValTableResize();
+
+                if (!pWin.__valTableObserver) {
+                    pWin.__valTableObserver = new MutationObserver(function() {
+                        if (pWin.__initValTableResize) {
+                            pWin.__initValTableResize();
+                        }
+                    });
+                    pWin.__valTableObserver.observe(pDoc.body, { childList: true, subtree: true });
+                }
 
                 if (!pWin.__raioxClickHandlerAttached) {
                     pWin.__raioxClickHandlerAttached = true;
                     pDoc.addEventListener("click", function(e) {
-                        const link = e.target && e.target.closest ? e.target.closest('a[href^="#raiox-"]') : null;
-                        if (!link) return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        const href = link.getAttribute("href") || "";
-                        const ticker = href.replace("#raiox-", "").trim().toUpperCase();
-                        if (ticker && pWin.__raioxSyncBridge) {
-                            pWin.__raioxSyncBridge(ticker);
+                        const linkRx = e.target && e.target.closest ? e.target.closest('a[href^="#raiox-"]') : null;
+                        if (linkRx) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            const href = linkRx.getAttribute("href") || "";
+                            const ticker = href.replace("#raiox-", "").trim().toUpperCase();
+                            if (ticker && pWin.__raioxSyncBridge) {
+                                pWin.__raioxSyncBridge(ticker);
+                            }
+                            return;
+                        }
+
+                        const linkCmp = e.target && e.target.closest ? e.target.closest('a[href^="#comp-"]') : null;
+                        if (linkCmp) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            linkCmp.classList.toggle("checked");
+                            const href = linkCmp.getAttribute("href") || "";
+                            const ticker = href.replace("#comp-", "").trim().toUpperCase();
+                            if (ticker && pWin.__compSyncBridge) {
+                                pWin.__compSyncBridge(ticker);
+                            }
                         }
                     }, true);
                 }
@@ -2118,14 +2420,18 @@ with tab1:
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base
         with st.expander("📰 Últimas Informações e Notícias dos Ativos Pesquisados / Filtrados — clique para minimizar/maximizar", expanded=True):
-            if len(ativos_para_news) > 5:
+            limite_news = min(50, len(ativos_para_news))
+            if limite_news > 1:
+                if st.session_state.get("_last_limite_news") != limite_news:
+                    st.session_state["qtd_news_input"] = limite_news
+                    st.session_state["_last_limite_news"] = limite_news
                 c_nw1, c_nw2 = st.columns([1.4, 2.6])
                 with c_nw1:
                     qtd_news = st.number_input(
-                        f"Buscar notícias para os primeiros N ativos (1 a {min(15, len(ativos_para_news))}):",
+                        f"Buscar notícias para os primeiros N ativos (1 a {limite_news}):",
                         min_value=1,
-                        max_value=min(15, len(ativos_para_news)),
-                        value=5,
+                        max_value=limite_news,
+                        value=limite_news,
                         step=1,
                         key="qtd_news_input",
                     )
@@ -2161,12 +2467,17 @@ with tab1:
 # ==================== ABA 2: COMPARAR ATIVOS ====================
 with tab2:
     st.subheader("⚖️ Comparador Lado a Lado")
-    default_comp = [r["ticker"] for r in resultados[:min(3, len(resultados))]] if resultados else tickers_b3[:3]
+    if "ms_comp" not in st.session_state:
+        default_comp = [r["ticker"] for r in resultados[:min(3, len(resultados))]] if resultados else tickers_b3[:3]
+        st.session_state["ms_comp"] = default_comp
     selecionados = st.multiselect(
         "Escolha 2 ou mais ativos para comparar:",
         options=tickers_b3,
-        default=default_comp,
+        key="ms_comp",
     )
+    if st.session_state.get("comp_selecionados") or len(selecionados) != len(st.session_state.get("comp_selecionados", [])):
+        if st.session_state.get("comp_selecionados"):
+            st.session_state["comp_selecionados"] = list(selecionados)
 
     if len(selecionados) < 2:
         st.info("Selecione pelo menos 2 ativos acima para visualizar a comparação.")

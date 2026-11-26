@@ -284,7 +284,15 @@ def _classificar_noticia(titulo: str) -> str:
 
 def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = None) -> dict:
     if not itens:
-        return {"news_score": 0.0, "news_resumo": "⚪ Neutro", "qtd_30d": 0, "qtd_7d": 0, "tem_rj": False}
+        return {
+            "news_score": 0.0,
+            "news_resumo": "⚪ Neutro",
+            "qtd_30d": 0,
+            "qtd_7d": 0,
+            "tem_rj": False,
+            "top_noticia_neg": None,
+            "top_noticia_pos": None,
+        }
 
     agora = agora_ts if agora_ts is not None else time.time()
     limite_30d = agora - (30 * 86400)
@@ -300,6 +308,11 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
     tem_prej_ou_frustra = False
     tem_provento = False
     tem_balanco_pos = False
+
+    top_neg = None
+    best_neg_key = (-1.0, 0.0)
+    top_pos = None
+    best_pos_key = (-1.0, 0.0)
 
     for it in itens:
         ts = float(it.get("ts") or 0.0)
@@ -318,9 +331,20 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         if cat is None or pts is None:
             _, cat, pts = _classificar_sentimento_noticia(titulo)
 
+        impacto = abs(float(pts)) * peso_tempo
         soma_pts += float(pts) * peso_tempo
         if "recuperacao judicial" in t_norm or "pedido de falencia" in t_norm or "falencia" in t_norm:
             tem_rj = True
+        if cat in ("critico", "negativo"):
+            cand_n = (impacto, ts)
+            if cand_n > best_neg_key:
+                best_neg_key = cand_n
+                top_neg = {
+                    "titulo": titulo,
+                    "fonte": it.get("fonte", ""),
+                    "data_str": it.get("data_str", ""),
+                    "link": it.get("link", ""),
+                }
         if cat == "critico":
             cnt_critico += 1
         elif cat == "negativo":
@@ -329,6 +353,15 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
                 tem_prej_ou_frustra = True
         elif cat == "positivo":
             cnt_pos += 1
+            cand_p = (impacto, ts)
+            if cand_p > best_pos_key:
+                best_pos_key = cand_p
+                top_pos = {
+                    "titulo": titulo,
+                    "fonte": it.get("fonte", ""),
+                    "data_str": it.get("data_str", ""),
+                    "link": it.get("link", ""),
+                }
             if any(k in t_norm for k in ("dividendo", "jcp", "juros sobre capital", "provento")):
                 tem_provento = True
             if any(k in t_norm for k in ("lucro", "resultado", "supera", "recorde", "reverte prejuizo")):
@@ -353,6 +386,8 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         "qtd_30d": qtd_30d,
         "qtd_7d": qtd_7d,
         "tem_rj": tem_rj,
+        "top_noticia_neg": top_neg,
+        "top_noticia_pos": top_pos,
     }
 
 
@@ -1035,6 +1070,8 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         dpa_12m = None
         dpa_med_6a = None
         anos_hist = 0
+        anos_divs_consec = 0
+        meses_dividendos: list[int] = []
 
         if divs is not None and not divs.empty:
             divs.index = pd.to_datetime(divs.index).tz_localize(None)
@@ -1047,6 +1084,17 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
                 por_ano = divs_6a.groupby(divs_6a.index.year).sum()
                 anos_hist = len(por_ano)
                 dpa_med_6a = float(divs_6a.sum() / min(6, max(1, anos_hist)))
+
+            divs_pos = divs[divs > 0]
+            if not divs_pos.empty:
+                divs_4a = divs_pos[divs_pos.index >= (hoje - timedelta(days=365 * 4))]
+                if not divs_4a.empty:
+                    meses_dividendos = sorted({int(m) for m in divs_4a.index.month})
+                anos_com_div = {int(y) for y in divs_pos.index.year}
+                yr_chk = ano_atual if ano_atual in anos_com_div else (ano_atual - 1)
+                while yr_chk in anos_com_div:
+                    anos_divs_consec += 1
+                    yr_chk -= 1
 
         payout = info.get("payoutRatio")
         div_rate = info.get("dividendRate")
@@ -1068,6 +1116,8 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             "dpa_12m_yf": float(dpa_12m) if dpa_12m is not None else None,
             "dpa_med_6a": float(dpa_med_6a) if dpa_med_6a is not None else None,
             "anos_hist": anos_hist,
+            "anos_divs_consec": anos_divs_consec,
+            "meses_dividendos": meses_dividendos,
             "dpa_proj": float(dpa_proj) if dpa_proj is not None else None,
             "ifr_14": float(ifr_14) if ifr_14 is not None else None,
             "mm20": float(mm20) if mm20 is not None else None,
@@ -1806,6 +1856,30 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     news_score = float(r.get("news_score") or 0.0)
     news_resumo = str(r.get("news_resumo") or "⚪ Neutro")
     news_tem_rj = bool(r.get("news_tem_rj", False))
+    top_neg = r.get("top_noticia_neg")
+    top_pos = r.get("top_noticia_pos")
+
+    def _fmt_manchete(n: dict | None) -> str:
+        if not n or not n.get("titulo"):
+            return ""
+        tit = str(n["titulo"]).strip()
+        extras = [x for x in (n.get("fonte"), (n.get("data_str") or "")[:10]) if x]
+        suf = f" ({' · '.join(extras)})" if extras else ""
+        return f"'{tit}'{suf}"
+
+    def _bloco_noticias_reais() -> str:
+        txt_neg = _fmt_manchete(top_neg)
+        txt_pos = _fmt_manchete(top_pos)
+        if txt_neg and txt_pos:
+            return (
+                f"⚖️ Fatos recentes em foco: De um lado, o papel sofre pressão após notícias como: {txt_neg}; "
+                f"de outro, encontra suporte positivo em manchetes como: {txt_pos}."
+            )
+        if txt_neg:
+            return f"⚠️ Fato recente em foco: O papel sofre pressão após notícias como: {txt_neg}."
+        if txt_pos:
+            return f"🚀 Catalisador recente: O papel ganha fôlego impulsionado por notícias como: {txt_pos}."
+        return ""
 
     riscos_trap = []
     if marg_liq is not None and marg_liq < 0:
@@ -1822,6 +1896,8 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         or (graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham))
         or (pl is not None and 0.0 < pl <= 8.0 and roe is not None and roe > 0.0)
     )
+
+    fatos_reais = _bloco_noticias_reais()
 
     if eh_lp:
         partes = []
@@ -1894,6 +1970,9 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         else:
             partes.append("Não distribui dividendos no momento (DY de 0%), zerando a parcela de renda na nota.")
 
+        if fatos_reais:
+            partes.append(fatos_reais)
+
         return " ".join(partes)
 
     if eh_cp:
@@ -1939,7 +2018,9 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
                 tr_txt += "."
             partes.append(tr_txt)
 
-        if news_score >= 3.0:
+        if fatos_reais:
+            partes.append(fatos_reais)
+        elif news_score >= 3.0:
             partes.append(
                 f"O noticiário dos últimos 30 dias está muito positivo ({news_score:+.1f} — {news_resumo}), "
                 "oferecendo bom gatilho de reprecificação rápida."
@@ -2012,14 +2093,17 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         sinais_pos_cp.append(f"volume em aceleração ({fmt_num(razao_vol, 2)}x)")
 
     if (not eh_value_trap) and score_lp >= 58.0 and sinais_alerta_cp:
-        return f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
-    if sinais_pos_cp and not sinais_alerta_cp:
-        return f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
-    if sinais_alerta_cp:
-        return f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
-    if ifr_14 is not None:
-        return f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e noticiário {news_resumo.lower()}."
-    return f"{base_lp}, com noticiário {news_resumo.lower()}."
+        sintese = f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
+    elif sinais_pos_cp and not sinais_alerta_cp:
+        sintese = f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
+    elif sinais_alerta_cp:
+        sintese = f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
+    elif ifr_14 is not None:
+        sintese = f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e noticiário {news_resumo.lower()}."
+    else:
+        sintese = f"{base_lp}, com noticiário {news_resumo.lower()}."
+
+    return f"{sintese} {fatos_reais}".strip() if fatos_reais else sintese
 
 
 def render_grafico_e_tabela_ativo(
@@ -2195,6 +2279,162 @@ def render_grafico_e_tabela_ativo(
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+
+    # --- SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
+    if base_ativo:
+        cot_sim = float(base_ativo.get("cotacao") or 0.0)
+        if cot_sim <= 0.0 and not serie.empty:
+            cot_sim = float(serie.iloc[-1])
+
+        with st.container(border=True):
+            st.markdown(f"#### 💰 Simulador de Renda Passiva — {ticker}")
+            sr1, sr2 = st.columns([1.4, 2.6])
+            with sr1:
+                meta_mensal = st.number_input(
+                    "Meta de Proventos Mensal desejada com este ativo (R$):",
+                    min_value=10.0,
+                    value=1000.0,
+                    step=100.0,
+                    format="%.2f",
+                    key=f"{key_prefix}_meta_renda_{ticker}",
+                )
+
+            dpa_proj_s = base_ativo.get("dpa_proj")
+            dpa_12m_s = base_ativo.get("dpa_12m")
+            dy_s = float(base_ativo.get("dy_12m") or 0.0)
+            if dpa_proj_s and float(dpa_proj_s) > 0:
+                dpa_base_sim = float(dpa_proj_s)
+            elif dpa_12m_s and float(dpa_12m_s) > 0:
+                dpa_base_sim = float(dpa_12m_s)
+            elif cot_sim > 0 and dy_s > 0:
+                dpa_base_sim = cot_sim * (dy_s / 100.0)
+            else:
+                dpa_base_sim = 0.0
+
+            with sr2:
+                if dpa_base_sim <= 0.0 or cot_sim <= 0.0:
+                    st.info(f"{ticker} não possui histórico recente ou projeção de proventos positivos para simular renda mensal.")
+                else:
+                    meta_anual = meta_mensal * 12.0
+                    qtd_acoes_nec = math.ceil(meta_anual / dpa_base_sim)
+                    custo_total_nec = qtd_acoes_nec * cot_sim
+                    dy_impl_sim = (dpa_base_sim / cot_sim) * 100.0
+                    st.markdown(
+                        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; padding-top:4px;'>"
+                        "<div style='background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); border-radius:8px; padding:10px 14px;'>"
+                        "<div style='font-size:12px; opacity:0.85;'>📌 Ações Necessárias</div>"
+                        f"<div style='font-size:21px; font-weight:700; color:#60a5fa;'>{fmt_num(qtd_acoes_nec, 0)} ações</div>"
+                        f"<div style='font-size:11px; opacity:0.8;'>Meta anual: R$ {fmt_num(meta_anual)} | DPA base: R$ {fmt_num(dpa_base_sim)}</div>"
+                        "</div>"
+                        "<div style='background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); border-radius:8px; padding:10px 14px;'>"
+                        "<div style='font-size:12px; opacity:0.85;'>💵 Total a Investir</div>"
+                        f"<div style='font-size:21px; font-weight:700; color:#22c55e;'>R$ {fmt_num(custo_total_nec)}</div>"
+                        f"<div style='font-size:11px; opacity:0.8;'>Cotação: R$ {fmt_num(cot_sim)} | Yield base: {fmt_num(dy_impl_sim, 2)}%</div>"
+                        "</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+            if dpa_base_sim > 0.0 and st.session_state.get("usuario_email") and st.session_state.get("lancamentos"):
+                pos_usr_rx = consolidar_carteira_por_ativo(st.session_state["lancamentos"])
+                if ticker in pos_usr_rx and pos_usr_rx[ticker]["qtd"] > 0:
+                    qtd_pos_rx = float(pos_usr_rx[ticker]["qtd"])
+                    pct_meta_rx = (qtd_pos_rx / qtd_acoes_nec) * 100.0 if qtd_acoes_nec > 0 else 0.0
+                    qtd_pos_fmt = int(qtd_pos_rx) if qtd_pos_rx.is_integer() else qtd_pos_rx
+                    st.progress(min(1.0, max(0.0, pct_meta_rx / 100.0)))
+                    st.markdown(
+                        f"🎯 Você já possui **{fmt_num(qtd_pos_fmt, 0)} ações** "
+                        f"(**{fmt_num(pct_meta_rx, 1)}%** da sua meta alcançada nesta empresa!)."
+                    )
+
+        col_saz, col_bh = st.columns([1.05, 1.15])
+        with col_saz:
+            with st.container(border=True):
+                st.markdown(f"#### 📅 Sazonalidade de Proventos — {ticker}")
+                meses_nomes = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+                meses_pag = set(base_ativo.get("meses_dividendos") or [])
+                pilulas_meses = []
+                for idx_m, nome_m in enumerate(meses_nomes, start=1):
+                    if idx_m in meses_pag:
+                        pilulas_meses.append(
+                            f"<div style='text-align:center; padding:6px 4px; border-radius:6px; font-size:12px; font-weight:700; "
+                            f"background:rgba(34,197,94,0.18); border:1px solid rgba(34,197,94,0.50); color:#22c55e;'>🟢 {nome_m}</div>"
+                        )
+                    else:
+                        pilulas_meses.append(
+                            f"<div style='text-align:center; padding:6px 4px; border-radius:6px; font-size:12px; font-weight:500; "
+                            f"background:rgba(128,128,128,0.08); border:1px solid rgba(128,128,128,0.20); opacity:0.60;'>⚪ {nome_m}</div>"
+                        )
+                st.markdown(
+                    "<div style='display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin:8px 0 10px 0;'>"
+                    + "".join(pilulas_meses)
+                    + "</div>",
+                    unsafe_allow_html=True,
+                )
+                if meses_pag:
+                    st.caption("Meses em que a empresa historicamente costuma pagar proventos (últimos 4 anos).")
+                else:
+                    st.caption("Meses em que a empresa historicamente costuma pagar proventos (sem registros recentes no Yahoo Finance).")
+
+        with col_bh:
+            with st.container(border=True):
+                st.markdown(f"#### 🛡️ Checklist Buy & Hold — {ticker}")
+                eh_bco_bh = bool(base_ativo.get("eh_banco_seg", False))
+                roe_bh = base_ativo.get("roe")
+                ml_bh = base_ativo.get("marg_liq")
+                div_bh = base_ativo.get("div_brut_patrim")
+                pl_bh = base_ativo.get("pl")
+                liq2m_bh = float(base_ativo.get("liq_2m") or 0.0)
+                consec_bh = int(base_ativo.get("anos_divs_consec") or base_ativo.get("anos_hist") or 0)
+                graham_bh = base_ativo.get("graham")
+                bazin_bh = base_ativo.get("pt_bazin")
+
+                c1_ok = (roe_bh is not None and roe_bh >= 10.0) if eh_bco_bh else (roe_bh is not None and roe_bh >= 12.0)
+                c1_det = f"ROE: {fmt_num(roe_bh, 1)}%" if roe_bh is not None else "ROE indisponível"
+
+                c2_ok = (
+                    (ml_bh is not None and ml_bh >= 10.0)
+                    or (eh_bco_bh and (ml_bh is None or ml_bh == 0.0) and (roe_bh is not None and roe_bh >= 10.0) and (pl_bh is None or pl_bh > 0.0) and liq2m_bh >= 1_000_000)
+                )
+                c2_det = "Banco de grande porte / lucrativo" if (eh_bco_bh and (ml_bh is None or ml_bh == 0.0)) else (f"Margem Líq.: {fmt_num(ml_bh, 1)}%" if ml_bh is not None else "Margem indisponível")
+
+                c3_ok = True if eh_bco_bh else (div_bh is not None and div_bh <= 1.5)
+                c3_det = "Intermediário Financeiro / Seguradora" if eh_bco_bh else (f"Dív.Brut/Patrim: {fmt_num(div_bh)}x" if div_bh is not None else "Dívida indisponível")
+
+                c4_ok = consec_bh > 3
+                c4_det = f"{consec_bh} ano(s) consecutivo(s) recente(s)"
+
+                abaixo_gr = cot_sim > 0 and graham_bh is not None and graham_bh > 0 and cot_sim < float(graham_bh)
+                abaixo_bz = cot_sim > 0 and bazin_bh is not None and bazin_bh > 0 and cot_sim < float(bazin_bh)
+                c5_ok = abaixo_gr or abaixo_bz
+                tetos_ok = [x for x in ("Graham" if abaixo_gr else "", "Bazin" if abaixo_bz else "") if x]
+                c5_det = f"Abaixo de {', '.join(tetos_ok)}" if tetos_ok else "Acima dos tetos de Graham e Bazin"
+
+                criterios_bh = [
+                    ("Lucratividade (ROE ≥ 12% ou ≥ 10% bancos)", c1_ok, c1_det),
+                    ("Margem Líquida Saudável (≥ 10% ou Banco grande)", c2_ok, c2_det),
+                    ("Dívida Sob Controle (Dív/PL ≤ 1,5x ou Banco)", c3_ok, c3_det),
+                    ("Histórico de Dividendos (> 3 anos consecutivos)", c4_ok, c4_det),
+                    ("Margem de Segurança (< Graham ou Bazin)", c5_ok, c5_det),
+                ]
+                nota_bh = sum(1 for _, ok_c, _ in criterios_bh if ok_c)
+                estrelas_str = ("⭐️" * nota_bh) + ("☆" * (5 - nota_bh))
+                selos_bh = {
+                    5: "Empresa Fortaleza / Grau de Investimento",
+                    4: "Ótima Qualidade Buy & Hold",
+                    3: "Qualidade Intermediária (Acompanhar)",
+                    2: "Atenção aos Fundamentos",
+                    1: "Perfil Frágil para Buy & Hold",
+                    0: "Alto Risco / Fora dos Critérios",
+                }
+                st.markdown(f"**{estrelas_str} {nota_bh}/5 — {selos_bh[nota_bh]}**")
+                linhas_bh_html = []
+                for tit_c, ok_c, det_c in criterios_bh:
+                    ic_c = "<span style='color:#22c55e; font-weight:700;'>[✓]</span>" if ok_c else "<span style='color:#ef4444; font-weight:700;'>[✗]</span>"
+                    linhas_bh_html.append(
+                        f"<div style='font-size:13px; margin:4px 0;'>{ic_c} <strong>{tit_c}</strong> <span style='opacity:0.78;'>({html.escape(det_c)})</span></div>"
+                    )
+                st.markdown("".join(linhas_bh_html), unsafe_allow_html=True)
 
     st.markdown(f"#### 📑 Histórico Fundamentalista — {ticker}")
     with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
@@ -3235,11 +3475,15 @@ def montar_item_completo(a: dict) -> dict:
         "dist_mm200_pct": yf_info.get("dist_mm200_pct"),
         "dist_max_52s_pct": yf_info.get("dist_max_52s_pct"),
         "razao_volume": yf_info.get("razao_volume"),
+        "anos_divs_consec": yf_info.get("anos_divs_consec", 0),
+        "meses_dividendos": yf_info.get("meses_dividendos", []),
         "news_score": news_info.get("news_score", 0.0),
         "news_resumo": news_info.get("news_resumo", "⚪ Neutro"),
         "news_qtd_30d": news_info.get("qtd_30d", 0),
         "news_qtd_7d": news_info.get("qtd_7d", 0),
         "news_tem_rj": news_info.get("tem_rj", False),
+        "top_noticia_neg": news_info.get("top_noticia_neg"),
+        "top_noticia_pos": news_info.get("top_noticia_pos"),
     }
     res_score = calcular_score(item, pt_med, pt_proj, pt_bazin, graham)
     item["score_lp"] = res_score["score_lp"]

@@ -1918,20 +1918,20 @@ def fmt_faixa_preco_html(r: dict) -> str:
         "<div style='background:rgba(128,128,128,0.07); border:1px solid rgba(128,128,128,0.24); "
         "border-radius:8px; padding:10px 12px; margin:8px 0 10px 0;'>"
         "<div style='font-weight:700; font-size:13px; margin-bottom:8px;'>🎯 Faixa de Preço do Modelo</div>"
-        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-bottom:8px;'>"
-        "<div style='background:rgba(34,197,94,0.12); border-left:4px solid #22c55e; border-radius:6px; padding:7px 10px;'>"
+        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; align-items:stretch; margin-bottom:10px;'>"
+        "<div style='background:rgba(34,197,94,0.12); border-left:4px solid #22c55e; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
         "<div style='font-size:11px; font-weight:700; color:#22c55e;'>🟢 Zona de Desconto / Oportunidade</div>"
-        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_desc'])}</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_desc'])}</div>"
         "<div style='font-size:11px; opacity:0.8;'>Preço sugerido de entrada com margem de segurança</div>"
         "</div>"
-        "<div style='background:rgba(234,179,8,0.12); border-left:4px solid #eab308; border-radius:6px; padding:7px 10px;'>"
+        "<div style='background:rgba(234,179,8,0.12); border-left:4px solid #eab308; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
         "<div style='font-size:11px; font-weight:700; color:#eab308;'>🟡 Zona Neutra / Preço Justo</div>"
-        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_neutro'])}</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_neutro'])}</div>"
         "<div style='font-size:11px; opacity:0.8;'>Faixa intermediária próxima ao valor justo</div>"
         "</div>"
-        "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:7px 10px;'>"
+        "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
         "<div style='font-size:11px; font-weight:700; color:#ef4444;'>🔴 Zona de Sobrepreço / Alerta</div>"
-        f"<div style='font-size:15px; font-weight:700;'>{html.escape(d_fp['z_sobre'])}</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_sobre'])}</div>"
         f"<div style='font-size:11px; opacity:0.8;'>Região de esticamento ({html.escape(d_fp['regra_sp_lbl'])})</div>"
         "</div>"
         "</div>"
@@ -2293,7 +2293,17 @@ def render_grafico_e_tabela_ativo(
                 unsafe_allow_html=True,
             )
             st.markdown(fmt_faixa_preco_html(base_ativo), unsafe_allow_html=True)
-            st.markdown(just_r)
+            partes_just_rx = just_r.split("\n\n", 1)
+            with st.container(border=True):
+                st.markdown(f"<div style='padding:2px 2px 4px 2px;'></div>", unsafe_allow_html=True)
+                st.markdown(partes_just_rx[0])
+                if len(partes_just_rx) > 1 and partes_just_rx[1].strip():
+                    st.markdown(
+                        "<div style='margin:10px 0 8px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(partes_just_rx[1])
+        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
     c_per, c_tipo = st.columns([3, 1.2])
     with c_per:
@@ -2389,7 +2399,7 @@ def render_grafico_e_tabela_ativo(
 
         with st.container(border=True):
             st.markdown(f"#### 💰 Simulador de Renda Passiva — {ticker}")
-            sr1, sr2 = st.columns([1.4, 2.6])
+            sr1, sr2 = st.columns([1.4, 2.6], vertical_alignment="center")
             with sr1:
                 meta_mensal = st.number_input(
                     "Meta de Proventos Mensal desejada com este ativo (R$):",
@@ -2421,15 +2431,15 @@ def render_grafico_e_tabela_ativo(
                     custo_total_nec = qtd_acoes_nec * cot_sim
                     dy_impl_sim = (dpa_base_sim / cot_sim) * 100.0
                     st.markdown(
-                        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; padding-top:4px;'>"
-                        "<div style='background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); border-radius:8px; padding:10px 14px;'>"
+                        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; align-items:stretch;'>"
+                        "<div style='background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); border-radius:8px; padding:12px 14px; text-align:center; display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:98px;'>"
                         "<div style='font-size:12px; opacity:0.85;'>📌 Ações Necessárias</div>"
-                        f"<div style='font-size:21px; font-weight:700; color:#60a5fa;'>{fmt_num(qtd_acoes_nec, 0)} ações</div>"
+                        f"<div style='font-size:21px; font-weight:700; color:#60a5fa; margin:3px 0;'>{fmt_num(qtd_acoes_nec, 0)} ações</div>"
                         f"<div style='font-size:11px; opacity:0.8;'>Meta anual: R$ {fmt_num(meta_anual)} | DPA base: R$ {fmt_num(dpa_base_sim)}</div>"
                         "</div>"
-                        "<div style='background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); border-radius:8px; padding:10px 14px;'>"
+                        "<div style='background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); border-radius:8px; padding:12px 14px; text-align:center; display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:98px;'>"
                         "<div style='font-size:12px; opacity:0.85;'>💵 Total a Investir</div>"
-                        f"<div style='font-size:21px; font-weight:700; color:#22c55e;'>R$ {fmt_num(custo_total_nec)}</div>"
+                        f"<div style='font-size:21px; font-weight:700; color:#22c55e; margin:3px 0;'>R$ {fmt_num(custo_total_nec)}</div>"
                         f"<div style='font-size:11px; opacity:0.8;'>Cotação: R$ {fmt_num(cot_sim)} | Yield base: {fmt_num(dy_impl_sim, 2)}%</div>"
                         "</div>"
                         "</div>",
@@ -2448,6 +2458,7 @@ def render_grafico_e_tabela_ativo(
                         f"(**{fmt_num(pct_meta_rx, 1)}%** da sua meta alcançada nesta empresa!)."
                     )
 
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
         col_saz, col_bh = st.columns([1.05, 1.15])
         with col_saz:
             with st.container(border=True):
@@ -2577,7 +2588,7 @@ def render_grafico_e_tabela_ativo(
 
         css_h = (
             "<style>"
-            ".hist-wrap{width:100%;overflow-x:auto;}"
+            ".hist-wrap{width:100%;overflow-x:auto;margin:12px 0;}"
             ".hist-table{width:100%;border-collapse:collapse;font-size:13px;text-align:center;}"
             ".hist-table th{background-color:rgba(128,128,128,0.18);padding:10px 8px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;white-space:nowrap;}"
             ".hist-table td{padding:9px 8px;border-bottom:1px solid rgba(128,128,128,0.2);white-space:nowrap;}"
@@ -3217,6 +3228,12 @@ usuario_atual = st.session_state.get("usuario_email")
 # --- INTERFACE PRINCIPAL ---
 st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
 st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
+st.markdown(
+    "<style>"
+    "div[data-testid='stExpander']{margin-bottom:10px;border-radius:8px;}"
+    "</style>",
+    unsafe_allow_html=True,
+)
 
 try:
     with st.spinner("Carregando todos os ativos da B3..."):
@@ -3701,109 +3718,155 @@ with tab1:
             resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
 
         if len(resultados_tab) >= 2:
-            st.markdown("#### 📡 Radar de Destaques Rápidos")
-            rc1, rc2, rc3, rc4 = st.columns(4)
+            with st.expander("📡 Radar de Destaques Rápidos — clique para minimizar/maximizar", expanded=True):
+                rc1, rc2, rc3, rc4 = st.columns(4)
 
-            # Card 1: Líder de Atratividade
-            lider_atr = resultados_tab[0]
-            with rc1:
-                with st.container(border=True):
-                    st.markdown("**🏆 Líder de Atratividade**")
-                    st.markdown(
-                        f"<div style='font-size:20px; font-weight:700; color:#60a5fa;'>{lider_atr['ticker']}</div>"
-                        f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(lider_atr['nome'][:28])}</div>"
-                        f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(lider_atr['cotacao'])}</strong></div>"
-                        f"<div style='font-size:13px;'>Score Ativo: <strong>{fmt_num(lider_atr['score_ativo'], 1)}/100</strong></div>"
-                        f"<div style='margin-top:4px;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            # Card 2: Maior DY Sustentável
-            cands_dy = [
-                r for r in resultados_tab
-                if float(r.get("dy_12m") or 0.0) > 0.0
-                and not r.get("eh_value_trap")
-                and (r.get("roe") is not None and float(r["roe"]) > 10.0)
-                and (
-                    (r.get("marg_liq") is not None and float(r["marg_liq"]) > 0.0)
-                    or (r.get("eh_banco_seg") and (r.get("marg_liq") is None or float(r["marg_liq"]) == 0.0) and (r.get("pl") is None or float(r["pl"]) > 0.0))
-                )
-            ]
-            with rc2:
-                with st.container(border=True):
-                    st.markdown("**💰 Maior DY Sustentável**")
-                    if cands_dy:
-                        top_dy = max(cands_dy, key=lambda x: float(x["dy_12m"]))
-                        bz_dy = top_dy.get("pt_bazin")
-                        bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
+                # Card 1: Líder de Atratividade
+                lider_atr = resultados_tab[0]
+                with rc1:
+                    with st.container(border=True):
                         st.markdown(
-                            f"<div style='font-size:20px; font-weight:700; color:#22c55e;'>{top_dy['ticker']}</div>"
-                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_dy['nome'][:28])}</div>"
-                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_dy['cotacao'])}</strong></div>"
-                            f"<div style='font-size:13px;'>DY 12m: <strong>{fmt_num(top_dy['dy_12m'], 2)}%</strong></div>"
-                            f"<div style='font-size:12px; opacity:0.85;'>Teto Bazin: <strong>{bz_txt}</strong></div>",
+                            "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                            "<div>"
+                            "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>🏆 Líder de Atratividade</div>"
+                            f"<div style='font-size:20px; font-weight:700; color:#60a5fa;'>{lider_atr['ticker']}</div>"
+                            f"<div style='font-size:12px; opacity:0.8;'>{html.escape(lider_atr['nome'][:28])}</div>"
+                            "</div>"
+                            "<div>"
+                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(lider_atr['cotacao'])}</strong></div>"
+                            f"<div style='font-size:13px;'>Score Ativo: <strong>{fmt_num(lider_atr['score_ativo'], 1)}/100</strong></div>"
+                            f"<div style='margin-top:4px;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>"
+                            "</div>"
+                            "</div>",
                             unsafe_allow_html=True,
                         )
-                    else:
-                        st.caption("Sem ativo elegível com ROE > 10% e DY > 0% neste filtro.")
 
-            # Card 3: Oportunidade Técnica (Sobrevendida)
-            cands_ifr = [
-                r for r in resultados_tab
-                if r.get("ifr_14") is not None
-                and not r.get("eh_value_trap")
-                and (r.get("roe") is not None and float(r["roe"]) > 0.0)
-                and (r.get("pl") is None or float(r["pl"]) > 0.0)
-                and float(r.get("score_lp") or 0.0) >= 50.0
-            ]
-            if not cands_ifr:
+                # Card 2: Maior DY Sustentável
+                cands_dy = [
+                    r for r in resultados_tab
+                    if float(r.get("dy_12m") or 0.0) > 0.0
+                    and not r.get("eh_value_trap")
+                    and (r.get("roe") is not None and float(r["roe"]) > 10.0)
+                    and (
+                        (r.get("marg_liq") is not None and float(r["marg_liq"]) > 0.0)
+                        or (r.get("eh_banco_seg") and (r.get("marg_liq") is None or float(r["marg_liq"]) == 0.0) and (r.get("pl") is None or float(r["pl"]) > 0.0))
+                    )
+                ]
+                with rc2:
+                    with st.container(border=True):
+                        if cands_dy:
+                            top_dy = max(cands_dy, key=lambda x: float(x["dy_12m"]))
+                            bz_dy = top_dy.get("pt_bazin")
+                            bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>💰 Maior DY Sustentável</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#22c55e;'>{top_dy['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_dy['nome'][:28])}</div>"
+                                "</div>"
+                                "<div>"
+                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_dy['cotacao'])}</strong></div>"
+                                f"<div style='font-size:13px;'>DY 12m: <strong>{fmt_num(top_dy['dy_12m'], 2)}%</strong></div>"
+                                f"<div style='font-size:12px; opacity:0.85;'>Teto Bazin: <strong>{bz_txt}</strong></div>"
+                                "</div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='font-size:14px; font-weight:700;'>💰 Maior DY Sustentável</div>"
+                                "<div style='font-size:12px; opacity:0.75;'>Sem ativo elegível com ROE &gt; 10% e DY &gt; 0% neste filtro.</div>"
+                                "<div></div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+
+                # Card 3: Oportunidade Técnica (Sobrevendida)
                 cands_ifr = [
                     r for r in resultados_tab
                     if r.get("ifr_14") is not None
                     and not r.get("eh_value_trap")
-                    and (r.get("roe") is None or float(r["roe"]) > 0.0)
+                    and (r.get("roe") is not None and float(r["roe"]) > 0.0)
+                    and (r.get("pl") is None or float(r["pl"]) > 0.0)
+                    and float(r.get("score_lp") or 0.0) >= 50.0
                 ]
-            with rc3:
-                with st.container(border=True):
-                    st.markdown("**⚡ Oportunidade Técnica**")
-                    if cands_ifr:
-                        top_ifr = min(cands_ifr, key=lambda x: float(x["ifr_14"]))
-                        d200_i = top_ifr.get("dist_mm200_pct")
-                        d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
-                        st.markdown(
-                            f"<div style='font-size:20px; font-weight:700; color:#facc15;'>{top_ifr['ticker']}</div>"
-                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_ifr['nome'][:28])}</div>"
-                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_ifr['cotacao'])}</strong></div>"
-                            f"<div style='font-size:13px;'>IFR (14d): <strong>{fmt_num(top_ifr['ifr_14'], 1)}</strong></div>"
-                            f"<div style='font-size:12px; opacity:0.85;'>Dist. MM200: <strong>{d200_s}</strong></div>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.caption("Indicadores técnicos não carregados para este filtro.")
+                if not cands_ifr:
+                    cands_ifr = [
+                        r for r in resultados_tab
+                        if r.get("ifr_14") is not None
+                        and not r.get("eh_value_trap")
+                        and (r.get("roe") is None or float(r["roe"]) > 0.0)
+                    ]
+                with rc3:
+                    with st.container(border=True):
+                        if cands_ifr:
+                            top_ifr = min(cands_ifr, key=lambda x: float(x["ifr_14"]))
+                            d200_i = top_ifr.get("dist_mm200_pct")
+                            d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>⚡ Oportunidade Técnica</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#facc15;'>{top_ifr['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_ifr['nome'][:28])}</div>"
+                                "</div>"
+                                "<div>"
+                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_ifr['cotacao'])}</strong></div>"
+                                f"<div style='font-size:13px;'>IFR (14d): <strong>{fmt_num(top_ifr['ifr_14'], 1)}</strong></div>"
+                                f"<div style='font-size:12px; opacity:0.85;'>Dist. MM200: <strong>{d200_s}</strong></div>"
+                                "</div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='font-size:14px; font-weight:700;'>⚡ Oportunidade Técnica</div>"
+                                "<div style='font-size:12px; opacity:0.75;'>Indicadores técnicos não carregados para este filtro.</div>"
+                                "<div></div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
 
-            # Card 4: Maior Desconto Graham
-            cands_gr = []
-            for r_g in resultados_tab:
-                if r_g.get("eh_value_trap"):
-                    continue
-                ms_g = calc_ms(r_g.get("graham"), r_g["cotacao"])
-                if ms_g is not None and ms_g > 0.0:
-                    cands_gr.append((ms_g, r_g))
-            with rc4:
-                with st.container(border=True):
-                    st.markdown("**🛡️ Maior Desconto Graham**")
-                    if cands_gr:
-                        ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
-                        st.markdown(
-                            f"<div style='font-size:20px; font-weight:700; color:#38bdf8;'>{top_gr['ticker']}</div>"
-                            f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(top_gr['nome'][:28])}</div>"
-                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_gr['cotacao'])}</strong></div>"
-                            f"<div style='font-size:13px;'>Graham: <strong>R$ {fmt_num(top_gr['graham'])}</strong></div>"
-                            f"<div style='font-size:12px; color:#22c55e; font-weight:700;'>Margem: +{fmt_num(ms_best, 1)}%</div>",
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.caption("Nenhum ativo abaixo do valor de Graham neste filtro.")
+                # Card 4: Maior Desconto Graham
+                cands_gr = []
+                for r_g in resultados_tab:
+                    if r_g.get("eh_value_trap"):
+                        continue
+                    ms_g = calc_ms(r_g.get("graham"), r_g["cotacao"])
+                    if ms_g is not None and ms_g > 0.0:
+                        cands_gr.append((ms_g, r_g))
+                with rc4:
+                    with st.container(border=True):
+                        if cands_gr:
+                            ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>🛡️ Maior Desconto Graham</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#38bdf8;'>{top_gr['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_gr['nome'][:28])}</div>"
+                                "</div>"
+                                "<div>"
+                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_gr['cotacao'])}</strong></div>"
+                                f"<div style='font-size:13px;'>Graham: <strong>R$ {fmt_num(top_gr['graham'])}</strong></div>"
+                                f"<div style='font-size:12px; color:#22c55e; font-weight:700;'>Margem: +{fmt_num(ms_best, 1)}%</div>"
+                                "</div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='font-size:14px; font-weight:700;'>🛡️ Maior Desconto Graham</div>"
+                                "<div style='font-size:12px; opacity:0.75;'>Nenhum ativo abaixo do valor de Graham neste filtro.</div>"
+                                "<div></div>"
+                                "</div>",
+                                unsafe_allow_html=True,
+                            )
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             with st.container(border=True):
@@ -3927,6 +3990,8 @@ with tab1:
                     "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
                     "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
                     ".val-table-wrap{width:100%;overflow-x:auto;margin:0;padding:0;}"
+                    ".val-table-wrap-top{margin-top:12px;}"
+                    ".val-table-wrap-top:last-child,.val-table-wrap-bot{margin-bottom:12px;}"
                     ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
                     ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
                     ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
@@ -4489,24 +4554,42 @@ with tab1:
                 else:
                     itens_exibir_rank = lista_rank_base[:int(qtd_ranking)]
 
-                blocos_ranking = []
                 for r in itens_exibir_rank:
                     score_at = r.get("score_ativo", r.get(chave_score_ativo, r["score_geral"]))
                     news_sc = float(r.get("news_score") or 0.0)
                     news_res = r.get("news_resumo", "⚪ Neutro")
-                    quebra_txt = f"LP: **{r['score_lp']}** | CP: **{r['score_cp']}** | News: **{news_sc:+.1f}** ({news_res})"
-                    faixa_txt = fmt_faixa_preco_modelo(r)
                     justificativa = gerar_justificativa_detalhada(r, chave_score_ativo)
                     estrela = " ⭐" if r["ticker"] in st.session_state["favoritos"] else ""
-                    blocos_ranking.append(
-                        f"**{r['pos_ranking']}º Lugar: {r['ticker']}{estrela}** ({r['nome']}) | "
-                        f"**Cotação: R$ {fmt_num(r['cotacao'])}** | "
-                        f"**Score Ativo: {score_at}/100** | {r['veredito']}  \n"
-                        f"📊 {quebra_txt}\n\n"
-                        f"{faixa_txt}\n\n"
-                        f"{justificativa}"
-                    )
-                st.markdown("\n\n---\n\n".join(blocos_ranking))
+                    with st.container(border=True):
+                        st.markdown(
+                            "<div style='display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px;'>"
+                            "<div style='font-size:16px; font-weight:700;'>"
+                            f"{r['pos_ranking']}º Lugar: <span style='color:#60a5fa;'>{r['ticker']}{estrela}</span> "
+                            f"<span style='font-size:13px; font-weight:500; opacity:0.85;'>({html.escape(r['nome'])})</span>"
+                            "</div>"
+                            "<div style='display:flex; flex-wrap:wrap; align-items:center; gap:10px; font-size:14px;'>"
+                            f"<span>Cotação: <strong>R$ {fmt_num(r['cotacao'])}</strong></span>"
+                            f"<span>Score Ativo: <strong>{score_at}/100</strong></span>"
+                            f"{badge_veredito_html(r.get('veredito', ''))}"
+                            "</div>"
+                            "</div>"
+                            "<div style='font-size:13px; opacity:0.9; margin-bottom:4px;'>"
+                            f"📊 LP: <strong>{r['score_lp']}</strong> &nbsp;|&nbsp; "
+                            f"CP: <strong>{r['score_cp']}</strong> &nbsp;|&nbsp; "
+                            f"News: <strong>{news_sc:+.1f}</strong> ({html.escape(news_res)})"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                        st.markdown(fmt_faixa_preco_html(r), unsafe_allow_html=True)
+                        partes_just_rk = justificativa.split("\n\n", 1)
+                        with st.container(border=True):
+                            st.markdown(partes_just_rk[0])
+                            if len(partes_just_rk) > 1 and partes_just_rk[1].strip():
+                                st.markdown(
+                                    "<div style='margin:8px 0 6px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
+                                    unsafe_allow_html=True,
+                                )
+                                st.markdown(partes_just_rk[1])
 
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base
@@ -4913,7 +4996,7 @@ with tab3:
 
             css_c = (
                 "<style>"
-                ".cart-wrap{width:100%;overflow-x:auto;}"
+                ".cart-wrap{width:100%;overflow-x:auto;margin:12px 0;}"
                 ".cart-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
                 ".cart-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
                 ".cart-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"

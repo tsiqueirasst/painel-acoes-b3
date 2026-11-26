@@ -6,6 +6,7 @@ import json
 import math
 import re
 import secrets
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -68,10 +69,10 @@ def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
 
     if ln and (ln_low.startswith("banco ") or "banco " in ln_low or "unibanco" in ln_low or ln_low.startswith("caixa ")):
         limpo = re.sub(r"\((Brasil|Brazil)\)", "", ln, flags=re.IGNORECASE)
-        limpo = re.sub(r"\b(Holding|S\.A\.|S/A|S\.A|SA|Ltda\.?)\b", "", limpo, flags=re.IGNORECASE)
-        limpo = re.sub(r"[,\-\s]+$", "", " ".join(limpo.split())).strip()
+        limpo = re.sub(r"(?<!\w)(Holding|S\.A\.?|S/A|SA|Ltda\.?)(?!\w)", "", limpo, flags=re.IGNORECASE)
+        limpo = re.sub(r"[,\-\.\s]+$", "", " ".join(limpo.split())).strip()
         if limpo:
-            return limpo
+            return limpo.upper()
 
     if sn:
         raw_sn = " ".join((short_name or "").split(" "))
@@ -88,13 +89,13 @@ def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
         partes = [p for p in raw_sn.split() if p.upper() not in tokens_remover]
         res = " ".join(partes).strip()
         if res:
-            return res
+            return res.upper()
 
     if ln:
-        limpo = re.sub(r"\b(S\.A\.|S/A|S\.A|SA|Ltda\.?)\b", "", ln, flags=re.IGNORECASE)
-        limpo = re.sub(r"[,\-\s]+$", "", " ".join(limpo.split())).strip()
+        limpo = re.sub(r"(?<!\w)(S\.A\.?|S/A|SA|Ltda\.?)(?!\w)", "", ln, flags=re.IGNORECASE)
+        limpo = re.sub(r"[,\-\.\s]+$", "", " ".join(limpo.split())).strip()
         if limpo:
-            return limpo
+            return limpo.upper()
     return ticker
 
 
@@ -305,8 +306,9 @@ def carregar_setores_fundamentus() -> dict[str, str]:
     return setores
 
 
-def _ler_tabela_fundamentus(url: str) -> list[dict]:
-    resp = requests.get(url, headers=HEADERS, timeout=20)
+def _ler_tabela_fundamentus(url: str, session: requests.Session | None = None) -> list[dict]:
+    cliente = session or requests
+    resp = cliente.get(url, headers=HEADERS, timeout=20)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "lxml")
     tabela = soup.find("table", {"id": "resultado"})
@@ -764,30 +766,47 @@ def carregar_todos_ativos_b3() -> list[dict]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def carregar_tickers_por_setor(setor_ids: tuple[str, ...]) -> dict[str, str]:
+def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 2) -> dict[str, str]:
     mapa_setor = {}
     setores_dict = carregar_setores_fundamentus()
     id_para_nome = {v: k for k, v in setores_dict.items()}
+    session = requests.Session()
 
     def _one_setor(sid: str):
-        try:
-            linhas = _ler_tabela_fundamentus(f"https://www.fundamentus.com.br/resultado.php?setor={sid}")
-            return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()]
-        except Exception:
-            return sid, []
+        url_s = f"https://www.fundamentus.com.br/resultado.php?setor={sid}"
+        for tentativa in range(3):
+            try:
+                linhas = _ler_tabela_fundamentus(url_s, session=session)
+                return sid, [row.get("Papel", "").strip().upper() for row in linhas if row.get("Papel", "").strip()], True
+            except Exception:
+                time.sleep(0.35 * (tentativa + 1))
+        return sid, [], False
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for sid, papeis in ex.map(_one_setor, setor_ids):
+    falhos = []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for sid, papeis, ok in ex.map(_one_setor, setor_ids):
+            if not ok:
+                falhos.append(sid)
+                continue
             nome_setor = id_para_nome.get(sid, f"Setor {sid}")
             for papel in papeis:
                 mapa_setor[papel] = nome_setor
+
+    for sid in falhos:
+        time.sleep(0.5)
+        _, papeis, ok = _one_setor(sid)
+        if ok:
+            nome_setor = id_para_nome.get(sid, f"Setor {sid}")
+            for papel in papeis:
+                mapa_setor[papel] = nome_setor
+
     return mapa_setor
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def carregar_mapa_todos_setores() -> dict[str, str]:
+def carregar_mapa_todos_setores(_v: int = 2) -> dict[str, str]:
     setores_dict = carregar_setores_fundamentus()
-    return carregar_tickers_por_setor(tuple(setores_dict.values()))
+    return carregar_tickers_por_setor(tuple(setores_dict.values()), _v=_v)
 
 
 def _fetch_yf(ticker: str) -> tuple[str, dict]:
@@ -1785,16 +1804,18 @@ with st.sidebar:
     default_setores = [SETOR_ALIAS.get(setor_url, setor_url)] if SETOR_ALIAS.get(setor_url, setor_url) in opcoes_setores_exibir else []
 
     filtro_listas = st.multiselect(
-        "Listas rápidas (interseção):",
+        "Listas rápidas:",
         options=opcoes_listas,
         default=default_listas,
         placeholder="Todas (ou escolha 1 ou mais)",
+        help="Favoritos e Carteira filtram seus ativos (interseção entre si). BESST soma-se aos Setores específicos abaixo.",
     )
     filtro_setores = st.multiselect(
         "Setores específicos:",
         options=opcoes_setores_exibir,
         default=default_setores,
         placeholder="Todos os setores",
+        help="Soma-se ao BESST (se selecionado) e filtra em conjunto com Favoritos/Carteira.",
     )
 
     liq_min_opcoes = {
@@ -1841,17 +1862,20 @@ with st.spinner("Carregando setores da B3..."):
 
 ativos_filtrados = todos_ativos
 
-if "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)" in filtro_listas:
-    ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in BESST_SETORES]
 if "⭐ Apenas Meus Favoritos" in filtro_listas:
     fav_set = set(st.session_state["favoritos"])
     ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in fav_set]
 if "💼 Apenas Minha Carteira" in filtro_listas:
     ativos_filtrados = [a for a in ativos_filtrados if a["ticker"] in posicoes_carteira]
 
+setores_alvo: set[str] = set()
+if "🌟 BESST (Bancos, Energia, Saneamento, Seguros e Telecom)" in filtro_listas:
+    setores_alvo |= BESST_SETORES
 if filtro_setores:
-    setores_oficiais_sel = {ALIAS_PARA_SETOR.get(s, s) for s in filtro_setores}
-    ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in setores_oficiais_sel]
+    setores_alvo |= {ALIAS_PARA_SETOR.get(s, s) for s in filtro_setores}
+
+if setores_alvo:
+    ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in setores_alvo]
 
 if busca_tickers.strip():
     lista_busca = {x.strip().upper().replace(".SA", "") for x in busca_tickers.split(",") if x.strip()}
@@ -1983,7 +2007,6 @@ with tab1:
             if not exibir:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")
             else:
-                linhas_html = []
                 def _ao_clicar_comparar_tabela():
                     raw_c = st.session_state.get("comp_bridge", "").strip().upper()
                     st.session_state["comp_bridge"] = ""
@@ -2022,170 +2045,200 @@ with tab1:
                             st.session_state["ms_comp"] = []
                             st.rerun()
 
-                fav_set = set(st.session_state["favoritos"])
-                for r in exibir:
-                    cot = r["cotacao"]
-                    sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
-
-                    pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
-                    if r["pvp"] is not None:
-                        cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
-                        emoji_pvp = "🟢" if r["pvp"] < 1 else "🔴"
-                        pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {emoji_pvp}</span>"
-                    else:
-                        pvp_html = "N/A"
-                    roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
-
-                    lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
-                    vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
-                    dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
-                    dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
-
-                    nome_esc = html.escape(r["nome"])
-                    setor_badge = f"<br><small style='opacity:0.72;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
-                    estrela = " ⭐" if r["ticker"] in fav_set else ""
-                    chk_cls = "comp-chk-btn checked" if r["ticker"] in comp_set else "comp-chk-btn"
-
-                    href = f"#raiox-{r['ticker']}"
-
-                    linha = (
-                        "<tr>"
-                        f"<td style='text-align:center;'><a href='#comp-{r['ticker']}' class='{chk_cls}' title='Selecionar para Comparar Ativos'>✓</a></td>"
-                        f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
-                        f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>{r['ticker']}</a>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
-                        f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
-                        f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
-                        f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
-                        f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
-                        f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
-                        f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
-                        f"<td>{html_preco_ms(r['graham'], cot)}</td>"
-                        "</tr>"
-                    )
-                    linhas_html.append(linha)
-
-                css_tabela = (
+                st.markdown(
                     "<style>"
-                    ".val-table-wrap{width:100%;overflow-x:auto;}"
-                    ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
+                    "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
+                    "div.element-container:has(input[aria-label='raiox_bridge_input']),"
+                    "div[data-testid='stElementContainer']:has(input[aria-label='comp_bridge_input']),"
+                    "div.element-container:has(input[aria-label='comp_bridge_input']),"
+                    "div[data-testid='stElementContainer']:has(iframe[height='0']),"
+                    "div.element-container:has(iframe[height='0']){"
+                    "position:fixed!important;left:-9999px!important;top:0!important;"
+                    "width:1px!important;height:1px!important;opacity:0!important;"
+                    "overflow:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;}"
+                    "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
+                    "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
+                    "div[data-testid='stVerticalBlockBorderWrapper']:has(.raiox-current-marker),"
+                    "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host) > div:has(.raiox-current-marker){"
+                    "border-left:4px solid #3b82f6!important;border-radius:0 8px 8px 0!important;"
+                    "background-color:rgba(59,130,246,0.04)!important;margin:0!important;}"
+                    ".val-table-wrap{width:100%;overflow-x:auto;margin:0;padding:0;}"
+                    ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
                     ".val-table th{position:relative;user-select:none;background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 8px;border-bottom:2px solid rgba(128,128,128,0.35);border-right:1px solid rgba(128,128,128,0.22);font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;}"
                     ".val-table td{padding:8px 8px;border-bottom:1px solid rgba(128,128,128,0.22);border-right:1px solid rgba(128,128,128,0.12);vertical-align:middle;overflow-wrap:break-word;}"
                     ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+                    ".val-table tr.raiox-active-row td{background-color:rgba(59,130,246,0.14)!important;border-bottom-color:rgba(59,130,246,0.45)!important;}"
+                    ".val-table tr.raiox-active-row td:first-child{border-left:4px solid #3b82f6;}"
                     ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
                     ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
-                    ".comp-chk-btn{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;border:1.5px solid rgba(148,163,184,0.75);background:transparent;color:transparent;font-size:12px;font-weight:700;text-decoration:none!important;cursor:pointer;transition:all 0.12s ease;}"
+                    ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;border:1.5px solid rgba(148,163,184,0.75);background:transparent;text-decoration:none!important;cursor:pointer;transition:all 0.12s ease;}"
                     ".comp-chk-btn:hover{border-color:#60a5fa;}"
-                    ".comp-chk-btn.checked{background:#3b82f6;border-color:#3b82f6;color:#ffffff;}"
-                    "</style>"
-                )
-                tabela_html = (
-                    f"{css_tabela}"
-                    "<div class='val-table-wrap'><table class='val-table'><thead><tr>"
-                    "<th style='text-align:center;'>⚖️</th>"
-                    "<th style='text-align:center;'>Rank<br><small>Score</small></th>"
-                    "<th>Ticker / Empresa</th>"
-                    f"<th>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
-                    "<th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
-                    "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
-                    "<th>Preço Teto Médio (6a) & MS</th>"
-                    "<th>Preço Teto Projetivo & MS</th>"
-                    "<th>Preço-Teto Bazin (12m) & MS</th>"
-                    "<th>Preço Justo Graham & MS</th>"
-                    f"</tr></thead><tbody>{''.join(linhas_html)}</tbody></table></div>"
-                )
-                st.markdown(tabela_html, unsafe_allow_html=True)
-                st.caption(
-                    "**Legenda siglas B3:** `ON` = Ordinária (voto) · `PN` = Preferencial (dividendos) · `UNT` = Unit (ON+PN) · "
-                    "`ED/EJ` = Ex-Dividendo/JCP · `N1/N2/NM` = Nível 1, Nível 2 e Novo Mercado (governança).  \n"
-                    "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
-                )
-
-        # --- RAIO-X DO ATIVO (ABRE/FECHA AO CLICAR NA TABELA) ---
-        st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
-        opcoes_raiox = [r["ticker"] for r in (exibir if exibir else resultados)]
-        if "raiox_ativo_sel" not in st.session_state:
-            st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_raiox else opcoes_raiox[0]
-            if ativo_url and ativo_url in opcoes_raiox:
-                st.session_state["raiox_visivel"] = True
-        elif st.session_state["raiox_ativo_sel"] not in opcoes_raiox:
-            st.session_state["raiox_ativo_sel"] = opcoes_raiox[0]
-
-        def _ao_clicar_ticker_tabela():
-            raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
-            st.session_state["raiox_bridge"] = ""
-            if not raw_rx:
-                return
-            tk_clicado = raw_rx.split("|")[0].strip()
-            if not tk_clicado:
-                return
-            if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
-                st.session_state["raiox_visivel"] = False
-            else:
-                st.session_state["raiox_ativo_sel"] = tk_clicado
-                st.session_state["raiox_visivel"] = True
-
-        st.markdown(
-            "<style>"
-            "div[data-testid='stElementContainer']:has(input[aria-label='raiox_bridge_input']),"
-            "div.element-container:has(input[aria-label='raiox_bridge_input']),"
-            "div[data-testid='stElementContainer']:has(input[aria-label='comp_bridge_input']),"
-            "div.element-container:has(input[aria-label='comp_bridge_input']),"
-            "div[data-testid='stElementContainer']:has(iframe[height='0']),"
-            "div.element-container:has(iframe[height='0']){"
-            "position:fixed!important;left:-9999px!important;top:0!important;"
-            "width:1px!important;height:1px!important;opacity:0!important;"
-            "overflow:hidden!important;pointer-events:none!important;margin:0!important;padding:0!important;}"
-            "</style>",
-            unsafe_allow_html=True,
-        )
-
-        @st.fragment
-        def render_secao_raiox(opcoes_rx: list[str], mapa_res: dict[str, dict]):
-            st.text_input(
-                "raiox_bridge_input",
-                key="raiox_bridge",
-                label_visibility="collapsed",
-                on_change=_ao_clicar_ticker_tabela,
-            )
-            if st.session_state.get("raiox_ativo_sel") not in opcoes_rx:
-                st.session_state["raiox_ativo_sel"] = opcoes_rx[0]
-
-            visivel = st.session_state.get("raiox_visivel", False)
-            if not visivel:
-                st.markdown(
-                    "<span class='raiox-current-marker' id='raiox-closed' style='display:none;'></span>",
+                    ".comp-chk-btn.checked{background:#3b82f6;border-color:#3b82f6;}"
+                    ".comp-chk-btn.checked::after{content:'';width:5px;height:9px;border:solid #ffffff;border-width:0 2.2px 2.2px 0;transform:rotate(45deg);margin-bottom:2px;}"
+                    "</style>",
                     unsafe_allow_html=True,
                 )
-                c_msg_rx, c_btn_rx = st.columns([4, 1.2])
-                with c_msg_rx:
-                    st.caption("💡 Clique em qualquer **Ticker** na tabela comparativa acima para abrir o **Raio-X do Ativo** aqui embaixo (clique novamente nele para fechar).")
-                with c_btn_rx:
-                    if st.button("🔎 Abrir Raio-X", key="btn_abrir_raiox", use_container_width=True):
+
+                def _ao_clicar_ticker_tabela():
+                    raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
+                    st.session_state["raiox_bridge"] = ""
+                    if not raw_rx:
+                        return
+                    tk_clicado = raw_rx.split("|")[0].strip()
+                    if not tk_clicado:
+                        return
+                    if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
+                        st.session_state["raiox_visivel"] = False
+                    else:
+                        st.session_state["raiox_ativo_sel"] = tk_clicado
                         st.session_state["raiox_visivel"] = True
-                        st.rerun()
-            else:
-                with st.container(border=True):
-                    c_rx1, c_rx2 = st.columns([3.8, 1])
-                    with c_rx1:
-                        ativo_escolhido = st.selectbox(
-                            "🔎 Raio-X do Ativo selecionado:",
-                            options=opcoes_rx,
-                            key="raiox_ativo_sel",
-                        )
-                    with c_rx2:
-                        st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
-                        if st.button("✖️ Fechar Raio-X", key="btn_fechar_raiox", use_container_width=True):
-                            st.session_state["raiox_visivel"] = False
-                            st.rerun()
 
-                    st.markdown(
-                        f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
-                        unsafe_allow_html=True,
+                @st.fragment
+                def render_tabela_e_raiox(exibir_rows: list[dict], opcoes_rx: list[str], mapa_res: dict[str, dict], comp_ativos: set[str]):
+                    st.text_input(
+                        "raiox_bridge_input",
+                        key="raiox_bridge",
+                        label_visibility="collapsed",
+                        on_change=_ao_clicar_ticker_tabela,
                     )
-                    item_raiox = mapa_res[ativo_escolhido]
-                    render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+                    if "raiox_ativo_sel" not in st.session_state:
+                        st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_rx else opcoes_rx[0]
+                        if ativo_url and ativo_url in opcoes_rx:
+                            st.session_state["raiox_visivel"] = True
+                    elif st.session_state["raiox_ativo_sel"] not in opcoes_rx:
+                        st.session_state["raiox_ativo_sel"] = opcoes_rx[0]
 
-        render_secao_raiox(opcoes_raiox, {r["ticker"]: r for r in resultados})
+                    visivel = st.session_state.get("raiox_visivel", False)
+                    ativo_escolhido = st.session_state.get("raiox_ativo_sel", opcoes_rx[0])
+
+                    fav_set = set(st.session_state["favoritos"])
+                    linhas_html = []
+                    idx_split = None
+                    for i_row, r in enumerate(exibir_rows):
+                        cot = r["cotacao"]
+                        sufixo_6a = "*" if 0 < r["anos_hist"] < 6 else ""
+
+                        pl_txt = fmt_num(r["pl"]) if r["pl"] is not None else "N/A"
+                        if r["pvp"] is not None:
+                            cor_pvp = "#22c55e" if r["pvp"] < 1 else "#ef4444"
+                            emoji_pvp = "🟢" if r["pvp"] < 1 else "🔴"
+                            pvp_html = f"<span style='color:{cor_pvp}; font-weight:600;'>{fmt_num(r['pvp'])} {emoji_pvp}</span>"
+                        else:
+                            pvp_html = "N/A"
+                        roe_txt = f"{fmt_num(r['roe'], 1)}%" if r["roe"] is not None else "N/A"
+
+                        lpa_txt = f"R$ {fmt_num(r['lpa'])}" if r["lpa"] is not None else "N/A"
+                        vpa_txt = f"R$ {fmt_num(r['vpa'])}" if r["vpa"] is not None else "N/A"
+                        dpa6_txt = f"R$ {fmt_num(r['dpa_med_6a'])}" if r["dpa_med_6a"] is not None else "—"
+                        dpap_txt = f"R$ {fmt_num(r['dpa_proj'])}" if r["dpa_proj"] is not None else "—"
+
+                        nome_esc = html.escape(r["nome"])
+                        setor_badge = f"<br><small style='opacity:0.72;'>{html.escape(r['setor_nome'])}</small>" if r["setor_nome"] else ""
+                        estrela = " ⭐" if r["ticker"] in fav_set else ""
+                        chk_cls = "comp-chk-btn checked" if r["ticker"] in comp_ativos else "comp-chk-btn"
+                        eh_linha_rx = visivel and r["ticker"] == ativo_escolhido
+                        tr_cls = " class='raiox-active-row'" if eh_linha_rx else ""
+                        if eh_linha_rx:
+                            idx_split = i_row
+
+                        href = f"#raiox-{r['ticker']}"
+                        linha = (
+                            f"<tr{tr_cls}>"
+                            f"<td style='text-align:center;'><a href='#comp-{r['ticker']}' class='{chk_cls}' title='Selecionar para Comparar Ativos'></a></td>"
+                            f"<td style='text-align:center; font-weight:700;'>{r['pos_ranking']}º<br><small style='opacity:0.75;'>{r['score']}</small></td>"
+                            f"<td><a href='{href}' style='color:#60a5fa; text-decoration:none; font-weight:700; cursor:pointer;'>{r['ticker']}</a>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
+                            f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
+                            f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
+                            f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
+                            f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
+                            f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
+                            f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
+                            f"<td>{html_preco_ms(r['graham'], cot)}</td>"
+                            "</tr>"
+                        )
+                        linhas_html.append(linha)
+
+                    thead_html = (
+                        "<thead><tr>"
+                        "<th style='text-align:center;'>⚖️</th>"
+                        "<th style='text-align:center;'>Rank<br><small>Score</small></th>"
+                        "<th>Ticker / Empresa</th>"
+                        f"<th>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
+                        "<th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
+                        "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
+                        "<th>Preço Teto Médio (6a) & MS</th>"
+                        "<th>Preço Teto Projetivo & MS</th>"
+                        "<th>Preço-Teto Bazin (12m) & MS</th>"
+                        "<th>Preço Justo Graham & MS</th>"
+                        "</tr></thead>"
+                    )
+
+                    with st.container():
+                        st.markdown("<span class='raiox-table-host' style='display:none;'></span>", unsafe_allow_html=True)
+                        if idx_split is None:
+                            st.markdown(
+                                f"<div class='val-table-wrap val-table-wrap-top'><table class='val-table val-table-top'>{thead_html}<tbody>{''.join(linhas_html)}</tbody></table></div>",
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f"<div class='val-table-wrap val-table-wrap-top'><table class='val-table val-table-top'>{thead_html}<tbody>{''.join(linhas_html[:idx_split + 1])}</tbody></table></div>",
+                                unsafe_allow_html=True,
+                            )
+                            with st.container(border=True):
+                                c_rx1, c_rx2 = st.columns([3.8, 1])
+                                with c_rx1:
+                                    st.selectbox(
+                                        "🔎 Raio-X do Ativo selecionado:",
+                                        options=opcoes_rx,
+                                        key="raiox_ativo_sel",
+                                    )
+                                with c_rx2:
+                                    st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
+                                    if st.button("✖️ Fechar Raio-X", key="btn_fechar_raiox", use_container_width=True):
+                                        st.session_state["raiox_visivel"] = False
+                                        st.rerun()
+
+                                st.markdown(
+                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                                    unsafe_allow_html=True,
+                                )
+                                item_raiox = mapa_res[ativo_escolhido]
+                                render_grafico_e_tabela_ativo(ativo_escolhido, item_raiox["nome"], base_ativo=item_raiox, key_prefix="tab1")
+
+                            if idx_split + 1 < len(linhas_html):
+                                st.markdown(
+                                    f"<div class='val-table-wrap val-table-wrap-bot'><table class='val-table val-table-bot'><tbody>{''.join(linhas_html[idx_split + 1:])}</tbody></table></div>",
+                                    unsafe_allow_html=True,
+                                )
+
+                    if idx_split is None:
+                        st.markdown(
+                            "<span class='raiox-current-marker' id='raiox-closed' style='display:none;'></span>",
+                            unsafe_allow_html=True,
+                        )
+                        c_msg_rx, c_btn_rx = st.columns([4, 1.2])
+                        with c_msg_rx:
+                            st.caption("💡 Clique em qualquer **Ticker** na tabela comparativa acima para abrir o **Raio-X do Ativo** logo abaixo da linha dele (clique novamente para fechar).")
+                        with c_btn_rx:
+                            if st.button("🔎 Abrir Raio-X", key="btn_abrir_raiox", use_container_width=True):
+                                st.session_state["raiox_visivel"] = True
+                                st.rerun()
+
+                    st.caption(
+                        "**Legenda siglas B3:** `ON` = Ordinária (voto) · `PN` = Preferencial (dividendos) · `UNT` = Unit (ON+PN) · "
+                        "`ED/EJ` = Ex-Dividendo/JCP · `N1/N2/NM` = Nível 1, Nível 2 e Novo Mercado (governança).  \n"
+                        "(*) Ativos com asterisco possuem menos de 6 anos completos de proventos no Yahoo Finance."
+                    )
+
+                render_tabela_e_raiox(
+                    exibir,
+                    [r["ticker"] for r in exibir],
+                    {r["ticker"]: r for r in resultados},
+                    comp_set,
+                )
+
+        st.markdown("<div id='raiox'></div>", unsafe_allow_html=True)
 
         components.html(
             """
@@ -2219,27 +2272,81 @@ with tab1:
                     const atual = marker && marker.id.startsWith("raiox-current-")
                         ? marker.id.replace("raiox-current-", "").trim().toUpperCase()
                         : "";
-                    const targetEl = pDoc.getElementById("raiox");
                     const vaiFechar = (atual === ticker);
-
+                    pWin.__raioxPendingScroll = vaiFechar ? null : ticker;
                     sendBridgeInput("raiox_bridge_input", ticker + "|" + Date.now());
-
-                    if (!vaiFechar && targetEl) {
-                        setTimeout(function() {
-                            targetEl.scrollIntoView({ behavior: "smooth", block: "start" });
-                        }, 120);
-                    }
                 };
 
                 pWin.__compSyncBridge = function(ticker) {
                     sendBridgeInput("comp_bridge_input", ticker + "|" + Date.now());
                 };
 
+                function applyColgroupToTable(tbl, widthsArr, totW) {
+                    if (!tbl) return;
+                    let cg = tbl.querySelector("colgroup");
+                    if (!cg) {
+                        cg = pDoc.createElement("colgroup");
+                        tbl.insertBefore(cg, tbl.firstChild);
+                    }
+                    cg.innerHTML = "";
+                    widthsArr.forEach(function(w) {
+                        const col = pDoc.createElement("col");
+                        col.style.width = w + "px";
+                        cg.appendChild(col);
+                    });
+                    tbl.style.tableLayout = "fixed";
+                    tbl.style.width = totW + "px";
+                    tbl.style.minWidth = totW + "px";
+                }
+
+                function syncWrapScroll() {
+                    const wrapTop = pDoc.querySelector(".val-table-wrap-top");
+                    const wrapBot = pDoc.querySelector(".val-table-wrap-bot");
+                    if (!wrapTop || !wrapBot) return;
+                    if (!wrapTop.dataset.scrollSync) {
+                        wrapTop.dataset.scrollSync = "1";
+                        wrapTop.addEventListener("scroll", function() {
+                            if (wrapBot && wrapBot.scrollLeft !== wrapTop.scrollLeft) {
+                                wrapBot.scrollLeft = wrapTop.scrollLeft;
+                            }
+                        });
+                    }
+                    if (!wrapBot.dataset.scrollSync) {
+                        wrapBot.dataset.scrollSync = "1";
+                        wrapBot.addEventListener("scroll", function() {
+                            if (wrapTop && wrapTop.scrollLeft !== wrapBot.scrollLeft) {
+                                wrapTop.scrollLeft = wrapBot.scrollLeft;
+                            }
+                        });
+                    }
+                }
+
                 pWin.__initValTableResize = function() {
-                    const table = pDoc.querySelector("table.val-table");
-                    if (!table || table.dataset.resizeReady) return;
-                    const ths = Array.from(table.querySelectorAll("thead tr th"));
+                    const topTable = pDoc.querySelector("table.val-table-top") || pDoc.querySelector("table.val-table");
+                    const botTable = pDoc.querySelector("table.val-table-bot");
+                    if (!topTable) return;
+                    const ths = Array.from(topTable.querySelectorAll("thead tr th"));
                     if (!ths.length) return;
+
+                    syncWrapScroll();
+
+                    if (topTable.dataset.resizeReady && (!botTable || botTable.dataset.resizeReady)) return;
+
+                    let widths = [];
+                    let totalW = 0;
+
+                    if (topTable.dataset.resizeReady) {
+                        const colsTop = Array.from(topTable.querySelectorAll("colgroup col"));
+                        widths = colsTop.map(function(c, i) {
+                            return Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
+                        });
+                        totalW = widths.reduce(function(a, b) { return a + b; }, 0);
+                        if (botTable && !botTable.dataset.resizeReady) {
+                            applyColgroupToTable(botTable, widths, totalW);
+                            botTable.dataset.resizeReady = "1";
+                        }
+                        return;
+                    }
 
                     let saved = {};
                     try {
@@ -2249,32 +2356,21 @@ with tab1:
                     }
                     const hasSaved = Object.keys(saved).length === ths.length;
 
-                    let widths = [];
                     if (hasSaved) {
                         widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
                     } else {
-                        table.style.tableLayout = "auto";
+                        topTable.style.tableLayout = "auto";
                         widths = ths.map((th, i) => Math.max(i === 0 ? 42 : 54, Math.round(th.getBoundingClientRect().width)));
                     }
 
-                    let colgroup = table.querySelector("colgroup");
-                    if (!colgroup) {
-                        colgroup = pDoc.createElement("colgroup");
-                        table.insertBefore(colgroup, table.firstChild);
-                    }
-                    colgroup.innerHTML = "";
-                    let totalW = 0;
-                    widths.forEach((w, idx) => {
-                        const col = pDoc.createElement("col");
-                        col.style.width = w + "px";
-                        colgroup.appendChild(col);
-                        ths[idx].style.width = w + "px";
-                        totalW += w;
-                    });
+                    totalW = widths.reduce((a, b) => a + b, 0);
+                    applyColgroupToTable(topTable, widths, totalW);
+                    widths.forEach((w, idx) => { ths[idx].style.width = w + "px"; });
 
-                    table.style.tableLayout = "fixed";
-                    table.style.width = totalW + "px";
-                    table.style.minWidth = totalW + "px";
+                    if (botTable) {
+                        applyColgroupToTable(botTable, widths, totalW);
+                        botTable.dataset.resizeReady = "1";
+                    }
 
                     ths.forEach((th, idx) => {
                         if (th.querySelector(".col-resizer")) return;
@@ -2286,13 +2382,17 @@ with tab1:
                             ev.preventDefault();
                             ev.stopPropagation();
                             try { pWin.localStorage.removeItem(STORAGE_KEY); } catch (e) {}
-                            table.style.tableLayout = "auto";
-                            table.style.width = "100%";
-                            table.style.minWidth = "";
-                            const cg = table.querySelector("colgroup");
-                            if (cg) cg.remove();
+                            const bTbl = pDoc.querySelector("table.val-table-bot");
+                            [topTable, bTbl].forEach(function(tbl) {
+                                if (!tbl) return;
+                                tbl.style.tableLayout = "auto";
+                                tbl.style.width = "100%";
+                                tbl.style.minWidth = "";
+                                const cg = tbl.querySelector("colgroup");
+                                if (cg) cg.remove();
+                                delete tbl.dataset.resizeReady;
+                            });
                             ths.forEach(function(t) { t.style.width = ""; });
-                            delete table.dataset.resizeReady;
                             setTimeout(pWin.__initValTableResize, 30);
                         });
 
@@ -2300,7 +2400,7 @@ with tab1:
                             ev.preventDefault();
                             ev.stopPropagation();
                             const startX = ev.clientX;
-                            const cgCols = Array.from(table.querySelectorAll("colgroup col"));
+                            const cgCols = Array.from(topTable.querySelectorAll("colgroup col"));
                             const startW = cgCols[idx] ? parseFloat(cgCols[idx].style.width) : th.getBoundingClientRect().width;
                             const startTotalW = cgCols.reduce(function(acc, c) {
                                 return acc + (parseFloat(c.style.width) || 80);
@@ -2312,11 +2412,19 @@ with tab1:
                                 const delta = mv.clientX - startX;
                                 const newW = Math.max(40, Math.round(startW + delta));
                                 const diff = newW - startW;
+                                const newTotal = Math.max(200, Math.round(startTotalW + diff));
                                 if (cgCols[idx]) cgCols[idx].style.width = newW + "px";
                                 th.style.width = newW + "px";
-                                const newTotal = Math.max(200, Math.round(startTotalW + diff));
-                                table.style.width = newTotal + "px";
-                                table.style.minWidth = newTotal + "px";
+                                topTable.style.width = newTotal + "px";
+                                topTable.style.minWidth = newTotal + "px";
+
+                                const bTbl = pDoc.querySelector("table.val-table-bot");
+                                if (bTbl) {
+                                    const bCols = Array.from(bTbl.querySelectorAll("colgroup col"));
+                                    if (bCols[idx]) bCols[idx].style.width = newW + "px";
+                                    bTbl.style.width = newTotal + "px";
+                                    bTbl.style.minWidth = newTotal + "px";
+                                }
                             }
 
                             function onUp() {
@@ -2325,7 +2433,7 @@ with tab1:
                                 pDoc.removeEventListener("mousemove", onMove);
                                 pDoc.removeEventListener("mouseup", onUp);
                                 const obj = {};
-                                const colsNow = Array.from(table.querySelectorAll("colgroup col"));
+                                const colsNow = Array.from(topTable.querySelectorAll("colgroup col"));
                                 colsNow.forEach(function(c, i) {
                                     obj[i] = Math.max(40, Math.round(parseFloat(c.style.width) || ths[i].getBoundingClientRect().width));
                                 });
@@ -2341,7 +2449,7 @@ with tab1:
                         th.appendChild(resizer);
                     });
 
-                    table.dataset.resizeReady = "1";
+                    topTable.dataset.resizeReady = "1";
                 };
 
                 pWin.__initValTableResize();
@@ -2350,6 +2458,18 @@ with tab1:
                     pWin.__valTableObserver = new MutationObserver(function() {
                         if (pWin.__initValTableResize) {
                             pWin.__initValTableResize();
+                        }
+                        if (pWin.__raioxPendingScroll) {
+                            const mk = pDoc.getElementById("raiox-current-" + pWin.__raioxPendingScroll);
+                            if (mk) {
+                                pWin.__raioxPendingScroll = null;
+                                const activeRow = pDoc.querySelector("tr.raiox-active-row");
+                                if (activeRow) {
+                                    setTimeout(function() {
+                                        activeRow.scrollIntoView({ behavior: "smooth", block: "start" });
+                                    }, 80);
+                                }
+                            }
                         }
                     });
                     pWin.__valTableObserver.observe(pDoc.body, { childList: true, subtree: true });
@@ -2756,7 +2876,9 @@ with tab3:
             )
 
             rows_c = []
-            base_params_c = {"setor": filtro_setor, "liq": liq_label}
+            base_params_c = {"liq": liq_label}
+            if len(filtro_setores) == 1:
+                base_params_c["setor"] = filtro_setores[0]
             for r in itens_tabela_cart:
                 cot = r["cotacao"]
                 pct_cart = (r["saldo"] / total_atual * 100) if total_atual > 0 else 0.0

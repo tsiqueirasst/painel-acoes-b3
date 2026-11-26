@@ -744,7 +744,7 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def _carregar_todos_ativos_b3_cached(_v: int = 2) -> list[dict]:
+def _carregar_todos_ativos_b3_cached(_v: int = 3) -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
     ativos = []
     for row in linhas:
@@ -758,6 +758,14 @@ def _carregar_todos_ativos_b3_cached(_v: int = 2) -> list[dict]:
         dy = parse_br_num(row.get("Div.Yield")) or 0.0
         roe = parse_br_num(row.get("ROE"))
         liq_2m = parse_br_num(row.get("Liq.2meses")) or 0.0
+        ev_ebitda = parse_br_num(row.get("EV/EBITDA") or row.get("EV / EBITDA"))
+        ev_ebit = parse_br_num(row.get("EV/EBIT") or row.get("EV / EBIT"))
+        roic = parse_br_num(row.get("ROIC"))
+        marg_liq = parse_br_num(row.get("Mrg. Líq.") or row.get("Mrg Líq."))
+        marg_ebit = parse_br_num(row.get("Mrg Ebit") or row.get("Mrg. Ebit"))
+        liq_corr = parse_br_num(row.get("Liq. Corr."))
+        div_brut_patrim = parse_br_num(row.get("Dív.Brut/ Patrim.") or row.get("Dív.Líq/ Patrim."))
+        cresc_rec_5a = parse_br_num(row.get("Cresc. Rec.5a") or row.get("Cresc. Rec. 5a"))
 
         lpa = (cotacao / pl) if (pl is not None and pl != 0) else None
         vpa = (cotacao / pvp) if (pvp is not None and pvp != 0) else None
@@ -767,6 +775,9 @@ def _carregar_todos_ativos_b3_cached(_v: int = 2) -> list[dict]:
             "ticker": papel, "nome": papel, "cotacao": cotacao, "dy_12m": dy,
             "pl": pl, "pvp": pvp, "roe": roe, "lpa": lpa, "vpa": vpa,
             "dpa_12m": dpa_12m, "liq_2m": liq_2m,
+            "ev_ebitda": ev_ebitda, "ev_ebit": ev_ebit, "roic": roic,
+            "marg_liq": marg_liq, "marg_ebit": marg_ebit, "liq_corr": liq_corr,
+            "div_brut_patrim": div_brut_patrim, "cresc_rec_5a": cresc_rec_5a,
         })
     if not ativos:
         raise RuntimeError("Lista de ativos vazia do Fundamentus")
@@ -825,10 +836,65 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             pass
         if not cot_yf:
             cot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
-        if not cot_yf:
-            h5 = tk.history(period="5d", auto_adjust=False)
-            if h5 is not None and not h5.empty:
-                cot_yf = float(h5["Close"].iloc[-1])
+
+        ifr_14 = None
+        mm20 = None
+        mm50 = None
+        mm200 = None
+        dist_mm50_pct = None
+        dist_mm200_pct = None
+        dist_max_52s_pct = None
+        razao_volume = None
+
+        try:
+            hist_1y = tk.history(period="1y", interval="1d", auto_adjust=False)
+            if hist_1y is not None and not hist_1y.empty and "Close" in hist_1y.columns:
+                close_s = hist_1y["Close"].dropna()
+                if not cot_yf and not close_s.empty:
+                    cot_yf = float(close_s.iloc[-1])
+
+                px_ref = float(cot_yf) if cot_yf else (float(close_s.iloc[-1]) if not close_s.empty else None)
+
+                if len(close_s) >= 15:
+                    delta = close_s.diff().dropna()
+                    gain = delta.clip(lower=0.0)
+                    loss = (-delta).clip(lower=0.0)
+                    avg_gain = float(gain.iloc[:14].mean())
+                    avg_loss = float(loss.iloc[:14].mean())
+                    for g_val, l_val in zip(gain.iloc[14:], loss.iloc[14:]):
+                        avg_gain = (avg_gain * 13.0 + float(g_val)) / 14.0
+                        avg_loss = (avg_loss * 13.0 + float(l_val)) / 14.0
+                    if avg_loss == 0.0:
+                        ifr_14 = 100.0 if avg_gain > 0.0 else 50.0
+                    else:
+                        rs = avg_gain / avg_loss
+                        ifr_14 = 100.0 - (100.0 / (1.0 + rs))
+
+                if len(close_s) >= 20:
+                    mm20 = float(close_s.tail(20).mean())
+                if len(close_s) >= 50:
+                    mm50 = float(close_s.tail(50).mean())
+                    if px_ref and mm50 > 0:
+                        dist_mm50_pct = ((px_ref / mm50) - 1.0) * 100.0
+                if len(close_s) >= 200:
+                    mm200 = float(close_s.tail(200).mean())
+                    if px_ref and mm200 > 0:
+                        dist_mm200_pct = ((px_ref / mm200) - 1.0) * 100.0
+
+                high_s = hist_1y["High"].dropna() if "High" in hist_1y.columns else pd.Series(dtype=float)
+                max_52s = float(high_s.max()) if not high_s.empty else (float(close_s.max()) if not close_s.empty else None)
+                if px_ref and max_52s and max_52s > 0:
+                    dist_max_52s_pct = ((px_ref / max_52s) - 1.0) * 100.0
+
+                if "Volume" in hist_1y.columns:
+                    vol_s = hist_1y["Volume"].dropna()
+                    if len(vol_s) >= 60:
+                        vol_5d = float(vol_s.tail(5).mean())
+                        vol_60d = float(vol_s.tail(60).mean())
+                        if vol_60d > 0:
+                            razao_volume = vol_5d / vol_60d
+        except Exception:
+            pass
 
         fin_curr = (info.get("financialCurrency") or "BRL").upper()
         lpa = info.get("trailingEps") if fin_curr == "BRL" else None
@@ -874,6 +940,14 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             "dpa_med_6a": float(dpa_med_6a) if dpa_med_6a is not None else None,
             "anos_hist": anos_hist,
             "dpa_proj": float(dpa_proj) if dpa_proj is not None else None,
+            "ifr_14": float(ifr_14) if ifr_14 is not None else None,
+            "mm20": float(mm20) if mm20 is not None else None,
+            "mm50": float(mm50) if mm50 is not None else None,
+            "mm200": float(mm200) if mm200 is not None else None,
+            "dist_mm50_pct": float(dist_mm50_pct) if dist_mm50_pct is not None else None,
+            "dist_mm200_pct": float(dist_mm200_pct) if dist_mm200_pct is not None else None,
+            "dist_max_52s_pct": float(dist_max_52s_pct) if dist_max_52s_pct is not None else None,
+            "razao_volume": float(razao_volume) if razao_volume is not None else None,
         }
     except Exception:
         return ticker, {}

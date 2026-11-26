@@ -1698,10 +1698,55 @@ def html_preco_ms(preco_calc: float | None, cotacao: float, sufixo: str = "") ->
     )
 
 
-def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazin: float | None, graham: float | None) -> tuple[float, float | None, list[str]]:
-    cot = d["cotacao"]
-    ms_lista = [x for x in [calc_ms(pt_med, cot), calc_ms(pt_proj, cot), calc_ms(pt_bazin, cot), calc_ms(graham, cot)] if x is not None]
+def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazin: float | None, graham: float | None) -> dict:
+    cot = float(d.get("cotacao") or 0.0)
+    eh_banco_seg = bool(d.get("eh_banco_seg", False))
 
+    pl = d.get("pl")
+    pvp = d.get("pvp")
+    roe = d.get("roe")
+    roic = d.get("roic")
+    marg_liq = d.get("marg_liq")
+    marg_ebit = d.get("marg_ebit")
+    ev_ebitda = d.get("ev_ebitda")
+    liq_corr = d.get("liq_corr")
+    div_brut_patrim = d.get("div_brut_patrim")
+    cresc_rec_5a = d.get("cresc_rec_5a")
+
+    dy_12m = float(d.get("dy_12m") or 0.0)
+    dpa_med_6a = float(d.get("dpa_med_6a") or 0.0)
+    anos_hist = int(d.get("anos_hist") or 0)
+
+    ifr_14 = d.get("ifr_14")
+    mm20 = d.get("mm20")
+    mm50 = d.get("mm50")
+    mm200 = d.get("mm200")
+    dist_mm50_pct = d.get("dist_mm50_pct")
+    dist_mm200_pct = d.get("dist_mm200_pct")
+    dist_max_52s_pct = d.get("dist_max_52s_pct")
+    razao_volume = d.get("razao_volume")
+
+    news_score = float(d.get("news_score") or 0.0)
+    news_resumo = str(d.get("news_resumo") or "⚪ Neutro")
+
+    # === 1) FAIXAS DE PREÇO DO MODELO (CVM COMPLIANT) ===
+    div_teto_ref = pt_med if (pt_med and pt_med > 0) else (pt_bazin if (pt_bazin and pt_bazin > 0) else None)
+    cands_teto = []
+    if graham and graham > 0:
+        cands_teto.append(float(graham))
+    if div_teto_ref and div_teto_ref > 0:
+        cands_teto.append(float(div_teto_ref) * 0.85)
+    preco_teto_modelo = min(cands_teto) if cands_teto else None
+
+    dpa_ref_sp = d.get("dpa_proj") if (d.get("dpa_proj") and d.get("dpa_proj") > 0) else (d.get("dpa_12m") if (d.get("dpa_12m") and d.get("dpa_12m") > 0) else None)
+    p_yield_4pct = (float(dpa_ref_sp) / 0.04) if (dpa_ref_sp and dpa_ref_sp > 0) else None
+    p_graham_125 = (float(graham) * 1.25) if (graham and graham > 0) else None
+    cands_sp = [x for x in (p_yield_4pct, p_graham_125) if x is not None]
+    preco_sobrepreco = max(cands_sp) if cands_sp else None
+
+    # === 2) SCORE LONGO PRAZO (0 a 100) ===
+    # 2.1 Valuation com Fator de Confiança (35 pts)
+    ms_lista = [x for x in [calc_ms(pt_med, cot), calc_ms(pt_proj, cot), calc_ms(pt_bazin, cot), calc_ms(graham, cot)] if x is not None]
     n_metodos = len(ms_lista)
     if n_metodos == 1:
         fator_confianca = 0.60
@@ -1714,33 +1759,205 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         ms_limitadas = [max(-40.0, min(60.0, m)) for m in ms_lista]
         avg_ms_lim = sum(ms_limitadas) / n_metodos
         avg_ms_real = sum(ms_lista) / n_metodos
-        pts_ms_bruto = max(0.0, min(35.0, ((avg_ms_lim + 40.0) / 100.0) * 35.0))
-        pts_ms = pts_ms_bruto * fator_confianca
+        pts_ms = max(0.0, min(20.0, ((avg_ms_lim + 40.0) / 100.0) * 20.0)) * fator_confianca
     else:
         avg_ms_real = None
         pts_ms = 0.0
 
-    dy_12m = float(d.get("dy_12m") or 0.0)
-    dpa_med_6a = float(d.get("dpa_med_6a") or 0.0)
-    anos_hist = int(d.get("anos_hist") or 0)
+    pts_pvp_m = (max(0.0, min(3.0, ((2.5 - pvp) / 1.5) * 3.0)) + (1.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
+    pts_pl_m = max(0.0, min(4.0, ((20.0 - pl) / 15.0) * 4.0)) if (pl and pl > 0) else 0.0
+    if eh_banco_seg:
+        pts_mult = (pts_pvp_m + pts_pl_m) * (10.0 / 8.0)
+    else:
+        pts_ev = max(0.0, min(2.0, ((12.0 - ev_ebitda) / 8.0) * 2.0)) if (ev_ebitda and ev_ebitda > 0) else 0.0
+        pts_mult = pts_pvp_m + pts_pl_m + pts_ev
+
     if dy_12m <= 0.0 and dpa_med_6a <= 0.0 and anos_hist <= 0:
         pts_div = 0.0
     else:
-        pts_dy12 = min(10.0, (max(0.0, dy_12m) / 10.0) * 10.0)
-        dy_6a = (dpa_med_6a / cot) * 100.0 if (dpa_med_6a > 0.0 and cot > 0.0) else 0.0
-        pts_hist_div = (min(3.0, (dy_6a / 8.0) * 3.0) if dy_6a > 0.0 else 0.0) + (min(2.0, (min(anos_hist, 6) / 6.0) * 2.0) if anos_hist > 0 else 0.0)
-        pts_div = min(15.0, pts_dy12 + pts_hist_div)
+        pts_dy12 = min(3.5, (max(0.0, dy_12m) / 8.0) * 3.5)
+        pts_h6 = min(1.5, (min(anos_hist, 6) / 6.0) * 1.5) if anos_hist > 0 else 0.0
+        pts_div = min(5.0, pts_dy12 + pts_h6)
 
-    pvp = d["pvp"]
-    pts_pvp = (max(0.0, min(11.0, ((2.5 - pvp) / 1.5) * 11.0)) + (4.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
-    pl = d["pl"]
-    pts_pl = max(0.0, min(15.0, ((20.0 - pl) / 15.0) * 15.0)) if (pl and pl > 0) else 0.0
-    roe = d["roe"]
-    pts_roe = min(20.0, (roe / 25.0) * 20.0) if (roe and roe > 0) else 0.0
+    pts_val_lp = min(35.0, pts_ms + pts_mult + pts_div)
 
-    score = round(pts_ms + pts_div + pts_pvp + pts_pl + pts_roe, 1)
+    # 2.2 Rentabilidade / ROE / ROIC / Margem (30 pts)
+    if eh_banco_seg:
+        pts_roe_lp = min(20.0, (roe / 22.0) * 20.0) if (roe and roe > 0) else 0.0
+        if marg_liq is not None:
+            pts_marg_lp = min(10.0, (marg_liq / 20.0) * 10.0) if marg_liq > 0 else 0.0
+        else:
+            pts_marg_lp = 5.0 if (roe and roe >= 12.0) else 0.0
+        pts_rent_lp = min(30.0, pts_roe_lp + pts_marg_lp)
+    else:
+        pts_roe_lp = min(12.0, (roe / 25.0) * 12.0) if (roe and roe > 0) else 0.0
+        if roic is not None:
+            pts_roic_lp = min(10.0, (roic / 20.0) * 10.0) if roic > 0 else 0.0
+        else:
+            pts_roic_lp = min(10.0, (roe / 25.0) * 10.0) if (roe and roe > 0) else 0.0
+        pts_ml_lp = min(5.0, (marg_liq / 20.0) * 5.0) if (marg_liq and marg_liq > 0) else 0.0
+        if marg_ebit is not None:
+            pts_me_lp = min(3.0, (marg_ebit / 25.0) * 3.0) if marg_ebit > 0 else 0.0
+        else:
+            pts_me_lp = min(3.0, (marg_liq / 20.0) * 3.0) if (marg_liq and marg_liq > 0) else 0.0
+        pts_rent_lp = min(30.0, pts_roe_lp + pts_roic_lp + pts_ml_lp + pts_me_lp)
 
+    # 2.3 Saúde Financeira: Dívida / Liquidez / Crescimento (25 pts)
+    if eh_banco_seg:
+        if roe is not None and roe >= 15.0 and (pl is None or pl > 0):
+            pts_solv = 15.0
+        elif roe is not None and roe >= 10.0 and (pl is None or pl > 0):
+            pts_solv = 12.0
+        elif roe is not None and roe > 0:
+            pts_solv = 8.0
+        else:
+            pts_solv = 2.0
+        pts_cresc = max(0.0, min(10.0, ((cresc_rec_5a + 5.0) / 20.0) * 10.0)) if (cresc_rec_5a is not None) else 4.0
+        pts_saude_lp = min(25.0, pts_solv + pts_cresc)
+    else:
+        if div_brut_patrim is not None:
+            if div_brut_patrim <= 0.5:
+                pts_divida = 10.0
+            elif div_brut_patrim <= 3.0:
+                pts_divida = max(0.0, 10.0 - ((div_brut_patrim - 0.5) / 2.5) * 10.0)
+            else:
+                pts_divida = 0.0
+        else:
+            pts_divida = 5.0
+
+        if liq_corr is not None:
+            if liq_corr >= 1.5:
+                pts_liq = 7.0
+            elif liq_corr >= 0.8:
+                pts_liq = ((liq_corr - 0.8) / 0.7) * 7.0
+            else:
+                pts_liq = 0.0
+        else:
+            pts_liq = 3.5
+
+        pts_cresc = max(0.0, min(8.0, ((cresc_rec_5a + 5.0) / 20.0) * 8.0)) if (cresc_rec_5a is not None) else 3.0
+        pts_saude_lp = min(25.0, pts_divida + pts_liq + pts_cresc)
+
+    # 2.4 Contexto Notícias LP (10 pts)
+    pts_news_lp = max(0.0, min(10.0, ((news_score + 10.0) / 20.0) * 10.0))
+
+    score_lp_bruto = pts_val_lp + pts_rent_lp + pts_saude_lp + pts_news_lp
+
+    # Trava Anti-Armadilha (Value Trap)
+    armadilha_motivos = []
+    if marg_liq is not None and marg_liq < 0:
+        armadilha_motivos.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
+    if roe is not None and roe < 0:
+        armadilha_motivos.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
+    if (not eh_banco_seg) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
+        armadilha_motivos.append(f"Dív/Patrim elevada ({fmt_num(div_brut_patrim)}x > 3,0x)")
+    if "🚨" in news_resumo:
+        armadilha_motivos.append("risco crítico em notícias (RJ/fraude/alerta)")
+
+    eh_value_trap = len(armadilha_motivos) > 0
+    score_lp = round(min(score_lp_bruto, 50.0) if eh_value_trap else min(100.0, score_lp_bruto), 1)
+
+    # === 3) SCORE CURTO PRAZO (0 a 100) ===
+    # 3.1 Ponto Técnico / IFR 14 sob-vendido entre 30 e 48 (40 pts)
+    if ifr_14 is not None:
+        if 30.0 <= ifr_14 <= 48.0:
+            pts_ifr = 40.0 - (abs(ifr_14 - 38.0) / 10.0) * 4.0
+        elif ifr_14 < 30.0:
+            pts_ifr = max(18.0, 35.0 - (30.0 - ifr_14))
+        elif ifr_14 <= 65.0:
+            pts_ifr = max(16.0, 35.0 - ((ifr_14 - 48.0) / 17.0) * 19.0)
+        else:
+            pts_ifr = max(0.0, 16.0 - ((ifr_14 - 65.0) / 20.0) * 16.0)
+    else:
+        pts_ifr = 20.0
+
+    # 3.2 Médias MM20 / MM50 / MM200 e Máx 52s (25 pts)
+    if mm20 is None and mm50 is None and mm200 is None:
+        pts_medias = 12.5
+    else:
+        pts_mm200 = 3.0
+        if dist_mm200_pct is not None:
+            if 0.0 <= dist_mm200_pct <= 25.0:
+                pts_mm200 = 6.0
+            elif -12.0 <= dist_mm200_pct < 0.0:
+                pts_mm200 = 4.0
+            elif dist_mm200_pct > 25.0:
+                pts_mm200 = 2.0
+            else:
+                pts_mm200 = 1.0
+
+        pts_mm50 = 2.5
+        if dist_mm50_pct is not None:
+            if -6.0 <= dist_mm50_pct <= 6.0:
+                pts_mm50 = 5.0
+            elif 6.0 < dist_mm50_pct <= 15.0 or -12.0 <= dist_mm50_pct < -6.0:
+                pts_mm50 = 3.0
+            else:
+                pts_mm50 = 1.0
+
+        pts_mm20 = 2.0
+        if mm20 is not None and cot > 0:
+            if cot >= mm20 and (mm50 is None or mm20 >= mm50):
+                pts_mm20 = 4.0
+            elif cot >= mm20 or abs((cot / mm20) - 1.0) <= 0.03:
+                pts_mm20 = 3.0
+            else:
+                pts_mm20 = 1.0
+
+        if dist_max_52s_pct is not None:
+            if -25.0 <= dist_max_52s_pct <= -5.0:
+                pts_52s = 10.0
+            elif dist_max_52s_pct > -5.0:
+                pts_52s = 6.0
+            elif dist_max_52s_pct >= -40.0:
+                pts_52s = 6.0
+            else:
+                pts_52s = 2.0
+        else:
+            pts_52s = 5.0
+
+        pts_medias = min(25.0, pts_mm200 + pts_mm50 + pts_mm20 + pts_52s)
+
+    # 3.3 Catalisadores / News Score CP (25 pts)
+    pts_news_cp = max(0.0, min(25.0, ((news_score + 10.0) / 20.0) * 25.0))
+
+    # 3.4 Volume Comprador (10 pts)
+    if razao_volume is not None:
+        pts_vol = max(2.0, min(10.0, (razao_volume / 1.5) * 10.0))
+        em_distribuicao = (mm20 is not None and cot > 0 and cot < mm20 * 0.97 and news_score < 0)
+        if em_distribuicao:
+            pts_vol = min(pts_vol, 5.0)
+    else:
+        pts_vol = 5.0
+
+    score_cp = round(min(100.0, pts_ifr + pts_medias + pts_news_cp + pts_vol), 1)
+    score_geral = round((0.60 * score_lp) + (0.40 * score_cp), 1)
+
+    # === 4) VEREDITO QUANTITATIVO DO MODELO (6 SELOS) ===
+    esta_esticado = (
+        (preco_sobrepreco is not None and cot > 0 and cot >= preco_sobrepreco)
+        or (avg_ms_real is not None and avg_ms_real < -15.0)
+        or (ifr_14 is not None and ifr_14 >= 72.0 and (avg_ms_real is None or avg_ms_real < 5.0))
+        or (dist_mm200_pct is not None and dist_mm200_pct > 30.0 and (avg_ms_real is None or avg_ms_real < 0.0))
+    )
+
+    if eh_value_trap or score_lp < 38.0 or (score_geral < 42.0 and not esta_esticado):
+        veredito = "🔴 Crítico (Risco Alto)"
+    elif esta_esticado:
+        veredito = "🟣 Esticado (Alerta Topo/Sobrepreço)"
+    elif score_geral >= 72.0 and score_lp >= 70.0 and (avg_ms_real is None or avg_ms_real > 0.0):
+        veredito = "🟢 Excelente (Forte Atratividade)"
+    elif score_lp >= 62.0 and score_geral >= 58.0:
+        veredito = "🔵 Bom (Acúmulo LP)"
+    elif abs(score_lp - score_cp) >= 20.0 or (score_lp >= 58.0 and news_score <= -2.5) or (score_cp >= 65.0 and score_lp < 55.0):
+        veredito = "🟠 Indeciso (Sinais Mistos)"
+    else:
+        veredito = "🟡 Regular (Neutro)"
+
+    # === 5) MOTIVOS EXPLICATIVOS ===
     motivos = []
+    if eh_value_trap:
+        motivos.append(f"⚠️ Trava Anti-Armadilha (teto LP 50): {', '.join(armadilha_motivos)}")
     if avg_ms_real is not None:
         if avg_ms_real > 15:
             motivos.append(f"forte desconto médio ({avg_ms_real:+.1f}%) nos métodos")
@@ -1764,12 +1981,43 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     if roe is not None:
         if roe >= 15:
             motivos.append(f"ROE forte ({fmt_num(roe, 1)}%)")
-        elif roe < 8:
+        elif 0 <= roe < 8:
             motivos.append(f"ROE baixo ({fmt_num(roe, 1)}%)")
+    if ifr_14 is not None:
+        if 30.0 <= ifr_14 <= 48.0:
+            motivos.append(f"IFR em ponto técnico atrativo ({fmt_num(ifr_14, 1)})")
+        elif ifr_14 >= 70.0:
+            motivos.append(f"IFR sobrecomprado ({fmt_num(ifr_14, 1)})")
+        elif ifr_14 < 30.0:
+            motivos.append(f"IFR muito sobrevendido ({fmt_num(ifr_14, 1)})")
+    if news_resumo != "⚪ Neutro":
+        motivos.append(f"notícias 30d: {news_resumo}")
     if pl is not None and pl < 0:
         motivos.append("atenção: lucro negativo")
 
-    return score, avg_ms_real, motivos
+    return {
+        "score_lp": score_lp,
+        "score_cp": score_cp,
+        "score_geral": score_geral,
+        "avg_ms": avg_ms_real,
+        "motivos": motivos,
+        "veredito": veredito,
+        "eh_value_trap": eh_value_trap,
+        "preco_teto_modelo": preco_teto_modelo,
+        "preco_sobrepreco": preco_sobrepreco,
+        "detalhes": {
+            "pts_val_lp": round(pts_val_lp, 1),
+            "pts_rent_lp": round(pts_rent_lp, 1),
+            "pts_saude_lp": round(pts_saude_lp, 1),
+            "pts_news_lp": round(pts_news_lp, 1),
+            "pts_ifr_cp": round(pts_ifr, 1),
+            "pts_medias_cp": round(pts_medias, 1),
+            "pts_news_cp": round(pts_news_cp, 1),
+            "pts_vol_cp": round(pts_vol, 1),
+            "fator_confianca": fator_confianca,
+            "n_metodos": n_metodos,
+        },
+    }
 
 
 def sort_resultados(lista: list[dict], chave: str, reverso: bool) -> list[dict]:
@@ -2132,12 +2380,16 @@ if setores_alvo:
 
     ativos_filtrados = [a for a in ativos_filtrados if mapa_setores_ativos.get(a["ticker"]) in setores_alvo]
 
+ids_fin_seg = tuple(sorted({setores_dict[s] for s in ("Intermediários Financeiros", "Previdência e Seguros") if s in setores_dict}))
+mapa_fin_seg = carregar_tickers_por_setor(ids_fin_seg) if ids_fin_seg else {}
+
 preliminares = []
 for a in ativos_filtrados:
+    a_pre = {**a, "eh_banco_seg": a["ticker"] in mapa_fin_seg}
     pt_bazin = a["dpa_12m"] / 0.06 if a["dpa_12m"] > 0 else None
     graham = math.sqrt(22.5 * a["lpa"] * a["vpa"]) if (a["lpa"] and a["vpa"] and a["lpa"] > 0 and a["vpa"] > 0) else None
-    score_pre, _, _ = calcular_score(a, None, None, pt_bazin, graham)
-    preliminares.append((score_pre, a))
+    res_pre = calcular_score(a_pre, None, None, pt_bazin, graham)
+    preliminares.append((res_pre["score_geral"], a))
 preliminares.sort(key=lambda x: x[0], reverse=True)
 
 carregar_todos_yf = False
@@ -2155,13 +2407,15 @@ for ex in extras_obrigatorios:
     if ex and ex not in tickers_para_yf:
         tickers_para_yf.append(ex)
 
-with st.spinner(f"Buscando dados de 6 anos e nomes na B3 para {len(tickers_para_yf)} ativos..."):
+with st.spinner(f"Buscando dados de 6 anos, indicadores técnicos e notícias para {len(tickers_para_yf)} ativos..."):
     dados_yf = buscar_yahoo_lote(tuple(tickers_para_yf))
+    dados_news = buscar_sentimento_noticias_lote(tuple(tickers_para_yf))
 
 
 def montar_item_completo(a: dict) -> dict:
     t = a["ticker"]
     yf_info = dados_yf.get(t, {})
+    news_info = dados_news.get(t, {})
     cot = yf_info.get("cotacao_yf") or a.get("cotacao") or 0.0
     nome = yf_info.get("nome") or mapa_setores_ativos.get(t) or t
     lpa = a.get("lpa") if a.get("lpa") is not None else yf_info.get("lpa_yf")
@@ -2181,25 +2435,49 @@ def montar_item_completo(a: dict) -> dict:
     pt_bazin = (dpa_12m / 0.06) if (dpa_12m and dpa_12m > 0) else None
     graham = math.sqrt(22.5 * lpa * vpa) if (lpa and vpa and lpa > 0 and vpa > 0) else None
 
-    setor_oficial_t = mapa_setores_ativos.get(t, "")
+    setor_oficial_t = mapa_setores_ativos.get(t, "") or mapa_fin_seg.get(t, "")
     setor_exib_t = SETOR_CURTO.get(setor_oficial_t, setor_oficial_t)
+    eh_banco_seg = (t in mapa_fin_seg) or any(
+        k in _norm_txt(setor_oficial_t) for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
+    )
+
     item = {
         **a,
-        "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t,
+        "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t, "eh_banco_seg": eh_banco_seg,
         "pl": pl, "pvp": pvp, "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,
+        "ifr_14": yf_info.get("ifr_14"),
+        "mm20": yf_info.get("mm20"),
+        "mm50": yf_info.get("mm50"),
+        "mm200": yf_info.get("mm200"),
+        "dist_mm50_pct": yf_info.get("dist_mm50_pct"),
+        "dist_mm200_pct": yf_info.get("dist_mm200_pct"),
+        "dist_max_52s_pct": yf_info.get("dist_max_52s_pct"),
+        "razao_volume": yf_info.get("razao_volume"),
+        "news_score": news_info.get("news_score", 0.0),
+        "news_resumo": news_info.get("news_resumo", "⚪ Neutro"),
+        "news_qtd_30d": news_info.get("qtd_30d", 0),
+        "news_qtd_7d": news_info.get("qtd_7d", 0),
     }
-    score, avg_ms, motivos = calcular_score(item, pt_med, pt_proj, pt_bazin, graham)
-    item["score"] = score
-    item["avg_ms"] = avg_ms
-    item["motivos"] = motivos
+    res_score = calcular_score(item, pt_med, pt_proj, pt_bazin, graham)
+    item["score_lp"] = res_score["score_lp"]
+    item["score_cp"] = res_score["score_cp"]
+    item["score_geral"] = res_score["score_geral"]
+    item["score"] = res_score["score_geral"]
+    item["avg_ms"] = res_score["avg_ms"]
+    item["motivos"] = res_score["motivos"]
+    item["veredito"] = res_score["veredito"]
+    item["eh_value_trap"] = res_score["eh_value_trap"]
+    item["preco_teto_modelo"] = res_score["preco_teto_modelo"]
+    item["preco_sobrepreco"] = res_score["preco_sobrepreco"]
+    item["detalhes_score"] = res_score["detalhes"]
     return item
 
 
 resultados = [montar_item_completo(a) for _, a in preliminares]
-resultados.sort(key=lambda x: x["score"], reverse=True)
+resultados.sort(key=lambda x: x["score_geral"], reverse=True)
 for idx, r in enumerate(resultados, start=1):
     r["pos_ranking"] = idx
 
@@ -2861,10 +3139,13 @@ with tab2:
         mapa_res = {r["ticker"]: r for r in resultados}
         faltantes = tuple(t for t in selecionados if t not in dados_yf)
         extra_yf = buscar_yahoo_lote(faltantes) if faltantes else {}
+        faltantes_nw = tuple(t for t in selecionados if t not in dados_news)
+        if faltantes_nw:
+            dados_news.update(buscar_sentimento_noticias_lote(faltantes_nw))
 
         itens_comp = []
         for t in selecionados:
-            if t in mapa_res and t not in extra_yf:
+            if t in mapa_res and t not in extra_yf and t not in faltantes_nw:
                 itens_comp.append(mapa_res[t])
             else:
                 dados_yf[t] = dados_yf.get(t) or extra_yf.get(t, {})
@@ -2944,6 +3225,9 @@ with tab3:
             faltantes_c = tuple(t for t in tickers_cart if t not in dados_yf)
             if faltantes_c:
                 dados_yf.update(buscar_yahoo_lote(faltantes_c))
+            faltantes_cn = tuple(t for t in tickers_cart if t not in dados_news)
+            if faltantes_cn:
+                dados_news.update(buscar_sentimento_noticias_lote(faltantes_cn))
 
             hist_cart = buscar_divs_e_precos_carteira(tickers_cart)
             mapa_setores_full = carregar_mapa_todos_setores()

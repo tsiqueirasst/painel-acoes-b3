@@ -1519,6 +1519,229 @@ def toggle_favorito(ticker: str):
     salvar_dados_usuario_nuvem()
 
 
+DICIONARIO_TERMOS = {
+    "IFR (14) / RSI": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Índice de Força Relativa (14 dias) / Relative Strength Index",
+        "o_que_e": "Um termômetro de 0 a 100 que mede a velocidade e a intensidade das altas e quedas recentes de uma ação nos últimos 14 pregões.",
+        "como_interpretar": "Abaixo de 30 indica ativo muito descontado (sobrevendido). Entre 30 e 48 costuma ser uma excelente região de entrada após respiro. Acima de 70 sinaliza euforia/sobrecompra, com maior risco de correção no curto prazo.",
+    },
+    "MM20": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Média Móvel Simples de 20 Dias",
+        "o_que_e": "É o preço médio de fechamento da ação nos últimos 20 dias úteis (cerca de 1 mês), indicando a tendência de curtíssimo prazo.",
+        "como_interpretar": "Quando a cotação trabalha acima da MM20, há força compradora imediata. Se cair muito rápido abaixo dela, pode indicar perda de fôlego no curto prazo.",
+    },
+    "MM50": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Média Móvel Simples de 50 Dias",
+        "o_que_e": "É a média dos preços de fechamento dos últimos 50 pregões (cerca de 2 meses e meio), funcionando como referência de tendência intermediária.",
+        "como_interpretar": "Muitas vezes atua como suporte ou resistência natural. Aproximações próximas da MM50 em empresas lucrativas costumam oferecer pontos equilibrados de compra.",
+    },
+    "MM200": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Média Móvel Simples de 200 Dias",
+        "o_que_e": "É a grande média de longo prazo do mercado (cerca de 10 meses de pregões), muito usada por investidores institucionais para definir a tendência principal.",
+        "como_interpretar": "Preço acima da MM200 indica tendência primária de alta. Preço muito acima (+25% ou mais) pode significar esticamento; abaixo dela indica tendência de baixa ou fase corretiva.",
+    },
+    "Razão de Volume": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Razão entre Volume Médio de 5 Dias e 60 Dias",
+        "o_que_e": "Compara quanto dinheiro/ações foram negociados nos últimos 5 dias em relação à média dos últimos 60 dias.",
+        "como_interpretar": "Valores acima de 1,3x mostram entrada incomum de fluxo (interesse forte do mercado). Em altas, confirma força compradora; em quedas bruscas, indica pressão vendedora.",
+    },
+    "Distância da Máxima 52 Semanas": {
+        "categoria": "📊 Análise Técnica",
+        "nome_completo": "Variação Percentual em Relação ao Topo de 1 Ano",
+        "o_que_e": "Mostra quantos porcento a cotação atual está abaixo (ou próxima) do maior preço atingido pela ação nos últimos 12 meses.",
+        "como_interpretar": "Descontos moderados entre -10% e -25% em empresas boas costumam abrir boas janelas de compra. Perto de 0% indica que o papel está nas máximas do ano.",
+    },
+    "P/L": {
+        "categoria": "💰 Valuation",
+        "nome_completo": "Preço sobre Lucro",
+        "o_que_e": "Divide o preço da ação pelo lucro anual por ação. Na prática, estima em quantos anos o lucro da empresa pagaria o valor investido, se tudo fosse distribuído.",
+        "como_interpretar": "Quanto menor (desde que positivo), mais barata a ação tende a estar (ex: abaixo de 8x a 10x costuma ser descontado na B3). P/L negativo significa que a empresa teve prejuízo nos últimos 12 meses.",
+    },
+    "P/VP": {
+        "categoria": "💰 Valuation",
+        "nome_completo": "Preço sobre Valor Patrimonial",
+        "o_que_e": "Compara o preço da ação na Bolsa com o valor contábil líquido dos bens e direitos da empresa (Patrimônio Líquido por ação).",
+        "como_interpretar": "Abaixo de 1,0 significa que você está pagando menos pelo papel do que vale o patrimônio líquido da empresa no balanço. Acima de 2,0 exige rentabilidade muito alta para se justificar.",
+    },
+    "LPA": {
+        "categoria": "💰 Valuation",
+        "nome_completo": "Lucro por Ação",
+        "o_que_e": "É o lucro líquido dos últimos 12 meses dividido pela quantidade total de ações da empresa.",
+        "como_interpretar": "Mostra quanto lucro cada ação individual gera. Quanto maior e mais crescente ao longo dos anos, mais saudável tende a ser o negócio.",
+    },
+    "VPA": {
+        "categoria": "💰 Valuation",
+        "nome_completo": "Valor Patrimonial por Ação",
+        "o_que_e": "É o Patrimônio Líquido da empresa (ativos menos dívidas) dividido pelo número de ações.",
+        "como_interpretar": "Funciona como um piso contábil de referência. Quando a cotação está abaixo do VPA, o P/VP fica menor que 1,0.",
+    },
+    "EV/EBITDA": {
+        "categoria": "💰 Valuation",
+        "nome_completo": "Enterprise Value sobre EBITDA",
+        "o_que_e": "Compara o valor total da firma (valor de mercado + dívida líquida) com a geração de caixa operacional anual antes de juros, impostos e depreciação.",
+        "como_interpretar": "Muito útil para comparar empresas com diferentes níveis de dívida. Valores baixos (ex: abaixo de 6x a 8x) sugerem geração de caixa barata. Não se aplica a bancos e seguradoras.",
+    },
+    "DY (Dividend Yield)": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Rendimento de Dividendos (12 meses)",
+        "o_que_e": "Mostra o percentual pago em dividendos e JCP nos últimos 12 meses em relação ao preço atual da ação.",
+        "como_interpretar": "Para carteiras de renda passiva, yields acima de 6% ao ano costumam ser considerados atrativos. Cuidado apenas com yields pontuais altíssimos vindos de lucros não recorrentes.",
+    },
+    "DPA (Dividendo por Ação)": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Dividendo por Ação (12m, Médio 6a e Projetivo)",
+        "o_que_e": "Valor em reais (R$) que cada ação pagou de proventos nos últimos 12 meses, na média anual dos últimos 6 anos ou na estimativa projetada.",
+        "como_interpretar": "Serve de base direta para calcular os Preços-Teto de dividendos. Comparar o DPA de 12 meses com a média de 6 anos ajuda a ver se o pagamento atual é sustentável.",
+    },
+    "Preço-Teto Bazin": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Preço-Teto pelo Método Décio Bazin (12 meses)",
+        "o_que_e": "Calcula o preço máximo que você deveria pagar por uma ação para garantir pelo menos 6% ao ano em dividendos (DPA 12m ÷ 0,06).",
+        "como_interpretar": "Se a cotação atual estiver abaixo do Preço-Teto Bazin, há margem de segurança positiva para renda passiva.",
+    },
+    "Preço Justo Graham": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Valor Intrínseco de Benjamin Graham",
+        "o_que_e": "Fórmula clássica criada pelo mentor de Warren Buffett: raiz quadrada de (22,5 × LPA × VPA), equilibrando lucro e patrimônio.",
+        "como_interpretar": "Representa uma referência conservadora de valor justo. Comprar com a cotação abaixo do Preço Justo de Graham aumenta a margem de segurança patrimonial.",
+    },
+    "Preço-Teto Médio (6 anos)": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Preço-Teto pela Média de Dividendos de 6 Anos",
+        "o_que_e": "Divide a média anual de dividendos pagos nos últimos 6 anos por 6% (0,06), suavizando anos atípicos muito bons ou muito fracos.",
+        "como_interpretar": "É uma régua mais estável e rigorosa que o Bazin de 12 meses, ideal para empresas cíclicas ou pagadoras tradicionais de longo prazo.",
+    },
+    "Preço-Teto Projetivo": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Preço-Teto pelo Dividendo Projetado",
+        "o_que_e": "Estima o preço máximo para 6% de yield considerando o dividendo projetado com base no lucro recente e histórico de distribuição (payout).",
+        "como_interpretar": "Ajuda a olhar para frente quando a empresa aumentou ou reduziu sua capacidade de pagamento recentemente.",
+    },
+    "Faixa de Preço do Modelo": {
+        "categoria": "💵 Dividendos & Preços-Teto",
+        "nome_completo": "Teto com Margem de Segurança vs Zona de Sobrepreço",
+        "o_que_e": "Define duas faixas de referência: o Teto com Margem (menor valor entre Graham e o Preço-Teto médio de dividendos com 15% de desconto) e a Zona de Sobrepreço (preço onde o yield cai abaixo de 4% ou fica 25% acima de Graham).",
+        "como_interpretar": "Abaixo do Teto com Margem o ativo oferece ótimo desconto; entre o Teto e o Sobrepreço está em faixa intermediária; acima da Zona de Sobrepreço o preço já embute pouca margem de segurança.",
+    },
+    "ROE": {
+        "categoria": "🏛️ Eficiência & Dívida",
+        "nome_completo": "Return on Equity (Retorno sobre o Patrimônio Líquido)",
+        "o_que_e": "Mede quanto de lucro líquido a empresa consegue gerar em relação ao dinheiro próprio dos acionistas (Patrimônio Líquido).",
+        "como_interpretar": "Acima de 15% ao ano costuma indicar empresa muito eficiente e com vantagens competitivas. Abaixo de 8% indica baixa rentabilidade; negativo indica prejuízo.",
+    },
+    "ROIC": {
+        "categoria": "🏛️ Eficiência & Dívida",
+        "nome_completo": "Return on Invested Capital (Retorno sobre Capital Investido)",
+        "o_que_e": "Mede o retorno operacional que a empresa gera usando todo o capital investido no negócio (dinheiro dos sócios + dívidas).",
+        "como_interpretar": "Complementa o ROE evitando distorções por excesso de dívida. ROIC acima de 12% a 15% costuma apontar negócios excelentes (não aplicado a bancos).",
+    },
+    "Margem Líquida": {
+        "categoria": "🏛️ Eficiência & Dívida",
+        "nome_completo": "Lucro Líquido dividido pela Receita Líquida",
+        "o_que_e": "Mostra quantos centavos sobram de lucro limpo para cada R$ 1,00 vendido pela empresa após pagar todos os custos, despesas, juros e impostos.",
+        "como_interpretar": "Margens acima de 10% indicam boa folga operacional. Margem negativa significa prejuízo e aciona alerta de risco no painel.",
+    },
+    "Dívida Líquida / Patrimônio Líquido": {
+        "categoria": "🏛️ Eficiência & Dívida",
+        "nome_completo": "Endividamento sobre o Patrimônio (e Dív.Brut/Patrim)",
+        "o_que_e": "Compara o tamanho das dívidas da empresa com o patrimônio líquido que ela possui. No filtro de risco do painel, também monitora a Dívida Bruta/Patrimônio.",
+        "como_interpretar": "Até 1,0x costuma ser confortável. Entre 1,0x e 2,5x pede atenção em juros altos. Acima de 3,0x (para não-bancos) sinaliza alavancagem elevada e aciona a trava de cautela.",
+    },
+    "Liquidez Corrente": {
+        "categoria": "🏛️ Eficiência & Dívida",
+        "nome_completo": "Ativo Circulante dividido pelo Passivo Circulante",
+        "o_que_e": "Mede a capacidade da empresa de pagar suas contas e dívidas que vencem nos próximos 12 meses usando seu caixa e recebíveis de curto prazo.",
+        "como_interpretar": "Acima de 1,5 indica folga financeira tranquila no curto prazo. Abaixo de 1,0 significa que as obrigações de curto prazo superam os recursos imediatos.",
+    },
+    "Score Geral": {
+        "categoria": "🎯 Conceitos do Painel",
+        "nome_completo": "Pontuação Combinada do Painel (0 a 100)",
+        "o_que_e": "Nota principal equilibrada que combina 60% do Score de Longo Prazo (fundamentos, valuation e saúde) com 40% do Score de Curto Prazo (timing técnico e notícias).",
+        "como_interpretar": "Acima de 70 pontos indica forte alinhamento entre empresa boa/barata e bom momento de entrada. Entre 55 e 70 indica equilíbrio razoável.",
+    },
+    "Score Longo Prazo (LP)": {
+        "categoria": "🎯 Conceitos do Painel",
+        "nome_completo": "Pontuação de Fundamentos & Dividendos (0 a 100)",
+        "o_que_e": "Avalia Valuation com trava de confiança (35 pts), Rentabilidade ROE/ROIC/Margem (30 pts), Saúde Financeira/Dívida/Crescimento (25 pts) e Contexto de Notícias (10 pts).",
+        "como_interpretar": "Ideal para quem busca acumular boas ações pensando em anos e dividendos. Possui trava anti-armadilha no teto de 50 pts caso haja prejuízo, dívida crítica ou recuperação judicial.",
+    },
+    "Score Curto Prazo (CP)": {
+        "categoria": "🎯 Conceitos do Painel",
+        "nome_completo": "Pontuação de Timing Técnico & Catalisadores (0 a 100)",
+        "o_que_e": "Avalia ponto de entrada pelo IFR 14 dias (40 pts), posição nas Médias Móveis e distância da máxima de 52 semanas (25 pts), News Score (25 pts) e Volume Comprador (10 pts).",
+        "como_interpretar": "Ajuda a responder se o momento atual do gráfico e das notícias é favorável para comprar agora ou se vale aguardar um respiro.",
+    },
+    "News Score (Notícias)": {
+        "categoria": "🎯 Conceitos do Painel",
+        "nome_completo": "Analisador de Sentimento de Notícias (30 dias, -10 a +10)",
+        "o_que_e": "Lê manchetes recentes do Google News nos últimos 30 dias (dando peso dobrado para os últimos 7 dias), classificando proventos, lucros, quedas ou riscos críticos.",
+        "como_interpretar": "Valores positivos (+2 a +10) indicam catalisadores como dividendos ou lucros fortes; negativos (-2 a -10) alertam sobre ruídos ou resultados fracos.",
+    },
+    "Vereditos do Modelo": {
+        "categoria": "🎯 Conceitos do Painel",
+        "nome_completo": "Selos Quantitativos de Classificação (Excelente, Bom, Regular, Indeciso, Esticado, Yield Baixo, Crítico)",
+        "o_que_e": "Resumo visual automático que cruza fundamentos, descontos patrimoniais, nível de preço, técnica e notícias.",
+        "como_interpretar": "🟢 Excelente: alta atratividade geral. 🔵 Bom (LP ou Desconto Patrimonial): boa tese de acúmulo/valor. 🟡 Regular / Yield Baixo: empresa equilibrada ou barata no patrimônio com dividendo baixo. 🟠 Indeciso: empresa lucrativa com ruído negativo ou sinais mistos. 🟣 Esticado: múltiplos caros acima dos tetos. 🔴 Crítico: prejuízo, dívida >3x ou recuperação judicial.",
+    },
+}
+
+
+@st.dialog("📖 Dicionário & Guia de Indicadores da B3")
+def modal_dicionario():
+    st.caption("Entenda de forma simples e prática o significado de cada sigla, indicador e regra do painel.")
+    c_db1, c_db2 = st.columns([2.2, 1.3])
+    with c_db1:
+        busca_dic = st.text_input(
+            "🔍 Pesquisar termo ou conceito...",
+            placeholder="Ex: P/L, IFR, Graham, ROE, Dividendos, Esticado...",
+            key="dic_busca_input",
+        )
+    with c_db2:
+        cats_dic = ["Todas as categorias"] + list(dict.fromkeys(v["categoria"] for v in DICIONARIO_TERMOS.values()))
+        cat_sel = st.selectbox("Tema:", options=cats_dic, key="dic_cat_sel")
+
+    termo_norm = _norm_txt(busca_dic.strip()) if busca_dic else ""
+    filtrados = []
+    for sigla, info_d in DICIONARIO_TERMOS.items():
+        if cat_sel != "Todas as categorias" and info_d["categoria"] != cat_sel:
+            continue
+        if termo_norm:
+            alvo_txt = _norm_txt(
+                f"{sigla} {info_d['nome_completo']} {info_d['categoria']} {info_d['o_que_e']} {info_d['como_interpretar']}"
+            )
+            if termo_norm not in alvo_txt:
+                continue
+        filtrados.append((sigla, info_d))
+
+    st.caption(f"Mostrando **{len(filtrados)}** de **{len(DICIONARIO_TERMOS)}** termos.")
+
+    if not filtrados:
+        st.info("Nenhum termo encontrado para essa pesquisa. Tente palavras como 'lucro', 'IFR', 'dívida' ou 'Graham'.")
+    else:
+        for sigla, info_d in filtrados:
+            with st.expander(f"**{sigla}** — {info_d['nome_completo']}  `{info_d['categoria']}`", expanded=bool(termo_norm)):
+                st.markdown(
+                    f"<div style='background:rgba(59,130,246,0.10); border-left:4px solid #3b82f6; "
+                    f"padding:10px 12px; border-radius:6px; margin-bottom:8px; line-height:1.45;'>"
+                    f"<strong>💡 O que é?</strong><br>{html.escape(info_d['o_que_e'])}"
+                    f"</div>"
+                    f"<div style='background:rgba(34,197,94,0.10); border-left:4px solid #22c55e; "
+                    f"padding:10px 12px; border-radius:6px; line-height:1.45;'>"
+                    f"<strong>🧭 Como interpretar?</strong><br>{html.escape(info_d['como_interpretar'])}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+    if st.button("✖️ Fechar Dicionário", type="primary", use_container_width=True, key="btn_fechar_dic"):
+        st.rerun()
+
+
 def badge_veredito_html(veredito: str) -> str:
     estilos = {
         "🟢 Excelente": ("rgba(34,197,94,0.18)", "#22c55e", "rgba(34,197,94,0.45)", "🟢 Excelente"),
@@ -1833,6 +2056,20 @@ def render_grafico_e_tabela_ativo(
         d200_txt_r = f"{dist_200_r:+.1f}%" if dist_200_r is not None else "—"
         d52_txt_r = f"{dist_52_r:+.1f}%" if dist_52_r is not None else "—"
 
+        pl_r = base_ativo.get("pl")
+        pvp_r = base_ativo.get("pvp")
+        roe_r = base_ativo.get("roe")
+        dy_r = base_ativo.get("dy_12m")
+        graham_r = base_ativo.get("graham")
+        bazin_r = base_ativo.get("pt_bazin")
+
+        pl_txt_r = fmt_num(pl_r) if pl_r is not None else "—"
+        pvp_txt_r = fmt_num(pvp_r) if pvp_r is not None else "—"
+        roe_txt_r = f"{fmt_num(roe_r, 1)}%" if roe_r is not None else "—"
+        dy_txt_r = f"{fmt_num(dy_r, 1)}%" if dy_r is not None else "—"
+        gr_txt_r = f"R$ {fmt_num(graham_r)}" if (graham_r and graham_r > 0) else "—"
+        bz_txt_r = f"R$ {fmt_num(bazin_r)}" if (bazin_r and bazin_r > 0) else "—"
+
         with st.container(border=True):
             st.markdown(
                 f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
@@ -1840,11 +2077,36 @@ def render_grafico_e_tabela_ativo(
                 f"Score Ativo: **{score_at_r}/100** "
                 f"(LP: **{score_lp_r}** | CP: **{score_cp_r}** | News: **{news_sc_r:+.1f}**) | {veredito_r}"
             )
-            rx_m1, rx_m2, rx_m3, rx_m4 = st.columns(4)
-            rx_m1.metric("🏛️ Longo Prazo (LP)", f"{score_lp_r}/100")
-            rx_m2.metric("⚡ Curto Prazo (CP)", f"{score_cp_r}/100")
-            rx_m3.metric("📰 Notícias (30d)", f"{news_sc_r:+.1f}", news_res_r)
-            rx_m4.metric("📊 IFR (14d)", ifr_txt_r, f"MM200: {d200_txt_r} | 52s: {d52_txt_r}")
+            st.markdown(
+                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; margin:8px 0 10px 0;'>"
+                f"<div title='Score de Longo Prazo (0 a 100): avalia Valuation com trava de confiança, Rentabilidade, Saúde Financeira e Notícias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
+                f"<div style='font-size:12px; opacity:0.8;'>🏛️ Longo Prazo (LP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700;'>{score_lp_r}/100</div></div>"
+                f"<div title='Score de Curto Prazo (0 a 100): avalia ponto técnico (IFR), Médias Móveis, Volume e Notícias recentes.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
+                f"<div style='font-size:12px; opacity:0.8;'>⚡ Curto Prazo (CP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700;'>{score_cp_r}/100</div></div>"
+                f"<div title='News Score (-10 a +10): sentimento das manchetes dos últimos 30 dias com peso dobrado nos últimos 7 dias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
+                f"<div style='font-size:12px; opacity:0.8;'>📰 Notícias (30d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700;'>{news_sc_r:+.1f}</div>"
+                f"<div style='font-size:11px; opacity:0.85;'>{html.escape(news_res_r)}</div></div>"
+                f"<div title='IFR 14 dias (RSI): mede força compradora/vendedora (0 a 100). Entre 30 e 48 indica bom ponto de entrada; acima de 70 indica sobrecompra.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
+                f"<div style='font-size:12px; opacity:0.8;'>📊 IFR (14d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700;'>{ifr_txt_r}</div>"
+                f"<div style='font-size:11px; opacity:0.85;'>"
+                f"<span title='Distância da Média Móvel de 200 dias: indica tendência principal de longo prazo.'>MM200: {d200_txt_r}</span> | "
+                f"<span title='Distância da Máxima de 52 semanas: quanto o preço atual está abaixo do topo de 1 ano.'>52s: {d52_txt_r}</span>"
+                f"</div></div>"
+                "</div>"
+                "<div style='display:flex; flex-wrap:wrap; gap:14px; font-size:13px; padding:6px 10px; background:rgba(128,128,128,0.07); border-radius:6px; margin-bottom:8px;'>"
+                f"<span title='Preço sobre Lucro: quantos anos o lucro atual levaria para pagar o investimento.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/L:</strong> {pl_txt_r}</span>"
+                f"<span title='Preço sobre Valor Patrimonial: compara preço de tela com o patrimônio contábil. Abaixo de 1,0 indica desconto.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/VP:</strong> {pvp_txt_r}</span>"
+                f"<span title='Retorno sobre Patrimônio Líquido: eficiência da empresa em gerar lucro com capital próprio.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>ROE:</strong> {roe_txt_r}</span>"
+                f"<span title='Dividend Yield (12m): percentual pago em dividendos e JCP sobre a cotação atual.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>DY 12m:</strong> {dy_txt_r}</span>"
+                f"<span title='Preço-Teto Bazin (12m): DPA de 12 meses dividido por 6%, referência para renda passiva.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Bazin:</strong> {bz_txt_r}</span>"
+                f"<span title='Preço Justo de Benjamin Graham: valor intrínseco estimado por √(22,5 × LPA × VPA).' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Graham:</strong> {gr_txt_r}</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
             st.markdown(f"🎯 **Faixa de Preço do Modelo:** {fmt_faixa_preco_modelo(base_ativo)}")
             st.markdown(f"📝 **Justificativa:** {just_r}")
 
@@ -1983,9 +2245,18 @@ def render_grafico_e_tabela_ativo(
         )
         html_h = (
             f"{css_h}<div class='hist-wrap'><table class='hist-table'><thead><tr>"
-            "<th>Ano</th><th>P/L</th><th>P/VP</th><th>VPA</th><th>Dívida líquida</th>"
-            "<th>Margem líquida</th><th>EBITDA</th><th>P/EBITDA</th><th>Valor de mercado</th>"
-            "<th>Lucro Líq.</th><th>Lucro Br.</th><th>Receita Líq.</th>"
+            "<th title='Ano do exercício fiscal, ÚLT. 12M (acumulado 12 meses), MÉDIA histórica e ATUAL'>Ano</th>"
+            "<th title='Preço sobre Lucro: quantos anos o lucro do período levaria para pagar o valor de mercado'>P/L</th>"
+            "<th title='Preço sobre Valor Patrimonial: valor de mercado dividido pelo patrimônio líquido'>P/VP</th>"
+            "<th title='Valor Patrimonial por Ação: patrimônio líquido dividido pelo número de ações'>VPA</th>"
+            "<th title='Dívida Líquida: empréstimos e financiamentos menos caixa e aplicações financeiras'>Dívida líquida</th>"
+            "<th title='Margem Líquida: percentual da receita líquida que vira lucro líquido'>Margem líquida</th>"
+            "<th title='EBITDA: geração de caixa operacional antes de juros, impostos, depreciação e amortização'>EBITDA</th>"
+            "<th title='Preço sobre EBITDA: valor de mercado dividido pela geração de caixa operacional'>P/EBITDA</th>"
+            "<th title='Valor de Mercado: cotação multiplicada pelo total de ações'>Valor de mercado</th>"
+            "<th title='Lucro Líquido atribuído aos controladores no período'>Lucro Líq.</th>"
+            "<th title='Lucro Bruto: receita líquida menos o custo dos bens ou serviços vendidos'>Lucro Br.</th>"
+            "<th title='Receita Líquida: faturamento total descontando impostos sobre vendas e devoluções'>Receita Líq.</th>"
             f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
         )
         st.markdown(html_h, unsafe_allow_html=True)
@@ -2614,6 +2885,11 @@ with st.sidebar:
         render_tela_login(key_prefix="sidebar_login", compacto=True)
 
     st.divider()
+    with st.container(border=True):
+        st.caption("📚 **Dúvida sobre alguma sigla?**")
+        if st.button("📖 Dicionário de Termos", key="btn_dic_sidebar", type="primary", use_container_width=True):
+            modal_dicionario()
+
     st.header("🔍 Filtros da Bolsa")
     st.caption("Combine quantos filtros desejar ao mesmo tempo.")
 
@@ -3060,7 +3336,7 @@ with tab1:
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             with st.container(border=True):
-                c_modo_sc, c_filt_ver = st.columns([2.2, 1.5])
+                c_modo_sc, c_filt_ver, c_dic_tab = st.columns([2.0, 1.35, 0.9])
                 with c_modo_sc:
                     st.radio(
                         "🎯 Modo de Análise / Score:",
@@ -3077,6 +3353,10 @@ with tab1:
                         key="tab1_filtro_ver_tab",
                         on_change=_sync_ver_tab,
                     )
+                with c_dic_tab:
+                    st.markdown("<div style='padding-top:26px;'></div>", unsafe_allow_html=True)
+                    if st.button("📖 Dicionário de Termos", key="btn_dic_tab1", use_container_width=True):
+                        modal_dicionario()
 
             c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
             opcoes_ordenacao = {
@@ -3283,14 +3563,14 @@ with tab1:
                             f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
                             f"<td style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
                             f"<td style='text-align:center; line-height:1.35;'>"
-                            f"<span style='font-weight:700;'>{r['pos_ranking']}º</span> · <strong>{fmt_num(score_at, 1)}</strong>"
+                            f"<span style='font-weight:700;' title='Posição no Ranking e Score Ativo (0 a 100)'>{r['pos_ranking']}º · <strong>{fmt_num(score_at, 1)}</strong></span>"
                             f"<br>{badge_v}"
-                            f"<br><small style='opacity:0.85; white-space:nowrap;' title='IFR 14d: {ifr_ic} | Notícias 30d: {html.escape(news_res_r)}'>{ifr_ic} | {news_ic}</small>"
+                            f"<br><small style='opacity:0.85; white-space:nowrap;' title='IFR 14 dias (RSI): {ifr_ic} | Notícias 30d: {html.escape(news_res_r)}'>{ifr_ic} | {news_ic}</small>"
                             f"</td>"
                             f"<td><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
-                            f"<td><strong>R$ {fmt_num(cot)}</strong><br><small>DY: {fmt_num(r['dy_12m'])}%</small></td>"
-                            f"<td>P/L: {pl_txt}<br>P/VP: {pvp_html}<br>ROE: {roe_txt}</td>"
-                            f"<td>LPA: {lpa_txt} | VPA: {vpa_txt}<br>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}<br>Proj: {dpap_txt}</td>"
+                            f"<td><strong>R$ {fmt_num(cot)}</strong><br><small title='Dividend Yield (12 meses): percentual pago em dividendos/JCP sobre a cotação atual'>DY: {fmt_num(r['dy_12m'])}%</small></td>"
+                            f"<td><span title='Preço sobre Lucro: anos para reaver o investimento via lucro'>P/L:</span> {pl_txt}<br><span title='Preço sobre Valor Patrimonial: abaixo de 1,0 indica desconto contábil'>P/VP:</span> {pvp_html}<br><span title='Retorno sobre Patrimônio Líquido: eficiência na geração de lucro'>ROE:</span> {roe_txt}</td>"
+                            f"<td><span title='Lucro por Ação (12m)'>LPA:</span> {lpa_txt} | <span title='Valor Patrimonial por Ação'>VPA:</span> {vpa_txt}<br><span title='Dividendo por Ação pago nos últimos 12 meses e média anual de 6 anos'>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}</span><br><span title='Dividendo por Ação projetado'>Proj: {dpap_txt}</span></td>"
                             f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
                             f"<td>{html_preco_ms(r['pt_proj'], cot)}</td>"
                             f"<td>{html_preco_ms(r['pt_bazin'], cot)}</td>"
@@ -3301,16 +3581,16 @@ with tab1:
 
                     thead_html = (
                         "<thead><tr>"
-                        "<th style='text-align:center;'>⚖️</th>"
-                        "<th style='text-align:center;'>Rank / Score<br><small>Veredito | IFR | News</small></th>"
-                        "<th>Ticker / Empresa</th>"
-                        f"<th>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
-                        "<th>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
-                        "<th>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
-                        "<th>Preço Teto Médio (6a) & MS</th>"
-                        "<th>Preço Teto Projetivo & MS</th>"
-                        "<th>Preço-Teto Bazin (12m) & MS</th>"
-                        "<th>Preço Justo Graham & MS</th>"
+                        "<th style='text-align:center;' title='Marque os ativos para comparar lado a lado na aba Comparar Ativos'>⚖️</th>"
+                        "<th style='text-align:center;' title='Posição no Ranking, Score Ativo (0 a 100), Veredito do Modelo, IFR 14 dias e Sentimento de Notícias (30d)'>Rank / Score<br><small>Veredito | IFR | News</small></th>"
+                        "<th title='Código na B3, nome da empresa e setor de atuação'>Ticker / Empresa</th>"
+                        f"<th title='Cotação atual da ação e DY (Dividend Yield): percentual pago em dividendos nos últimos 12 meses'>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
+                        "<th title='P/L: Preço/Lucro | P/VP: Preço/Valor Patrimonial | ROE: Retorno sobre Patrimônio Líquido'>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
+                        "<th title='LPA: Lucro por Ação | VPA: Valor Patrimonial por Ação | DPA: Dividendo por Ação (12m, média 6 anos e projetivo)'>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
+                        "<th title='Preço-Teto Médio (6a): teto para 6% de yield usando a média de dividendos de 6 anos | MS: Margem de Segurança'>Preço Teto Médio (6a) & MS</th>"
+                        "<th title='Preço-Teto Projetivo: teto para 6% de yield considerando o dividendo projetado | MS: Margem de Segurança'>Preço Teto Projetivo & MS</th>"
+                        "<th title='Preço-Teto Bazin (12m): DPA dos últimos 12 meses dividido por 6% (método Décio Bazin) | MS: Margem de Segurança'>Preço-Teto Bazin (12m) & MS</th>"
+                        "<th title='Preço Justo de Graham: valor intrínseco pela fórmula √(22,5 × LPA × VPA) | MS: Margem de Segurança'>Preço Justo Graham & MS</th>"
                         "</tr></thead>"
                     )
 

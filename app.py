@@ -2721,7 +2721,7 @@ def render_grafico_e_tabela_ativo(
 
         css_h = (
             "<style>"
-            ".hist-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:12px 0;}"
+            ".hist-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:12px 0;}"
             ".hist-table{width:100%;border-collapse:collapse;font-size:13px;text-align:center;}"
             ".hist-table th{background-color:rgba(128,128,128,0.18);padding:10px 8px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;white-space:nowrap;}"
             ".hist-table td{padding:9px 8px;border-bottom:1px solid rgba(128,128,128,0.2);white-space:nowrap;}"
@@ -3363,10 +3363,12 @@ st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
 st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
 st.markdown(
     "<style>"
-    "[data-testid='stAppViewContainer'],[data-testid='stMain'],section.main{"
-    "overflow-y:auto!important;overflow-anchor:none!important;}"
-    "[data-testid='stMainBlockContainer'],[data-baseweb='tab-panel'],"
-    "[data-testid='stExpander'],[data-testid='stExpanderDetails']{"
+    "html,body,[data-testid='stApp'],[data-testid='stAppViewContainer']{"
+    "overflow:hidden!important;height:100%!important;max-height:100vh!important;max-height:100dvh!important;}"
+    "[data-testid='stMain'],section.main{"
+    "overflow-y:auto!important;overflow-x:hidden!important;height:100%!important;max-height:100%!important;"
+    "min-height:0!important;overflow-anchor:none!important;overscroll-behavior-y:contain;}"
+    "[data-testid='stMainBlockContainer']{"
     "overflow:visible!important;height:auto!important;max-height:none!important;}"
     "div[data-testid='stExpander']{margin-bottom:10px;border-radius:8px;}"
     "</style>",
@@ -3910,7 +3912,7 @@ with tab1:
             "pointer-events:none!important;overflow:hidden!important;margin:0!important;padding:0!important;}"
             "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
             "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
-            ".val-table-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:0;padding:0;}"
+            ".val-table-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:0;padding:0;}"
             ".val-table-wrap-top{margin-top:12px;}"
             ".val-table-wrap-top:last-child,.val-table-wrap-bot{margin-bottom:12px;}"
             ".val-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;margin:0;}"
@@ -4367,6 +4369,13 @@ with tab1:
                     : "";
                 const vaiFechar = (atual === ticker);
                 pWin.__raioxPendingScroll = vaiFechar ? null : ticker;
+                if (!vaiFechar) {
+                    setTimeout(function() {
+                        if (pWin.__raioxPendingScroll === ticker) {
+                            pWin.__raioxPendingScroll = null;
+                        }
+                    }, 3000);
+                }
                 sendBridgeInput("raiox_bridge_input", ticker + "|" + Date.now());
             };
 
@@ -5144,7 +5153,7 @@ with tab3:
 
             css_c = (
                 "<style>"
-                ".cart-wrap{width:100%;overflow-x:auto;overflow-y:visible;margin:12px 0;}"
+                ".cart-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:12px 0;}"
                 ".cart-table{width:100%;border-collapse:collapse;font-size:13px;line-height:1.4;}"
                 ".cart-table th{background-color:rgba(128,128,128,0.18);text-align:left;padding:8px 6px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;font-size:12px;}"
                 ".cart-table td{padding:8px 6px;border-bottom:1px solid rgba(128,128,128,0.22);vertical-align:middle;}"

@@ -62,6 +62,34 @@ SETOR_CURTO = {
 def _norm_txt(s: str) -> str:
     return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii").lower()
 
+def formatar_nome_empresa_completo(nome_bruto: str) -> str:
+    txt = " ".join((nome_bruto or "").split())
+    if not txt:
+        return ""
+    txt = re.sub(r"\((Brasil|Brazil)\)", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"(?<!\w)(S\.A\.?|S/A|SA|Ltda\.?|S\.A)(?!\w)", "", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\s*[-–/.,]+\s*$", "", " ".join(txt.split())).strip()
+    if not txt:
+        return ""
+    minusculas = {"de", "da", "do", "das", "dos", "e", "em", "na", "no", "para", "com"}
+    siglas = {
+        "ISA", "B3", "MG", "SP", "RJ", "PR", "RS", "BA", "CE", "SC", "GO", "ES", "BR",
+        "CPFL", "AES", "EDP", "CCR", "WEG", "BRF", "JBS", "MRV", "CSN", "TIM", "OI",
+        "IRB", "XP", "BTG", "CEMIG", "COPEL", "TAESA", "SANEPAR", "COPASA", "SABESP",
+        "PETROBRAS", "ELETROBRAS", "ENGIE", "KLABIN", "SUZANO", "VALE", "ITAU", "ITAÚ",
+        "II", "III", "IV",
+    }
+    palavras = txt.split()
+    out = []
+    for idx, p in enumerate(palavras):
+        p_clean = re.sub(r"^[^A-Za-zÀ-ÿ0-9]+|[^A-Za-zÀ-ÿ0-9]+$", "", p).upper()
+        if p_clean in siglas:
+            out.append(p.upper())
+        elif idx > 0 and p.lower() in minusculas:
+            out.append(p.lower())
+        else:
+            out.append(p[:1].upper() + p[1:].lower())
+    return " ".join(out)
 
 def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
     ln = " ".join((long_name or "").split())
@@ -69,11 +97,15 @@ def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
     ln_low = ln.lower()
 
     if ln and (ln_low.startswith("banco ") or "banco " in ln_low or "unibanco" in ln_low or ln_low.startswith("caixa ")):
-        limpo = re.sub(r"\((Brasil|Brazil)\)", "", ln, flags=re.IGNORECASE)
-        limpo = re.sub(r"(?<!\w)(Holding|S\.A\.?|S/A|SA|Ltda\.?)(?!\w)", "", limpo, flags=re.IGNORECASE)
-        limpo = re.sub(r"[,\-\.\s]+$", "", " ".join(limpo.split())).strip()
-        if limpo:
-            return limpo.upper()
+        limpo = re.sub(r"(?<!\w)Holding(?!\w)", "", ln, flags=re.IGNORECASE)
+        res_b = formatar_nome_empresa_completo(limpo)
+        if res_b:
+            return res_b
+
+    if ln:
+        res_l = formatar_nome_empresa_completo(ln)
+        if res_l and res_l.upper() != ticker.upper():
+            return res_l
 
     if sn:
         raw_sn = " ".join((short_name or "").split(" "))
@@ -88,15 +120,10 @@ def limpar_nome_empresa(short_name: str, long_name: str, ticker: str) -> str:
             "EB", "ES", "EX", "CI", "BDR", "DR1", "DR2", "DR3", "ATZ", "REC", "DIR",
         }
         partes = [p for p in raw_sn.split() if p.upper() not in tokens_remover]
-        res = " ".join(partes).strip()
+        res = formatar_nome_empresa_completo(" ".join(partes).strip())
         if res:
-            return res.upper()
+            return res
 
-    if ln:
-        limpo = re.sub(r"(?<!\w)(S\.A\.?|S/A|SA|Ltda\.?)(?!\w)", "", ln, flags=re.IGNORECASE)
-        limpo = re.sub(r"[,\-\.\s]+$", "", " ".join(limpo.split())).strip()
-        if limpo:
-            return limpo.upper()
     return ticker
 
 
@@ -735,6 +762,51 @@ def carregar_mapa_cvm_tickers() -> tuple[dict[str, str], dict[str, str]]:
 
     return mapa_tk, mapa_cod
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def carregar_nomes_cvm_tickers() -> dict[str, str]:
+    """Retorna mapa {ticker: Nome Completo Formatado} direto da base cadastral da CVM."""
+    mapa_tk, _ = carregar_mapa_cvm_tickers()
+    if not mapa_tk:
+        return {}
+    mapa_cnpj_nome: dict[str, str] = {}
+    try:
+        resp_cad = requests.get(
+            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv",
+            headers=HEADERS,
+            timeout=20,
+        )
+        if resp_cad.status_code == 200:
+            df_cad = pd.read_csv(
+                io.BytesIO(resp_cad.content),
+                sep=";",
+                encoding="latin-1",
+                dtype=str,
+                usecols=lambda c: c in {"CNPJ_CIA", "DENOM_SOCIAL", "DENOM_COMERC"},
+            )
+            for _, row in df_cad.iterrows():
+                cnpj_c = str(row.get("CNPJ_CIA") or "").strip()
+                if not cnpj_c:
+                    continue
+                soc = formatar_nome_empresa_completo(str(row.get("DENOM_SOCIAL") or ""))
+                com = formatar_nome_empresa_completo(str(row.get("DENOM_COMERC") or ""))
+                if soc and com:
+                    soc_n = _norm_txt(soc)
+                    com_n = _norm_txt(com)
+                    if com_n in soc_n or len(com) <= 3:
+                        nome_f = soc
+                    elif soc_n in com_n:
+                        nome_f = com
+                    else:
+                        nome_f = f"{soc} ({com})" if len(soc) <= 38 else com
+                else:
+                    nome_f = soc or com
+                if nome_f:
+                    mapa_cnpj_nome[cnpj_c] = nome_f
+    except Exception:
+        return {}
+
+    return {tk: mapa_cnpj_nome[cnpj] for tk, cnpj in mapa_tk.items() if cnpj in mapa_cnpj_nome}
+
 
 def _ler_df_cvm_zip(zf: zipfile.ZipFile, padrao_nome: str, tipo_doc: str) -> pd.DataFrame:
     alvos = [n for n in zf.namelist() if padrao_nome in n and n.lower().endswith(".csv")]
@@ -1276,31 +1348,104 @@ def buscar_yahoo_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
     return resultados
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def buscar_historico_preco(ticker: str, periodo_label: str, ajustada: bool) -> pd.Series:
+@st.cache_data(ttl=180, show_spinner=False)
+def buscar_ohlcv_preco(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+) -> pd.DataFrame:
     tk = yf.Ticker(f"{ticker}.SA")
+    eh_intraday = periodo_label in ("1 D", "7 D")
+
     if periodo_label == "1 D":
-        df = tk.history(period="5d", interval="15m", auto_adjust=ajustada)
-        if not df.empty:
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+        df = tk.history(period="5d", interval="15m", auto_adjust=False)
+        if df is not None and not df.empty:
+            df.index = _idx_para_brt_naive(df.index)
             df = df[df.index.date == df.index.date[-1]]
     elif periodo_label == "7 D":
-        df = tk.history(period="1mo", interval="1h", auto_adjust=ajustada)
-        if not df.empty:
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+        df = tk.history(period="1mo", interval="1h", auto_adjust=False)
+        if df is not None and not df.empty:
+            df.index = _idx_para_brt_naive(df.index)
             df = df[df.index >= (df.index.max() - timedelta(days=7))]
     elif periodo_label == "15 A":
         df = tk.history(period="max", interval="1d", auto_adjust=ajustada)
-        if not df.empty:
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+        if df is not None and not df.empty:
+            df.index = _idx_para_brt_naive(df.index)
             df = df[df.index >= (df.index.max() - pd.DateOffset(years=15))]
     else:
         mapa = {"30 D": "1mo", "6 M": "6mo", "YTD": "ytd", "1 A": "1y", "5 A": "5y", "10 A": "10y"}
         df = tk.history(period=mapa.get(periodo_label, "1y"), interval="1d", auto_adjust=ajustada)
-        if not df.empty:
-            df.index = pd.to_datetime(df.index).tz_localize(None)
+        if df is not None and not df.empty:
+            df.index = _idx_para_brt_naive(df.index)
 
-    if df is None or df.empty:
+    if df is None or df.empty or "Close" not in df.columns:
+        return pd.DataFrame()
+
+    cols_ok = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
+    df = df[cols_ok].dropna(subset=["Close"]).copy()
+    if df.empty:
+        return df
+
+    # Sincroniza pregões recentes caso o endpoint diário (1d) do Yahoo esteja 1+ dia atrasado
+    if not eh_intraday:
+        try:
+            df_5d = tk.history(period="5d", interval="15m", auto_adjust=False)
+            if df_5d is not None and not df_5d.empty and "Close" in df_5d.columns:
+                df_5d.index = _idx_para_brt_naive(df_5d.index)
+                ult_data_df = df.index.normalize().max()
+                dias_novos = sorted({d for d in df_5d.index.normalize() if d > ult_data_df})
+                for d_n in dias_novos:
+                    sub_d = df_5d[df_5d.index.normalize() == d_n].dropna(subset=["Close"])
+                    if not sub_d.empty:
+                        nova_linha = {
+                            "Open": float(sub_d["Open"].iloc[0]) if "Open" in sub_d.columns else float(sub_d["Close"].iloc[0]),
+                            "High": float(sub_d["High"].max()) if "High" in sub_d.columns else float(sub_d["Close"].max()),
+                            "Low": float(sub_d["Low"].min()) if "Low" in sub_d.columns else float(sub_d["Close"].min()),
+                            "Close": float(sub_d["Close"].iloc[-1]),
+                            "Volume": float(sub_d["Volume"].sum()) if "Volume" in sub_d.columns else 0.0,
+                        }
+                        df.loc[d_n] = {k: nova_linha[k] for k in df.columns}
+        except Exception:
+            pass
+
+        if cot_live and float(cot_live) > 0.0:
+            cot_f = float(cot_live)
+            ult_data_df = df.index.normalize().max()
+            dt_fund_ts = None
+            try:
+                det_f = buscar_detalhes_fundamentus(ticker)
+                dt_str_f = (det_f.get("Data últ cot") or "").strip()
+                if dt_str_f:
+                    dt_fund_ts = pd.to_datetime(dt_str_f, format="%d/%m/%Y", errors="coerce")
+            except Exception:
+                dt_fund_ts = None
+
+            if dt_fund_ts is not None and pd.notna(dt_fund_ts) and dt_fund_ts > ult_data_df:
+                nova_l = {"Open": cot_f, "High": cot_f, "Low": cot_f, "Close": cot_f, "Volume": 0.0}
+                df.loc[dt_fund_ts] = {k: nova_l[k] for k in df.columns}
+            elif abs(float(df["Close"].iloc[-1]) - cot_f) / cot_f > 0.001:
+                idx_ult = df.index[-1]
+                df.loc[idx_ult, "Close"] = cot_f
+                if "High" in df.columns:
+                    df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
+                if "Low" in df.columns:
+                    df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
+    elif cot_live and float(cot_live) > 0.0 and periodo_label == "1 D":
+        cot_f = float(cot_live)
+        if abs(float(df["Close"].iloc[-1]) - cot_f) / cot_f > 0.002:
+            df.loc[df.index[-1], "Close"] = cot_f
+
+    return df.sort_index()
+
+def buscar_historico_preco(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+) -> pd.Series:
+    df = buscar_ohlcv_preco(ticker, periodo_label, ajustada, cot_live=cot_live)
+    if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
     return df["Close"].dropna()
 
@@ -1322,145 +1467,131 @@ def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
     return dt_idx
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def buscar_resumo_b3_google() -> dict:
-    det = buscar_detalhes_fundamentus("B3SA3")
-    info = {}
+@st.cache_data(ttl=120, show_spinner=False)
+def buscar_dados_ibov_google(periodo: str) -> dict:
+    tk = yf.Ticker("^BVSP")
     prev_close = None
     abertura = None
     alta = None
     baixa = None
     alt_52s = None
     bai_52s = None
-    cap_merc = parse_br_num(det.get("Valor de mercado"))
-    pl_val = parse_br_num(det.get("P/L"))
-    dy_val = parse_br_num(det.get("Div.Yield"))
-    div_trim = None
+    serie = pd.Series(dtype=float)
+    dt_ult = None
 
     try:
-        tk = yf.Ticker("B3SA3.SA")
         try:
             fi = tk.fast_info
             if fi:
                 prev_close = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
-                if not cap_merc:
-                    cap_merc = fi.get("marketCap")
                 alt_52s = fi.get("yearHigh")
                 bai_52s = fi.get("yearLow")
         except Exception:
             pass
 
-        info = tk.info or {}
-        if not prev_close:
-            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
-        if not cap_merc:
-            cap_merc = info.get("marketCap")
-        if not pl_val:
-            pl_val = info.get("trailingPE")
-        if not alt_52s:
-            alt_52s = info.get("fiftyTwoWeekHigh")
-        if not bai_52s:
-            bai_52s = info.get("fiftyTwoWeekLow")
-
         h1y = tk.history(period="1y", interval="1d", auto_adjust=False)
         if h1y is not None and not h1y.empty:
             h1y.index = _idx_para_brt_naive(h1y.index)
+        h5d = tk.history(period="5d", interval="5m", auto_adjust=False)
+        if h5d is not None and not h5d.empty:
+            h5d.index = _idx_para_brt_naive(h5d.index)
+
+        # Sincroniza resumo diário com o último pregão do intraday (caso o 1d esteja 1 dia atrás)
+        if h5d is not None and not h5d.empty and "Close" in h5d.columns:
+            c5 = h5d["Close"].dropna()
+            if not c5.empty:
+                ult_dia_intra = c5.index.normalize().max()
+                sub_intra = h5d[h5d.index.normalize() == ult_dia_intra].dropna(subset=["Close"])
+                if h1y is not None and not h1y.empty:
+                    ult_dia_1y = h1y.index.normalize().max()
+                    if ult_dia_intra > ult_dia_1y:
+                        prev_close = float(h1y["Close"].dropna().iloc[-1])
+                        abertura = float(sub_intra["Open"].iloc[0]) if "Open" in sub_intra.columns else float(sub_intra["Close"].iloc[0])
+                        alta = float(sub_intra["High"].max()) if "High" in sub_intra.columns else float(sub_intra["Close"].max())
+                        baixa = float(sub_intra["Low"].min()) if "Low" in sub_intra.columns else float(sub_intra["Close"].min())
+                    else:
+                        ult = h1y.iloc[-1]
+                        abertura = float(ult["Open"]) if pd.notna(ult.get("Open")) else None
+                        alta = float(ult["High"]) if pd.notna(ult.get("High")) else None
+                        baixa = float(ult["Low"]) if pd.notna(ult.get("Low")) else None
+                        if len(h1y) >= 2:
+                            prev_close = float(h1y["Close"].dropna().iloc[-2])
+        elif h1y is not None and not h1y.empty:
             ult = h1y.iloc[-1]
             abertura = float(ult["Open"]) if pd.notna(ult.get("Open")) else None
             alta = float(ult["High"]) if pd.notna(ult.get("High")) else None
             baixa = float(ult["Low"]) if pd.notna(ult.get("Low")) else None
             if len(h1y) >= 2 and not prev_close:
-                prev_close = float(h1y["Close"].iloc[-2])
+                prev_close = float(h1y["Close"].dropna().iloc[-2])
+
+        if h1y is not None and not h1y.empty:
             if not alt_52s and "High" in h1y.columns:
                 alt_52s = float(h1y["High"].dropna().max())
             if not bai_52s and "Low" in h1y.columns:
                 bai_52s = float(h1y["Low"].dropna().min())
+            if alta and alt_52s:
+                alt_52s = max(float(alt_52s), alta)
+            if baixa and bai_52s:
+                bai_52s = min(float(bai_52s), baixa)
 
-        divs = tk.dividends
-        if divs is not None and not divs.empty:
-            divs_pos = divs[divs > 0]
-            if not divs_pos.empty:
-                div_trim = float(divs_pos.iloc[-1])
-                if dy_val is None and alta:
-                    divs_idx = _idx_para_brt_naive(divs_pos.index)
-                    divs_pos.index = divs_idx
-                    hoje_n = pd.Timestamp.now(BRT).tz_localize(None)
-                    d12 = float(divs_pos[divs_pos.index >= (hoje_n - timedelta(days=365))].sum())
-                    px_ref_d = float(h1y["Close"].dropna().iloc[-1]) if (h1y is not None and not h1y.empty) else None
-                    if px_ref_d and px_ref_d > 0 and d12 > 0:
-                        dy_val = (d12 / px_ref_d) * 100.0
+        if periodo == "1 D":
+            if h5d is not None and not h5d.empty and "Close" in h5d.columns:
+                c5 = h5d["Close"].dropna()
+                if not c5.empty:
+                    ult_d = c5.index.date[-1]
+                    serie = c5[c5.index.date == ult_d]
+                    ant = c5[c5.index.date < ult_d]
+                    if not ant.empty and not prev_close:
+                        prev_close = float(ant.iloc[-1])
+            elif h1y is not None and not h1y.empty:
+                serie = h1y["Close"].dropna().tail(1)
+        elif periodo == "5 D":
+            if h5d is not None and not h5d.empty and "Close" in h5d.columns:
+                serie = h5d["Close"].dropna()
+        else:
+            mapa_per = {
+                "1 M": ("1mo", "1d"),
+                "6 M": ("6mo", "1d"),
+                "YTD": ("ytd", "1d"),
+                "1 A": ("1y", "1d"),
+                "5 A": ("5y", "1wk"),
+                "Máx": ("max", "1wk"),
+            }
+            per_yf, int_yf = mapa_per.get(periodo, ("1mo", "1d"))
+            df_p = h1y if periodo == "1 A" else tk.history(period=per_yf, interval=int_yf, auto_adjust=False)
+            if df_p is not None and not df_p.empty and "Close" in df_p.columns:
+                if periodo != "1 A":
+                    df_p.index = _idx_para_brt_naive(df_p.index)
+                serie = df_p["Close"].dropna().copy()
+                if h5d is not None and not h5d.empty and "Close" in h5d.columns and not serie.empty:
+                    c5 = h5d["Close"].dropna()
+                    ult_d_p = serie.index.normalize().max()
+                    for d_n in sorted({d for d in c5.index.normalize() if d > ult_d_p}):
+                        sub_d = c5[c5.index.normalize() == d_n]
+                        if not sub_d.empty:
+                            serie.loc[d_n] = float(sub_d.iloc[-1])
+                    serie = serie.sort_index()
+
+        if not serie.empty:
+            dt_ult = serie.index[-1].to_pydatetime()
     except Exception:
         pass
 
+    ref_px = float(prev_close) if (periodo == "1 D" and prev_close) else (float(serie.iloc[0]) if not serie.empty else None)
     return {
+        "serie": serie,
+        "ref_px": ref_px,
+        "dt_ult": dt_ult,
         "prev_close": float(prev_close) if prev_close else None,
         "abertura": abertura,
         "alta": alta,
         "baixa": baixa,
-        "cap_merc": float(cap_merc) if cap_merc else None,
-        "pl": float(pl_val) if pl_val else None,
         "alt_52s": float(alt_52s) if alt_52s else None,
         "bai_52s": float(bai_52s) if bai_52s else None,
-        "dy": float(dy_val) if dy_val is not None else None,
-        "div_trim": div_trim,
     }
 
-
-@st.cache_data(ttl=120, show_spinner=False)
-def buscar_serie_b3_google(periodo: str) -> tuple[pd.Series, float | None, datetime | None]:
-    tk = yf.Ticker("B3SA3.SA")
-    resumo = buscar_resumo_b3_google()
-    prev_close = resumo.get("prev_close")
-
-    try:
-        if periodo == "1 D":
-            df = tk.history(period="5d", interval="5m", auto_adjust=False)
-            if df is not None and not df.empty and "Close" in df.columns:
-                df.index = _idx_para_brt_naive(df.index)
-                close_all = df["Close"].dropna()
-                if not close_all.empty:
-                    ult_dia = close_all.index.date[-1]
-                    serie = close_all[close_all.index.date == ult_dia]
-                    ant = close_all[close_all.index.date < ult_dia]
-                    if not ant.empty and not prev_close:
-                        prev_close = float(ant.iloc[-1])
-                    ref = float(prev_close) if prev_close else float(serie.iloc[0])
-                    return serie, ref, serie.index[-1].to_pydatetime()
-
-            df_fb = tk.history(period="1mo", interval="1d", auto_adjust=False)
-            if df_fb is not None and not df_fb.empty:
-                df_fb.index = _idx_para_brt_naive(df_fb.index)
-                s_fb = df_fb["Close"].dropna().tail(2)
-                if not s_fb.empty:
-                    ref = float(s_fb.iloc[0]) if len(s_fb) > 1 else float(s_fb.iloc[-1])
-                    return s_fb.tail(1), ref, s_fb.index[-1].to_pydatetime()
-            return pd.Series(dtype=float), prev_close, None
-
-        mapa_per = {
-            "5 D": ("5d", "15m"),
-            "1 M": ("1mo", "1d"),
-            "6 M": ("6mo", "1d"),
-            "YTD": ("ytd", "1d"),
-            "1 A": ("1y", "1d"),
-            "5 A": ("5y", "1wk"),
-            "Máx": ("max", "1wk"),
-        }
-        per_yf, int_yf = mapa_per.get(periodo, ("1mo", "1d"))
-        df = tk.history(period=per_yf, interval=int_yf, auto_adjust=False)
-        if df is None or df.empty or "Close" not in df.columns:
-            return pd.Series(dtype=float), None, None
-        df.index = _idx_para_brt_naive(df.index)
-        serie = df["Close"].dropna()
-        if serie.empty:
-            return pd.Series(dtype=float), None, None
-        ref = float(serie.iloc[0])
-        return serie, ref, serie.index[-1].to_pydatetime()
-    except Exception:
-        return pd.Series(dtype=float), prev_close, None
-
-
 @st.fragment
-def render_widget_b3_google():
+def render_widget_ibov_google():
     meses_pt = {
         1: "jan.", 2: "fev.", 3: "mar.", 4: "abr.", 5: "mai.", 6: "jun.",
         7: "jul.", 8: "ago.", 9: "set.", 10: "out.", 11: "nov.", 12: "dez.",
@@ -1469,38 +1600,34 @@ def render_widget_b3_google():
 
     with st.container(border=True):
         st.markdown(
-            "<span class='b3-google-anchor' style='display:none;'></span>"
+            "<span class='ibov-google-anchor' style='display:none;'></span>"
             "<style>"
-            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor){"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.ibov-google-anchor){"
             "padding:10px 14px!important;}"
-            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup']{"
-            "gap:2px!important;flex-wrap:wrap!important;border-bottom:1px solid rgba(128,128,128,0.22);"
-            "padding-bottom:3px!important;margin-top:2px!important;margin-bottom:4px!important;}"
-            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label{"
-            "padding:2px 7px!important;margin:0!important;border-radius:6px!important;font-size:12px!important;}"
-            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label > div:first-child{"
-            "display:none!important;}"
-            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label:has(input:checked){"
-            "background:rgba(96,165,250,0.16)!important;color:#60a5fa!important;font-weight:700!important;"
-            "border-bottom:2px solid #60a5fa!important;border-radius:6px 6px 0 0!important;}"
             "</style>",
             unsafe_allow_html=True,
         )
 
-        periodo_sel = st.session_state.get("b3_google_per", "1 D")
-        serie, ref_px, dt_ult = buscar_serie_b3_google(periodo_sel)
-        resumo = buscar_resumo_b3_google()
+        if hasattr(st, "segmented_control"):
+            periodo_sel = st.session_state.get("ibov_google_per", "1 D") or "1 D"
+        else:
+            periodo_sel = st.session_state.get("ibov_google_per_rad", "1 D")
+
+        dados_ib = buscar_dados_ibov_google(periodo_sel)
+        serie = dados_ib["serie"]
+        ref_px = dados_ib["ref_px"]
+        dt_ult = dados_ib["dt_ult"]
 
         if serie.empty:
             st.markdown(
                 "<div style='display:flex; align-items:center; gap:8px; margin-bottom:6px;'>"
-                "<span style='display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; "
-                "border-radius:6px; background:#1a73e8; color:#fff; font-weight:800; font-size:12px;'>[B]³</span>"
-                "<div><div style='font-size:14px; font-weight:700; line-height:1.1;'>B3 SA - Brasil Bolsa Balcao</div>"
-                "<div style='font-size:11px; opacity:0.7;'>BVMF: B3SA3</div></div></div>",
+                "<span style='display:inline-flex; align-items:center; justify-content:center; padding:0 7px; height:28px; "
+                "border-radius:6px; background:#1a73e8; color:#fff; font-weight:800; font-size:11px;'>IBOV</span>"
+                "<div><div style='font-size:14px; font-weight:700; line-height:1.1;'>Ibovespa</div>"
+                "<div style='font-size:11px; opacity:0.7;'>INDEXBVMF: IBOV</div></div></div>",
                 unsafe_allow_html=True,
             )
-            st.caption("Cotação B3SA3 temporariamente indisponível.")
+            st.caption("Cotação do Ibovespa temporariamente indisponível.")
             return
 
         p_fim = float(serie.iloc[-1])
@@ -1535,19 +1662,19 @@ def render_widget_b3_google():
             dt_str = datetime.now(BRT).strftime("%d/%m/%Y %H:%M BRT")
 
         st.markdown(
-            "<div style='display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px; margin-bottom:2px;'>"
+            "<div style='display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px; margin-bottom:4px;'>"
             "<div style='display:flex; align-items:center; gap:9px;'>"
-            "<span style='display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; "
-            "border-radius:7px; background:#1a73e8; color:#ffffff; font-weight:800; font-size:12px; flex-shrink:0;'>[B]³</span>"
+            "<span style='display:inline-flex; align-items:center; justify-content:center; padding:0 7px; height:30px; "
+            "border-radius:7px; background:#1a73e8; color:#ffffff; font-weight:800; font-size:11px; flex-shrink:0;'>IBOV</span>"
             "<div>"
-            "<div style='font-size:14px; font-weight:700; line-height:1.15;'>B3 SA - Brasil Bolsa Balcao</div>"
-            "<div style='font-size:11px; opacity:0.72;'>BVMF: B3SA3</div>"
+            "<div style='font-size:15px; font-weight:700; line-height:1.15;'>Ibovespa</div>"
+            "<div style='font-size:11px; opacity:0.72;'>INDEXBVMF: IBOV</div>"
             "</div>"
             "</div>"
             "<div style='text-align:right;'>"
             "<div style='display:flex; align-items:baseline; justify-content:flex-end; gap:6px; flex-wrap:wrap;'>"
             f"<span style='font-size:21px; font-weight:700; line-height:1.1;'>{fmt_num(p_fim)}</span>"
-            "<span style='font-size:11px; opacity:0.72;'>BRL</span>"
+            "<span style='font-size:11px; opacity:0.72;'>pts</span>"
             f"<span style='display:inline-block; padding:2px 7px; border-radius:6px; font-size:11px; font-weight:700; "
             f"background:{pill_bg}; color:{pill_fg};'>{seta_txt}{fmt_num(abs(diff_pct) if diff_pct < 0 else diff_pct)}%</span>"
             f"<span style='font-size:12px; font-weight:600; color:{pill_fg};'>{sinal_abs}{fmt_num(diff_val)} {lbl_jan}</span>"
@@ -1558,29 +1685,45 @@ def render_widget_b3_google():
             unsafe_allow_html=True,
         )
 
-        periodo_sel = st.radio(
-            "Período B3:",
-            options=periodos_g,
-            index=0,
-            horizontal=True,
-            label_visibility="collapsed",
-            key="b3_google_per",
-        )
+        if hasattr(st, "segmented_control"):
+            periodo_sel_new = st.segmented_control(
+                "Período IBOV:",
+                options=periodos_g,
+                default=periodo_sel,
+                label_visibility="collapsed",
+                key="ibov_google_per",
+                width="stretch",
+            )
+            if not periodo_sel_new:
+                periodo_sel_new = periodo_sel
+        else:
+            periodo_sel_new = st.radio(
+                "Período IBOV:",
+                options=periodos_g,
+                index=periodos_g.index(periodo_sel) if periodo_sel in periodos_g else 0,
+                horizontal=True,
+                label_visibility="collapsed",
+                key="ibov_google_per_rad",
+            )
 
-        fig_b3 = go.Figure()
+        if periodo_sel_new != periodo_sel:
+            st.rerun()
+
+        fig_ib = go.Figure()
         fmt_hv = "%{x|%d/%m %H:%M}" if periodo_sel in ("1 D", "5 D") else "%{x|%d/%m/%Y}"
-        fig_b3.add_trace(
+        fig_ib.add_trace(
             go.Scatter(
                 x=serie.index,
                 y=serie.values,
                 mode="lines",
+                name="IBOV",
                 line=dict(color=cor_ln, width=2.0),
                 fill="tozeroy",
                 fillcolor=fill_ln,
-                hovertemplate=f"{fmt_hv}<br><b>%{{y:.2f}} BRL</b><extra></extra>",
+                hovertemplate=f"{fmt_hv}<br><b>%{{y:,.2f}} pts</b><extra></extra>",
             )
         )
-        fig_b3.add_trace(
+        fig_ib.add_trace(
             go.Scatter(
                 x=[serie.index[-1]],
                 y=[p_fim],
@@ -1593,83 +1736,103 @@ def render_widget_b3_google():
         y_vals_all = list(serie.values) + [ref_val]
         y_min = min(y_vals_all)
         y_max = max(y_vals_all)
-        pad_y = (y_max - y_min) * 0.14 if y_max > y_min else max(0.2, p_fim * 0.03)
-        ref_lbl = f"Pré-fechamento<br><b>{fmt_num(ref_val)}</b>" if periodo_sel == "1 D" else f"Início<br><b>{fmt_num(ref_val)}</b>"
+        pad_y = (y_max - y_min) * 0.14 if y_max > y_min else max(50.0, p_fim * 0.01)
+        ref_lbl = f"Pré-fech.<br><b>{fmt_num(ref_val, 0)}</b>" if periodo_sel == "1 D" else f"Início<br><b>{fmt_num(ref_val, 0)}</b>"
 
-        fig_b3.add_hline(
+        fig_ib.add_hline(
             y=ref_val,
             line_dash="dot",
             line_width=1.3,
             line_color="rgba(154,160,166,0.65)",
         )
-        fig_b3.update_layout(
-            height=155,
-            margin=dict(l=4, r=82, t=8, b=20),
+        fig_ib.update_layout(
+            height=165,
+            margin=dict(l=4, r=72, t=8, b=20),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=False,
             hovermode="x unified",
+            dragmode="pan",
             xaxis=dict(
                 showgrid=False,
                 zeroline=False,
                 tickfont=dict(size=10),
                 tickformat="%H:%M" if periodo_sel == "1 D" else ("%d/%m" if periodo_sel in ("5 D", "1 M", "6 M", "YTD") else "%m/%Y"),
                 nticks=5,
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
             ),
             yaxis=dict(
+                side="right",
                 showgrid=True,
                 gridcolor="rgba(128,128,128,0.20)",
                 zeroline=False,
                 tickfont=dict(size=10),
                 range=[max(0.0, y_min - pad_y), y_max + pad_y],
                 nticks=4,
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
             ),
             annotations=[
                 dict(
                     xref="paper",
-                    x=1.01,
+                    x=0.01,
                     y=ref_val,
                     xanchor="left",
-                    yanchor="middle",
+                    yanchor="bottom",
                     text=ref_lbl,
                     showarrow=False,
                     align="left",
                     font=dict(size=10, color="rgba(200,205,213,0.9)"),
-                )
+                ),
+                dict(
+                    xref="paper",
+                    x=1.01,
+                    y=p_fim,
+                    xanchor="left",
+                    yanchor="middle",
+                    text=f"<b>{fmt_num(p_fim, 0)}</b>",
+                    showarrow=False,
+                    font=dict(color="white", size=10.5),
+                    bgcolor=cor_ln,
+                    borderpad=3,
+                ),
             ],
         )
         st.plotly_chart(
-            fig_b3,
+            fig_ib,
             use_container_width=True,
-            config={"displayModeBar": False},
-            key="b3_google_chart",
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            key="ibov_google_chart",
         )
 
-        ab_s = fmt_num(resumo["abertura"]) if resumo.get("abertura") is not None else "—"
-        al_s = fmt_num(resumo["alta"]) if resumo.get("alta") is not None else "—"
-        bx_s = fmt_num(resumo["baixa"]) if resumo.get("baixa") is not None else "—"
-        cap_s = fmt_bi_mi(resumo.get("cap_merc")).lower().replace(" bi", " bi").replace(" mi", " mi") if resumo.get("cap_merc") else "—"
-        pl_s = fmt_num(resumo["pl"]) if resumo.get("pl") is not None else "—"
-        a52_s = fmt_num(resumo["alt_52s"]) if resumo.get("alt_52s") is not None else "—"
-        b52_s = fmt_num(resumo["bai_52s"]) if resumo.get("bai_52s") is not None else "—"
-        dy_s = f"{fmt_num(resumo['dy'])}%" if resumo.get("dy") is not None else "—"
-        dt_s = fmt_num(resumo["div_trim"]) if resumo.get("div_trim") is not None else "—"
+        pf_s = fmt_num(dados_ib["prev_close"]) if dados_ib.get("prev_close") is not None else "—"
+        ab_s = fmt_num(dados_ib["abertura"]) if dados_ib.get("abertura") is not None else "—"
+        al_s = fmt_num(dados_ib["alta"]) if dados_ib.get("alta") is not None else "—"
+        bx_s = fmt_num(dados_ib["baixa"]) if dados_ib.get("baixa") is not None else "—"
+        a52_s = fmt_num(dados_ib["alt_52s"]) if dados_ib.get("alt_52s") is not None else "—"
+        b52_s = fmt_num(dados_ib["bai_52s"]) if dados_ib.get("bai_52s") is not None else "—"
 
         st.markdown(
             "<div style='display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px 12px; "
             "font-size:11px; line-height:1.45; border-top:1px solid rgba(128,128,128,0.20); padding-top:6px; margin-top:2px;'>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Abertura</span><strong>{ab_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Cap. merc.</span><strong>{cap_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Dividendo</span><strong>{dy_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Pré-fech.</span><strong>{pf_s}</strong></div>"
             f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Alta</span><strong>{al_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Índice P/L</span><strong>{pl_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Div. trim.</span><strong>{dt_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Alt 52s</span><strong>{a52_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Abertura</span><strong>{ab_s}</strong></div>"
             f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Baixa</span><strong>{bx_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Alt 52 sem</span><strong>{a52_s}</strong></div>"
-            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Bai 52 sem</span><strong>{b52_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Bai 52s</span><strong>{b52_s}</strong></div>"
             "</div>"
-            "<div style='font-size:10px; opacity:0.6; margin-top:4px; text-align:right;'>"
-            "💡 Shift + Clique em 2 pontos de qualquer gráfico para medir variação (%)"
+            "<div style='font-size:10px; opacity:0.65; margin-top:4px; text-align:right;'>"
+            "💡 DEXTools/TradingView: Shift + Arrastar (ou 📏 Medir) para medir % · Scroll para zoom"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -2813,7 +2976,7 @@ def render_grafico_e_tabela_ativo(
                     st.markdown(partes_just_rx[1], unsafe_allow_html=True)
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    c_per, c_tipo = st.columns([3, 1.2])
+    c_per, c_tipo, c_vis = st.columns([2.6, 1.1, 0.9])
     with c_per:
         periodo = st.radio(
             "Período:",
@@ -2825,9 +2988,16 @@ def render_grafico_e_tabela_ativo(
             "Tipo:", ["Cotação ajustada", "Cotação simples"],
             index=0, key=f"{key_prefix}_tipo_{ticker}",
         )
+    with c_vis:
+        estilo_graf = st.selectbox(
+            "Estilo:", ["Área", "Candles (DEXTools)"],
+            index=0, key=f"{key_prefix}_vis_{ticker}",
+        )
 
     ajustada = tipo_cot == "Cotação ajustada"
-    serie = buscar_historico_preco(ticker, periodo, ajustada)
+    cot_ref_live = float(base_ativo.get("cotacao") or 0.0) if base_ativo else None
+    df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_live=cot_ref_live)
+    serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
 
     if serie.empty:
         st.warning(f"Não foi possível carregar o gráfico de {ticker} para o período {periodo}.")
@@ -2848,29 +3018,107 @@ def render_grafico_e_tabela_ativo(
 
         fig = go.Figure()
         fmt_hover = "%{x|%d/%m/%Y %H:%M}" if periodo in ("1 D", "7 D") else "%{x|%d/%m/%Y}"
-        fig.add_trace(
-            go.Scatter(
-                x=serie.index, y=serie.values, mode="lines",
-                line=dict(color=cor, width=2.2), fill="tozeroy", fillcolor=fill_cor,
-                hovertemplate=f"{fmt_hover}<br><b>R$ %{{y:.2f}}</b><extra></extra>",
+        eh_candles = (estilo_graf != "Área") and all(c in df_ohlcv.columns for c in ("Open", "High", "Low", "Close"))
+
+        if eh_candles:
+            fig.add_trace(
+                go.Candlestick(
+                    x=df_ohlcv.index,
+                    open=df_ohlcv["Open"],
+                    high=df_ohlcv["High"],
+                    low=df_ohlcv["Low"],
+                    close=df_ohlcv["Close"],
+                    name=ticker,
+                    increasing_line_color="#22c55e",
+                    decreasing_line_color="#ef4444",
+                    increasing_fillcolor="#22c55e",
+                    decreasing_fillcolor="#ef4444",
+                )
             )
-        )
-        y_min, y_max = float(serie.min()), float(serie.max())
-        margem_y = (y_max - y_min) * 0.08 if y_max > y_min else y_max * 0.05
-        fig.update_layout(
-            height=320, margin=dict(l=10, r=65, t=15, b=15),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            showlegend=False, hovermode="x unified",
-            xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.25)", tickprefix="R$ ", range=[max(0, y_min - margem_y), y_max + margem_y]),
+            if "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
+                cores_vol = [
+                    "rgba(34,197,94,0.35)" if float(c) >= float(o) else "rgba(239,68,68,0.35)"
+                    for o, c in zip(df_ohlcv["Open"], df_ohlcv["Close"])
+                ]
+                fig.add_trace(
+                    go.Bar(
+                        x=df_ohlcv.index,
+                        y=df_ohlcv["Volume"],
+                        name="Volume",
+                        marker_color=cores_vol,
+                        yaxis="y2",
+                        hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+                    )
+                )
+            y_min = float(df_ohlcv["Low"].min())
+            y_max = float(df_ohlcv["High"].max())
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=serie.index, y=serie.values, mode="lines", name=ticker,
+                    line=dict(color=cor, width=2.2), fill="tozeroy", fillcolor=fill_cor,
+                    hovertemplate=f"{fmt_hover}<br><b>R$ %{{y:.2f}}</b><extra></extra>",
+                )
+            )
+            y_min, y_max = float(serie.min()), float(serie.max())
+
+        margem_y = (y_max - y_min) * 0.09 if y_max > y_min else y_max * 0.05
+        layout_kw = dict(
+            height=350 if eh_candles else 320,
+            margin=dict(l=12, r=76, t=15, b=15),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            hovermode="x unified",
+            dragmode="pan",
+            xaxis=dict(
+                showgrid=True,
+                gridcolor="rgba(128,128,128,0.12)",
+                zeroline=False,
+                rangeslider=dict(visible=False),
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
+            ),
+            yaxis=dict(
+                side="right",
+                showgrid=True,
+                gridcolor="rgba(128,128,128,0.22)",
+                tickprefix="R$ ",
+                range=[max(0, y_min - (margem_y * (2.2 if eh_candles else 1.0))), y_max + margem_y],
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
+            ),
             annotations=[
                 dict(xref="paper", x=1.01, y=p_fim, xanchor="left", yanchor="middle",
                      text=f"<b>{fmt_num(p_fim)}</b>", showarrow=False,
                      font=dict(color="white", size=12), bgcolor=cor, borderpad=4)
             ],
         )
-        st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_plot_{ticker}")
-        st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
+        if eh_candles and "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
+            v_max = float(df_ohlcv["Volume"].max())
+            layout_kw["yaxis2"] = dict(
+                overlaying="y",
+                side="left",
+                showgrid=False,
+                showticklabels=False,
+                range=[0, v_max * 5.0 if v_max > 0 else 1],
+            )
+        fig.update_layout(**layout_kw)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            key=f"{key_prefix}_plot_{ticker}",
+        )
+        st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
         serie_max = buscar_serie_max_ajustada(ticker)
         if not serie_max.empty:
@@ -3740,7 +3988,7 @@ with c_hdr_esq:
     st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
     st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
 with c_hdr_dir:
-    render_widget_b3_google()
+    render_widget_ibov_google()
 st.markdown(
     "<style>"
     "html,body,[data-testid='stApp'],[data-testid='stAppViewContainer']{"
@@ -3803,20 +4051,34 @@ with st.sidebar:
     )
 
     setor_url = st.query_params.get("setor", "")
-    default_listas = [setor_url] if setor_url in opcoes_listas else []
-    default_setores = [SETOR_ALIAS.get(setor_url, setor_url)] if SETOR_ALIAS.get(setor_url, setor_url) in opcoes_setores_exibir else []
+    listas_url = st.query_params.get_all("listas")
+    if not listas_url and setor_url in opcoes_listas:
+        listas_url = [setor_url]
+    default_listas = [x for x in listas_url if x in opcoes_listas]
+
+    setores_url = st.query_params.get_all("setores")
+    if not setores_url and SETOR_ALIAS.get(setor_url, setor_url) in opcoes_setores_exibir:
+        setores_url = [SETOR_ALIAS.get(setor_url, setor_url)]
+    default_setores = [
+        SETOR_ALIAS.get(x, x) for x in setores_url if SETOR_ALIAS.get(x, x) in opcoes_setores_exibir
+    ]
+
+    if "sb_filtro_listas" not in st.session_state:
+        st.session_state["sb_filtro_listas"] = default_listas
+    if "sb_filtro_setores" not in st.session_state:
+        st.session_state["sb_filtro_setores"] = default_setores
 
     filtro_listas = st.multiselect(
         "Listas rápidas:",
         options=opcoes_listas,
-        default=default_listas,
+        key="sb_filtro_listas",
         placeholder="Todas (ou escolha 1 ou mais)",
         help="Favoritos e Carteira filtram seus ativos (interseção entre si). BESST soma-se aos Setores específicos abaixo.",
     )
     filtro_setores = st.multiselect(
         "Setores específicos:",
         options=opcoes_setores_exibir,
-        default=default_setores,
+        key="sb_filtro_setores",
         placeholder="Todos os setores",
         help="Soma-se ao BESST (se selecionado) e filtra em conjunto com Favoritos/Carteira.",
     )
@@ -3829,12 +4091,16 @@ with st.sidebar:
     liq_keys = list(liq_min_opcoes.keys())
     liq_url = st.query_params.get("liq", liq_keys[0])
     idx_liq = liq_keys.index(liq_url) if liq_url in liq_keys else 0
-    liq_label = st.selectbox("Liquidez mínima (2 meses):", liq_keys, index=idx_liq)
+    if "sb_liq_label" not in st.session_state or st.session_state["sb_liq_label"] not in liq_keys:
+        st.session_state["sb_liq_label"] = liq_keys[idx_liq]
+    liq_label = st.selectbox("Liquidez mínima (2 meses):", liq_keys, key="sb_liq_label")
     liq_min = liq_min_opcoes[liq_label]
 
+    if "sb_busca_tickers" not in st.session_state:
+        st.session_state["sb_busca_tickers"] = st.query_params.get("busca", "")
     busca_tickers = st.text_input(
         "Filtrar códigos na barra (opcional):",
-        value=st.query_params.get("busca", ""),
+        key="sb_busca_tickers",
         placeholder="Ex: BBAS3, BBDC3, TAEE11",
     )
 
@@ -3987,6 +4253,14 @@ with st.sidebar:
         st.rerun()
 
 st.query_params["liq"] = liq_label
+if filtro_listas:
+    st.query_params["listas"] = filtro_listas
+elif "listas" in st.query_params:
+    del st.query_params["listas"]
+if filtro_setores:
+    st.query_params["setores"] = filtro_setores
+elif "setores" in st.query_params:
+    del st.query_params["setores"]
 if busca_tickers.strip():
     st.query_params["busca"] = busca_tickers.strip()
 elif "busca" in st.query_params:
@@ -3995,6 +4269,10 @@ elif "busca" in st.query_params:
 posicoes_carteira = consolidar_carteira_por_ativo(st.session_state["lancamentos"]) if usuario_atual else {}
 
 mapa_setores_ativos: dict[str, str] = {}
+try:
+    mapa_setores_ativos.update(carregar_mapa_todos_setores())
+except Exception:
+    pass
 
 ativos_filtrados = todos_ativos
 
@@ -4068,13 +4346,44 @@ with st.spinner(f"Buscando dados de 6 anos, indicadores técnicos e notícias pa
     dados_yf = buscar_yahoo_lote(tuple(tickers_para_yf))
     dados_news = buscar_sentimento_noticias_lote(tuple(tickers_para_yf))
 
+nomes_cvm_mapa = carregar_nomes_cvm_tickers()
+falt_meta_fund = [
+    tk_m for tk_m in tickers_para_yf
+    if not mapa_setores_ativos.get(tk_m) or (not nomes_cvm_mapa.get(tk_m) and (not dados_yf.get(tk_m, {}).get("nome") or dados_yf.get(tk_m, {}).get("nome") == tk_m))
+]
+mapa_nomes_fund_extra: dict[str, str] = {}
+if 0 < len(falt_meta_fund) <= 40:
+    def _fetch_meta_fund(tk_m: str):
+        det_m = buscar_detalhes_fundamentus(tk_m)
+        emp_m = formatar_nome_empresa_completo(det_m.get("Empresa", ""))
+        set_m = " ".join((det_m.get("Setor") or "").split())
+        return tk_m, emp_m, set_m
+
+    with ThreadPoolExecutor(max_workers=6) as ex_m:
+        for tk_m, emp_m, set_m in ex_m.map(_fetch_meta_fund, falt_meta_fund):
+            if emp_m:
+                mapa_nomes_fund_extra[tk_m] = emp_m
+            if set_m and not mapa_setores_ativos.get(tk_m):
+                mapa_setores_ativos[tk_m] = set_m
 
 def montar_item_completo(a: dict) -> dict:
     t = a["ticker"]
     yf_info = dados_yf.get(t, {})
     news_info = dados_news.get(t, {})
     cot = yf_info.get("cotacao_yf") or a.get("cotacao") or 0.0
-    nome = yf_info.get("nome") or mapa_setores_ativos.get(t) or t
+    nome_yf = yf_info.get("nome")
+    nome_cvm = nomes_cvm_mapa.get(t)
+    nome_fd = mapa_nomes_fund_extra.get(t)
+    if nome_cvm and (not nome_yf or nome_yf == t or len(nome_cvm) > len(nome_yf)):
+        nome = nome_cvm
+    elif nome_yf and nome_yf != t:
+        nome = nome_yf
+    elif nome_fd:
+        nome = nome_fd
+    elif nome_cvm:
+        nome = nome_cvm
+    else:
+        nome = t
     lpa = a.get("lpa") if a.get("lpa") is not None else yf_info.get("lpa_yf")
     vpa = a.get("vpa") if a.get("vpa") is not None else yf_info.get("vpa_yf")
     roe = a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf")
@@ -4190,9 +4499,11 @@ with tab1:
         ]
 
         if "tab1_modo_score_val" not in st.session_state:
-            st.session_state["tab1_modo_score_val"] = list(MODO_SCORE_OPCOES.keys())[0]
+            modo_url = st.query_params.get("modo", "")
+            st.session_state["tab1_modo_score_val"] = modo_url if modo_url in MODO_SCORE_OPCOES else list(MODO_SCORE_OPCOES.keys())[0]
         if "tab1_filtro_veredito_val" not in st.session_state:
-            st.session_state["tab1_filtro_veredito_val"] = []
+            ver_url = st.query_params.get_all("ver")
+            st.session_state["tab1_filtro_veredito_val"] = [v for v in ver_url if v in VEREDITOS_OPCOES]
         if "tab1_modo_score_tab" not in st.session_state:
             st.session_state["tab1_modo_score_tab"] = st.session_state["tab1_modo_score_val"]
         if "tab1_modo_score_rank" not in st.session_state:
@@ -4206,24 +4517,39 @@ with tab1:
             val = st.session_state["tab1_modo_score_tab"]
             st.session_state["tab1_modo_score_val"] = val
             st.session_state["tab1_modo_score_rank"] = val
+            st.query_params["modo"] = val
 
         def _sync_modo_rank():
             val = st.session_state["tab1_modo_score_rank"]
             st.session_state["tab1_modo_score_val"] = val
             st.session_state["tab1_modo_score_tab"] = val
+            st.query_params["modo"] = val
 
         def _sync_ver_tab():
             val = list(st.session_state["tab1_filtro_ver_tab"])
             st.session_state["tab1_filtro_veredito_val"] = val
             st.session_state["tab1_filtro_ver_rank"] = val
+            if val:
+                st.query_params["ver"] = val
+            elif "ver" in st.query_params:
+                del st.query_params["ver"]
 
         def _sync_ver_rank():
             val = list(st.session_state["tab1_filtro_ver_rank"])
             st.session_state["tab1_filtro_veredito_val"] = val
             st.session_state["tab1_filtro_ver_tab"] = val
+            if val:
+                st.query_params["ver"] = val
+            elif "ver" in st.query_params:
+                del st.query_params["ver"]
 
         modo_score_lbl = st.session_state["tab1_modo_score_val"]
         filtro_vereditos = st.session_state["tab1_filtro_veredito_val"]
+        st.query_params["modo"] = modo_score_lbl
+        if filtro_vereditos:
+            st.query_params["ver"] = filtro_vereditos
+        elif "ver" in st.query_params:
+            del st.query_params["ver"]
         chave_score_ativo = MODO_SCORE_OPCOES.get(modo_score_lbl, "score_geral")
 
         resultados_tab = [
@@ -4507,15 +4833,44 @@ with tab1:
                 "Preço Justo Graham": "graham",
                 "Ticker (A-Z)": "ticker",
             }
+            ord_keys = list(opcoes_ordenacao.keys())
+            if "tab1_ord_col" not in st.session_state or st.session_state["tab1_ord_col"] not in ord_keys:
+                ord_url = st.query_params.get("ord", "")
+                st.session_state["tab1_ord_col"] = ord_url if ord_url in ord_keys else ord_keys[0]
+            dir_opcoes = ["Decrescente (Maior → Menor)", "Crescente (Menor → Maior)"]
+            if "tab1_ord_dir" not in st.session_state or st.session_state["tab1_ord_dir"] not in dir_opcoes:
+                dir_url = st.query_params.get("dir", "")
+                if dir_url in dir_opcoes:
+                    st.session_state["tab1_ord_dir"] = dir_url
+                else:
+                    st.session_state["tab1_ord_dir"] = dir_opcoes[1 if st.session_state["tab1_ord_col"] in ("P/L", "P/VP", "Ticker (A-Z)") else 0]
+            if "tab1_max_linhas" not in st.session_state:
+                try:
+                    maxl_url = int(st.query_params.get("maxl", "50"))
+                    st.session_state["tab1_max_linhas"] = max(0, min(1000, maxl_url))
+                except Exception:
+                    st.session_state["tab1_max_linhas"] = 50
+
             with c_busca:
-                busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
+                q_url = st.query_params.get("q", "")
+                if "value" in inspect.signature(st_keyup).parameters:
+                    busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", value=q_url, placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
+                else:
+                    busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
             with c_ord1:
-                col_escolhida = st.selectbox("Ordenar por coluna:", list(opcoes_ordenacao.keys()), index=0)
+                col_escolhida = st.selectbox("Ordenar por coluna:", ord_keys, key="tab1_ord_col")
             with c_ord2:
-                dir_padrao = 1 if col_escolhida in ("P/L", "P/VP", "Ticker (A-Z)") else 0
-                direcao = st.selectbox("Ordem:", ["Decrescente (Maior → Menor)", "Crescente (Menor → Maior)"], index=dir_padrao)
+                direcao = st.selectbox("Ordem:", dir_opcoes, key="tab1_ord_dir")
             with c_ord3:
-                max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, value=50, step=10)
+                max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, step=10, key="tab1_max_linhas")
+
+            st.query_params["ord"] = col_escolhida
+            st.query_params["dir"] = direcao
+            st.query_params["maxl"] = str(int(max_linhas))
+            if busca_tabela and busca_tabela.strip():
+                st.query_params["q"] = busca_tabela.strip()
+            elif "q" in st.query_params:
+                del st.query_params["q"]
 
             lista_tab = resultados_tab
             if busca_tabela and busca_tabela.strip():
@@ -5257,7 +5612,7 @@ with tab2:
 
         fig_comp = go.Figure()
         for r in itens_comp:
-            s = buscar_historico_preco(r["ticker"], per_comp, tipo_comp == "Cotação ajustada")
+            s = buscar_historico_preco(r["ticker"], per_comp, tipo_comp == "Cotação ajustada", cot_live=r.get("cotacao"))
             if not s.empty and float(s.iloc[0]) > 0:
                 pct = ((s / float(s.iloc[0])) - 1.0) * 100
                 fig_comp.add_trace(
@@ -5267,15 +5622,28 @@ with tab2:
                     )
                 )
         fig_comp.update_layout(
-            height=340, margin=dict(l=10, r=10, t=20, b=15),
+            height=340, margin=dict(l=10, r=60, t=20, b=15),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             hovermode="x unified",
-            yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.25)", ticksuffix="%"),
-            xaxis=dict(showgrid=False),
+            dragmode="pan",
+            yaxis=dict(
+                side="right", showgrid=True, gridcolor="rgba(128,128,128,0.25)", ticksuffix="%",
+                showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)", spikedash="dash",
+            ),
+            xaxis=dict(
+                showgrid=True, gridcolor="rgba(128,128,128,0.12)",
+                showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)", spikedash="dash",
+            ),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
-        st.plotly_chart(fig_comp, use_container_width=True)
-        st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
+        st.plotly_chart(
+            fig_comp,
+            use_container_width=True,
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+        )
+        st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
         st.markdown("### 🔍 Gráfico Individual e Histórico Fundamentalista dos Ativos Comparados")
         subtabs = st.tabs([f"📊 {r['ticker']}" for r in itens_comp])
@@ -5461,14 +5829,27 @@ with tab3:
                         hovertemplate="Ganho de Capital: R$ %{y:,.2f}<extra></extra>",
                     ))
                     fig_ev.update_layout(
-                        barmode="relative", height=290, margin=dict(l=10, r=10, t=25, b=10),
+                        barmode="relative", height=290, margin=dict(l=10, r=68, t=25, b=10),
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        yaxis=dict(showgrid=True, gridcolor="rgba(128,128,128,0.22)", tickprefix="R$ "),
-                        xaxis=dict(showgrid=False),
+                        dragmode="pan",
+                        yaxis=dict(
+                            side="right", showgrid=True, gridcolor="rgba(128,128,128,0.22)", tickprefix="R$ ",
+                            showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1,
+                            spikecolor="rgba(148,163,184,0.55)", spikedash="dash",
+                        ),
+                        xaxis=dict(
+                            showgrid=False,
+                            showspikes=True, spikemode="across", spikesnap="cursor", spikethickness=1,
+                            spikecolor="rgba(148,163,184,0.55)", spikedash="dash",
+                        ),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
                     )
-                    st.plotly_chart(fig_ev, use_container_width=True)
-                    st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
+                    st.plotly_chart(
+                        fig_ev,
+                        use_container_width=True,
+                        config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+                    )
+                    st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%).")
 
             with g_dir:
                 with st.container(border=True):
@@ -5804,68 +6185,30 @@ with tab3:
                     except Exception as exc:
                         st.error(f"Arquivo inválido: {exc}")
 
+st.markdown(
+    "<style>"
+    ".tv-measure-overlay{position:absolute;inset:0;pointer-events:none;z-index:60;overflow:visible;}"
+    ".tv-measure-svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;}"
+    ".tv-measure-pill-btn{position:absolute;top:6px;left:10px;z-index:66;pointer-events:auto;"
+    "padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;user-select:none;"
+    "background:rgba(30,41,59,0.78);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);"
+    "backdrop-filter:blur(4px);transition:all 0.15s ease;}"
+    ".tv-measure-pill-btn:hover{border-color:#60a5fa;color:#ffffff;}"
+    ".tv-measure-pill-btn.armed{background:#2563eb;color:#ffffff;border-color:#60a5fa;}"
+    ".tv-measure-card{position:absolute;pointer-events:auto;padding:7px 11px;border-radius:7px;"
+    "color:#ffffff;font-family:system-ui,-apple-system,sans-serif;font-size:12px;line-height:1.38;"
+    "font-weight:600;box-shadow:0 6px 18px rgba(0,0,0,0.45);white-space:nowrap;z-index:68;user-select:none;}"
+    ".tv-measure-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}"
+    ".tv-measure-close{cursor:pointer;font-size:13px;line-height:1;opacity:0.85;padding:0 2px;}"
+    ".tv-measure-close:hover{opacity:1;}"
+    ".tv-measure-tag{position:absolute;pointer-events:none;padding:1px 6px;border-radius:4px;"
+    "font-size:10.5px;font-weight:700;color:#ffffff;white-space:nowrap;box-shadow:0 2px 6px rgba(0,0,0,0.35);z-index:62;}"
+    "</style>",
+    unsafe_allow_html=True,
+)
+
 _usa_st_html_m = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
 _js_chart_measure = """
-<style>
-.tv-measure-overlay {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    z-index: 60;
-    overflow: visible;
-}
-.tv-measure-svg {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-    pointer-events: none;
-}
-.tv-measure-card {
-    position: absolute;
-    pointer-events: auto;
-    padding: 7px 11px;
-    border-radius: 7px;
-    color: #ffffff;
-    font-family: system-ui, -apple-system, sans-serif;
-    font-size: 12px;
-    line-height: 1.38;
-    font-weight: 600;
-    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
-    white-space: nowrap;
-    z-index: 65;
-    user-select: none;
-}
-.tv-measure-card-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-}
-.tv-measure-close {
-    cursor: pointer;
-    font-size: 13px;
-    line-height: 1;
-    opacity: 0.85;
-    padding: 0 2px;
-}
-.tv-measure-close:hover {
-    opacity: 1;
-}
-.tv-measure-tag {
-    position: absolute;
-    pointer-events: none;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 10.5px;
-    font-weight: 700;
-    color: #ffffff;
-    white-space: nowrap;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
-    z-index: 62;
-}
-</style>
 <script>
 (function() {
     const pWin = __USE_PARENT__ ? window.parent : window;
@@ -5928,23 +6271,25 @@ _js_chart_measure = """
 
         let bestPt = null;
         let bestDist = Infinity;
+        const calcArr = gd.calcdata || [];
         const dataArr = gd.data || [];
-        const singleTrace = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly"; }).length <= 1;
+        const visibleCnt = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly" && t.hoverinfo !== "skip"; }).length;
+        const maxDy = visibleCnt <= 1 ? 34 : 20;
 
-        for (let ti = 0; ti < dataArr.length; ti++) {
+        for (let ti = 0; ti < calcArr.length; ti++) {
             const tr = dataArr[ti];
-            if (!tr || tr.visible === false || tr.visible === "legendonly") continue;
-            if (tr.type === "pie" || tr.hoverinfo === "skip") continue;
-            const xs = tr.x;
-            const ys = tr.y;
-            if (!xs || !ys || !xs.length) continue;
-            const maxDy = singleTrace ? 34 : 20;
-            for (let i = 0; i < xs.length; i++) {
-                const yRaw = ys[i];
-                if (yRaw === null || yRaw === undefined || Number.isNaN(Number(yRaw))) continue;
-                const ptCx = axisD2C(xa, xs[i]);
-                const ptCy = axisD2C(ya, yRaw);
+            const pts = calcArr[ti];
+            if (!tr || !pts || !pts.length) continue;
+            if (tr.visible === false || tr.visible === "legendonly" || tr.type === "pie" || tr.hoverinfo === "skip") continue;
+            const rawXs = Array.isArray(tr.x) ? tr.x : null;
+
+            for (let i = 0; i < pts.length; i++) {
+                const cpt = pts[i];
+                if (!cpt) continue;
+                let ptCx = cpt.x;
+                let ptCy = (cpt.c !== undefined && Number.isFinite(cpt.c)) ? cpt.c : cpt.y;
                 if (!Number.isFinite(ptCx) || !Number.isFinite(ptCy)) continue;
+
                 const ptPx = xa.c2p(ptCx);
                 const ptPy = ya.c2p(ptCy);
                 const dx = ptPx - px;
@@ -5953,11 +6298,12 @@ _js_chart_measure = """
                     const dist = Math.hypot(dx, dy);
                     if (dist < bestDist) {
                         bestDist = dist;
+                        const valYNum = Number(axisC2D(ya, ptCy));
                         bestPt = {
                             cx: ptCx,
                             cy: ptCy,
-                            valY: Number(yRaw),
-                            rawX: xs[i],
+                            valY: Number.isFinite(valYNum) ? valYNum : ptCy,
+                            rawX: rawXs ? rawXs[i] : undefined,
                             idx: i,
                             traceIdx: ti,
                             snapped: true
@@ -5983,18 +6329,36 @@ _js_chart_measure = """
         };
     }
 
+    function updateToolbarBtn(gd) {
+        if (!gd) return;
+        const btn = gd.querySelector(".tv-measure-pill-btn");
+        if (!btn) return;
+        const armed = !!gd.__measureArmed;
+        const active = !!(gd.__measureState && gd.__measureState.state === "measuring");
+        if (armed || active) {
+            btn.classList.add("armed");
+            btn.textContent = "📏 Medindo... (arraste ou clique 2 pts)";
+        } else {
+            btn.classList.remove("armed");
+            btn.textContent = "📏 Medir (Shift+Arrastar)";
+        }
+    }
+
     function clearMeasure(gd) {
         if (!gd) return;
         gd.__measureState = null;
+        gd.__measureArmed = false;
         const ov = gd.querySelector(".tv-measure-overlay");
         if (ov) ov.innerHTML = "";
         if (pWin.__activeMeasuringGd === gd) {
             pWin.__activeMeasuringGd = null;
         }
+        updateToolbarBtn(gd);
     }
 
     function renderMeasure(gd) {
         if (!gd || !isCartesianPlot(gd)) return;
+        updateToolbarBtn(gd);
         const stM = gd.__measureState;
         let ov = gd.querySelector(".tv-measure-overlay");
         if (!stM || !stM.p1 || !stM.p2) {
@@ -6051,8 +6415,8 @@ _js_chart_measure = """
 
         const ehAlta = diff >= 0;
         const corMain = ehAlta ? "#16a34a" : "#e11d48";
-        const corStroke = ehAlta ? "rgba(34, 197, 94, 0.85)" : "rgba(244, 63, 94, 0.85)";
-        const corFill = ehAlta ? "rgba(34, 197, 94, 0.16)" : "rgba(244, 63, 94, 0.16)";
+        const corStroke = ehAlta ? "rgba(34, 197, 94, 0.88)" : "rgba(244, 63, 94, 0.88)";
+        const corFill = ehAlta ? "rgba(34, 197, 94, 0.18)" : "rgba(244, 63, 94, 0.18)";
         const sinalD = diff > 0 ? "+" : "";
         const sinalP = pct > 0 ? "+" : "";
 
@@ -6107,21 +6471,22 @@ _js_chart_measure = """
                 <line x1="${offL}" y1="${y1}" x2="${offL + dragRect.width}" y2="${y1}" stroke="rgba(148,163,184,0.45)" stroke-width="1" stroke-dasharray="3 3" />
                 <line x1="${offL}" y1="${y2}" x2="${offL + dragRect.width}" y2="${y2}" stroke="${corStroke}" stroke-width="1" stroke-dasharray="3 3" />
                 ${arrowV}${headV}${arrowH}${headH}
-                <circle cx="${x1}" cy="${y1}" r="4.2" fill="#3b82f6" stroke="#ffffff" stroke-width="1.5" />
-                <circle cx="${x2}" cy="${y2}" r="4.5" fill="${corMain}" stroke="#ffffff" stroke-width="1.5" />
+                <circle cx="${x1}" cy="${y1}" r="4.5" fill="#3b82f6" stroke="#ffffff" stroke-width="1.5" />
+                <circle cx="${x2}" cy="${y2}" r="4.8" fill="${corMain}" stroke="#ffffff" stroke-width="1.5" />
             </svg>
         `;
 
-        const tagY1 = `<div class="tv-measure-tag" style="left:${offL + dragRect.width + 4}px; top:${Math.max(0, y1 - 10)}px; background:#2563eb;">${v1Fmt}</div>`;
-        const tagY2 = `<div class="tv-measure-tag" style="left:${offL + dragRect.width + 4}px; top:${Math.max(0, y2 - 10)}px; background:${corMain};">${v2Fmt}</div>`;
+        const tagSideX = ya.side === "right" ? (offL + dragRect.width + 4) : Math.max(2, offL - 66);
+        const tagY1 = `<div class="tv-measure-tag" style="left:${tagSideX}px; top:${Math.max(0, y1 - 10)}px; background:#2563eb;">${v1Fmt}</div>`;
+        const tagY2 = `<div class="tv-measure-tag" style="left:${tagSideX}px; top:${Math.max(0, y2 - 10)}px; background:${corMain};">${v2Fmt}</div>`;
 
-        const cardWEst = 235;
+        const cardWEst = 240;
         const cardLeft = Math.max(offL + 4, Math.min(offL + dragRect.width - cardWEst, midX - 110));
         const abaixo = (ry + rh + 66 <= offT + dragRect.height + 10);
         const cardTop = abaixo ? (ry + rh + 8) : Math.max(4, ry - 64);
 
         const hintSub = stM.state === "measuring"
-            ? "<div style='font-size:10.5px; opacity:0.85;'>Clique no ponto final para fixar</div>"
+            ? "<div style='font-size:10.5px; opacity:0.85;'>Solte o arraste ou clique no ponto final</div>"
             : (spanTxt ? `<div style='font-size:10.5px; opacity:0.9;'>${spanTxt}</div>` : "");
 
         const cardHtml = `
@@ -6139,8 +6504,18 @@ _js_chart_measure = """
     }
 
     function attachPlot(gd) {
-        if (!gd || gd.dataset.measureReady === "1") return;
-        if (!isCartesianPlot(gd)) return;
+        if (!gd || !isCartesianPlot(gd)) return;
+        if (getComputedStyle(gd).position === "static") {
+            gd.style.position = "relative";
+        }
+        if (!gd.querySelector(".tv-measure-pill-btn")) {
+            const btn = pDoc.createElement("div");
+            btn.className = "tv-measure-pill-btn";
+            btn.title = "Ativar régua de variação (%) — ou segure Shift + Botão Esquerdo e arraste no gráfico";
+            btn.textContent = "📏 Medir (Shift+Arrastar)";
+            gd.appendChild(btn);
+        }
+        if (gd.dataset.measureReady === "1") return;
         gd.dataset.measureReady = "1";
         if (typeof gd.on === "function") {
             gd.on("plotly_relayout", function() { renderMeasure(gd); });
@@ -6149,8 +6524,7 @@ _js_chart_measure = """
     }
 
     function scanPlots() {
-        const plots = pDoc.querySelectorAll(".js-plotly-plot");
-        plots.forEach(attachPlot);
+        pDoc.querySelectorAll(".js-plotly-plot").forEach(attachPlot);
     }
 
     scanPlots();
@@ -6170,13 +6544,31 @@ _js_chart_measure = """
     if (!pWin.__chartMeasureAttached) {
         pWin.__chartMeasureAttached = true;
 
-        pDoc.addEventListener("mousedown", function(e) {
+        pDoc.addEventListener("pointerdown", function(e) {
+            if (e.button !== 0) return;
+
+            const pillBtn = e.target && e.target.closest ? e.target.closest(".tv-measure-pill-btn") : null;
+            if (pillBtn) {
+                e.preventDefault();
+                e.stopPropagation();
+                const gdP = pillBtn.closest(".js-plotly-plot");
+                if (gdP) {
+                    if (gdP.__measureArmed || (gdP.__measureState && gdP.__measureState.state === "measuring")) {
+                        clearMeasure(gdP);
+                    } else {
+                        clearMeasure(gdP);
+                        gdP.__measureArmed = true;
+                        updateToolbarBtn(gdP);
+                    }
+                }
+                return;
+            }
+
             const closeBtn = e.target && e.target.closest ? e.target.closest(".tv-measure-close") : null;
             if (closeBtn) {
                 e.preventDefault();
                 e.stopPropagation();
-                const gdC = closeBtn.closest(".js-plotly-plot");
-                clearMeasure(gdC);
+                clearMeasure(closeBtn.closest(".js-plotly-plot"));
                 return;
             }
 
@@ -6192,24 +6584,30 @@ _js_chart_measure = """
             if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd === gd && gd.__measureState && gd.__measureState.state === "measuring") {
                 e.preventDefault();
                 e.stopPropagation();
-                pWin.__suppressPlotClickUntil = Date.now() + 300;
-                const p2 = pointFromEvent(gd, e);
-                gd.__measureState.p2 = p2;
+                pWin.__suppressPlotClickUntil = Date.now() + 350;
+                gd.__measureState.p2 = pointFromEvent(gd, e);
                 gd.__measureState.state = "locked";
                 pWin.__activeMeasuringGd = null;
                 renderMeasure(gd);
                 return;
             }
 
-            if (e.shiftKey) {
+            if (e.shiftKey || gd.__measureArmed) {
                 e.preventDefault();
                 e.stopPropagation();
-                pWin.__suppressPlotClickUntil = Date.now() + 300;
+                gd.__measureArmed = false;
+                pWin.__suppressPlotClickUntil = Date.now() + 350;
                 if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd !== gd) {
                     clearMeasure(pWin.__activeMeasuringGd);
                 }
                 const p1 = pointFromEvent(gd, e);
-                gd.__measureState = { state: "measuring", p1: p1, p2: p1 };
+                gd.__measureState = {
+                    state: "measuring",
+                    p1: p1,
+                    p2: p1,
+                    startX: e.clientX,
+                    startY: e.clientY
+                };
                 pWin.__activeMeasuringGd = gd;
                 renderMeasure(gd);
                 return;
@@ -6218,16 +6616,56 @@ _js_chart_measure = """
             if (gd.__measureState && gd.__measureState.state === "locked") {
                 const insideCard = e.target && e.target.closest ? e.target.closest(".tv-measure-card") : null;
                 if (!insideCard) {
-                    clearMeasure(gd);
+                    gd.__pendingClearStart = { gd: gd, x: e.clientX, y: e.clientY };
                 }
             }
         }, true);
 
-        pDoc.addEventListener("mousemove", function(e) {
+        pDoc.addEventListener("pointermove", function(e) {
             const gd = pWin.__activeMeasuringGd;
             if (!gd || !gd.__measureState || gd.__measureState.state !== "measuring") return;
             gd.__measureState.p2 = pointFromEvent(gd, e);
             renderMeasure(gd);
+        }, true);
+
+        pDoc.addEventListener("pointerup", function(e) {
+            if (e.button !== 0) return;
+
+            const gd = pWin.__activeMeasuringGd;
+            if (gd && gd.__measureState && gd.__measureState.state === "measuring") {
+                const dist = Math.hypot(e.clientX - gd.__measureState.startX, e.clientY - gd.__measureState.startY);
+                if (dist >= 8) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    pWin.__suppressPlotClickUntil = Date.now() + 350;
+                    gd.__measureState.p2 = pointFromEvent(gd, e);
+                    gd.__measureState.state = "locked";
+                    pWin.__activeMeasuringGd = null;
+                    renderMeasure(gd);
+                }
+                return;
+            }
+
+            if (gd === undefined || !gd) {
+                pDoc.querySelectorAll(".js-plotly-plot").forEach(function(plotEl) {
+                    if (plotEl.__pendingClearStart) {
+                        const infoC = plotEl.__pendingClearStart;
+                        plotEl.__pendingClearStart = null;
+                        if (Math.hypot(e.clientX - infoC.x, e.clientY - infoC.y) < 6) {
+                            clearMeasure(plotEl);
+                        }
+                    }
+                });
+            }
+        }, true);
+
+        pDoc.addEventListener("mousedown", function(e) {
+            const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
+            if (!gd || !isCartesianPlot(gd)) return;
+            if (e.shiftKey || gd.__measureArmed || (pWin.__activeMeasuringGd === gd && gd.__measureState && gd.__measureState.state === "measuring")) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
         }, true);
 
         pDoc.addEventListener("click", function(e) {
@@ -6243,7 +6681,7 @@ _js_chart_measure = """
         pDoc.addEventListener("keydown", function(e) {
             if (e.key === "Escape") {
                 pDoc.querySelectorAll(".js-plotly-plot").forEach(function(gd) {
-                    if (gd.__measureState) clearMeasure(gd);
+                    if (gd.__measureState || gd.__measureArmed) clearMeasure(gd);
                 });
             }
         }, true);

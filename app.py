@@ -2066,6 +2066,17 @@ def _calc_tesouro_selic_capital_mensal(meta_mensal: float, selic_aa_pct: float, 
     return (meta_mensal - (10_000.0 * taxa_b3_am)) / denom
 
 
+def _calc_cdb_di_capital_mensal(meta_mensal: float, taxa_di_aa_pct: float, aliq_ir: float) -> float:
+    """Calcula capital necessário em CDB 100% DI (base 30/365 dias, padrão rendafixa.github.io) para gerar meta_mensal líquida."""
+    if meta_mensal <= 0.0 or taxa_di_aa_pct <= 0.0:
+        return 0.0
+    taxa_1m_bruta = ((1.0 + (taxa_di_aa_pct / 100.0)) ** (30.0 / 365.0)) - 1.0
+    taxa_1m_liq = taxa_1m_bruta * (1.0 - aliq_ir)
+    if taxa_1m_liq <= 0.0:
+        return 0.0
+    return meta_mensal / taxa_1m_liq
+
+
 def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
     dt_idx = pd.to_datetime(idx)
     if dt_idx.tz is not None:
@@ -4246,7 +4257,7 @@ def render_grafico_e_tabela_ativo(
                     key=f"{key_prefix}_meta_renda_{ticker}",
                 )
             with sr_in2:
-                selic_badge_txt = f"Selic atual (BCB): {fmt_num(selic_aa_atual, 2)}% a.a." if selic_aa_atual else "Selic atual: indisponível"
+                selic_badge_txt = f"Taxa DI / Selic Efetiva (BCB): {fmt_num(selic_aa_atual, 2)}% a.a." if selic_aa_atual else "Taxa DI / Selic: indisponível"
                 regra_div_txt = (
                     "Acima de R$ 50 mil/mês por empresa aplica 10% IRRF (Lei 15.270/2025)"
                     if meta_mensal > 50_000.0
@@ -4278,31 +4289,31 @@ def render_grafico_e_tabela_ativo(
                 dpa_base_sim = 0.0
 
             if selic_aa_atual and selic_aa_atual > 0:
-                cap_selic_15 = _calc_tesouro_selic_capital_mensal(meta_mensal, selic_aa_atual, 0.15)
-                cap_selic_225 = _calc_tesouro_selic_capital_mensal(meta_mensal, selic_aa_atual, 0.225)
-                nota_b3_rp = " + B3 0,20% (>10k)" if cap_selic_15 > 10_000.0 else " · Isento B3 (≤10k)"
+                cap_cdb_225 = _calc_cdb_di_capital_mensal(meta_mensal, selic_aa_atual, 0.225)
+                cap_cdb_15 = _calc_cdb_di_capital_mensal(meta_mensal, selic_aa_atual, 0.15)
+                total_mes_225 = cap_cdb_225 + meta_mensal
                 card_selic_rp = (
                     "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
                     "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
                     "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>"
-                    "🏛️ Capital no Tesouro Selic Hoje"
+                    "🏦 Capital em CDB 100% DI Hoje"
                     "</div>"
                     "<div style='min-height:36px; display:flex; align-items:center; justify-content:center; margin:4px 0;'>"
-                    f"<span style='font-size:21px; font-weight:700; color:#fbbf24;'>R$ {fmt_num(cap_selic_15)}</span>"
+                    f"<span style='font-size:21px; font-weight:700; color:#fbbf24;'>R$ {fmt_num(cap_cdb_225)}</span>"
                     "</div>"
                     "<div style='font-size:11px; opacity:0.82; min-height:32px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>"
-                    f"Líq. 15% IR (&gt;2a){nota_b3_rp} · c/ 22,5% IR (≤6m): R$ {fmt_num(cap_selic_225)}"
+                    f"Total líq. no mês: R$ {fmt_num(total_mes_225)} (22,5% IR · 30/365d) · c/ 15% IR (&gt;2a): R$ {fmt_num(cap_cdb_15)}"
                     "</div>"
                     "</div>"
                 )
             else:
-                cap_selic_15 = None
+                cap_cdb_225 = None
                 card_selic_rp = (
                     "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
                     "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
-                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>🏛️ Capital no Tesouro Selic Hoje</div>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>🏦 Capital em CDB 100% DI Hoje</div>"
                     "<div style='font-size:14px; opacity:0.75; min-height:36px; display:flex; align-items:center; justify-content:center;'>Indisponível</div>"
-                    "<div style='font-size:11px; opacity:0.7; min-height:32px; display:flex; align-items:center; justify-content:center;'>Taxa Selic do BCB indisponível.</div>"
+                    "<div style='font-size:11px; opacity:0.7; min-height:32px; display:flex; align-items:center; justify-content:center;'>Taxa DI/Selic do BCB indisponível.</div>"
                     "</div>"
                 )
 
@@ -4356,13 +4367,13 @@ def render_grafico_e_tabela_ativo(
                     unsafe_allow_html=True,
                 )
 
-                if cap_selic_15 and cap_selic_15 > 0:
-                    diff_cap_rp = custo_total_nec - cap_selic_15
+                if cap_cdb_225 and cap_cdb_225 > 0:
+                    diff_cap_rp = custo_total_nec - cap_cdb_225
                     if diff_cap_rp <= 0:
                         st.markdown(
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
                             f"border-left:3px solid #22c55e; font-size:12.5px;'>"
-                            f"💡 Pelo yield atual de <strong>{ticker}</strong>, você precisa de <strong>R$ {fmt_num(abs(diff_cap_rp))}</strong> a menos que no Tesouro Selic (com IR de 15% e custódia B3) para receber R$ {fmt_num(meta_mensal)}/mês líquidos."
+                            f"💡 Pelo yield atual de <strong>{ticker}</strong>, você precisa de <strong>R$ {fmt_num(abs(diff_cap_rp))}</strong> a menos que em um CDB 100% DI (1 mês, IR de 22,5%, base 30/365d) para receber R$ {fmt_num(meta_mensal)}/mês líquidos."
                             f"</div>",
                             unsafe_allow_html=True,
                         )
@@ -4370,7 +4381,7 @@ def render_grafico_e_tabela_ativo(
                         st.markdown(
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
                             f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
-                            f"💡 Hoje, o <strong>Tesouro Selic</strong> exige <strong>R$ {fmt_num(diff_cap_rp)}</strong> a menos de capital inicial que <strong>{ticker}</strong> (já descontando 15% de IR &gt;2a e custódia B3); porém ações tendem a reajustar proventos pela inflação no longo prazo."
+                            f"💡 Hoje, um <strong>CDB 100% DI</strong> exige <strong>R$ {fmt_num(diff_cap_rp)}</strong> a menos de capital inicial que <strong>{ticker}</strong> (1 mês, já descontando 22,5% de IR, base 30/365d); porém ações tendem a reajustar proventos pela inflação no longo prazo."
                             f"</div>",
                             unsafe_allow_html=True,
                         )

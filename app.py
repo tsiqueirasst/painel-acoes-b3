@@ -679,6 +679,140 @@ def buscar_detalhes_fundamentus(ticker: str) -> dict:
         return {}
 
 
+def _parse_i10_num(val: str | None) -> float | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s in ("-", "--", "N/A", "N/D", "n/a", "n/d", "—"):
+        return None
+    s_clean = s.replace("R$", "").replace("%", "").strip()
+    m = re.search(r"[-+]?\d{1,3}(?:\.\d{3})*(?:,\d+)?|[-+]?\d+(?:,\d+)?", s_clean)
+    if not m:
+        return None
+    return parse_br_num(m.group(0))
+
+
+def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
+    try:
+        url = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
+        i10_headers = {
+            **HEADERS,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://investidor10.com.br/",
+        }
+        resp = requests.get(url, headers=i10_headers, timeout=10)
+        if resp.status_code != 200 or f"/{ticker.lower()}" not in resp.url.lower():
+            return ticker, {}
+        if "cf-browser-verification" in resp.text or "Just a moment" in resp.text[:1500]:
+            return ticker, {}
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        dados: dict[str, float] = {}
+
+        for card in soup.find_all("div", class_=re.compile(r"\b_card\b")):
+            hdr = card.find("div", class_=re.compile(r"_card-header"))
+            body = card.find("div", class_=re.compile(r"_card-body"))
+            if not hdr or not body:
+                continue
+            lbl = _norm_txt(" ".join(hdr.get_text(" ", strip=True).split()).rstrip("?").strip())
+            if lbl == "cotacao":
+                sp_cot = body.find("span", class_=re.compile(r"\bvalue\b")) or body.find("span")
+                txt_cot = sp_cot.get_text(" ", strip=True) if sp_cot else ""
+                if not txt_cot or "R$" not in txt_cot:
+                    m_rs = re.search(r"R\$\s*[-+]?[\d.,]+", body.get_text(" ", strip=True))
+                    txt_cot = m_rs.group(0) if m_rs else txt_cot
+                val_c = _parse_i10_num(txt_cot)
+                if val_c is not None and val_c > 0:
+                    dados["cotacao_i10"] = val_c
+            elif lbl in ("p/l", "p/vp", "dy", "dividend yield"):
+                sp_v = body.find("span")
+                val_v = _parse_i10_num(sp_v.get_text(" ", strip=True) if sp_v else body.get_text(" ", strip=True))
+                if val_v is not None:
+                    if lbl == "p/l":
+                        dados["pl_i10"] = val_v
+                    elif lbl == "p/vp":
+                        dados["pvp_i10"] = val_v
+                    else:
+                        dados["dy_i10"] = val_v
+
+        mapa_campos = {
+            "p/l": "pl_i10",
+            "p/vp": "pvp_i10",
+            "lpa": "lpa_i10",
+            "vpa": "vpa_i10",
+            "roe": "roe_i10",
+            "roic": "roic_i10",
+            "dy": "dy_i10",
+            "dividend yield": "dy_i10",
+            "dividend yield (dy)": "dy_i10",
+            "margem liquida": "marg_liq_i10",
+            "margem ebit": "marg_ebit_i10",
+            "ev/ebitda": "ev_ebitda_i10",
+            "ev/ebit": "ev_ebit_i10",
+            "liquidez corrente": "liq_corr_i10",
+            "divida bruta / patrimonio": "div_brut_patrim_i10",
+            "div. bruta / patrimonio": "div_brut_patrim_i10",
+            "cagr receitas 5 anos": "cresc_rec_5a_i10",
+            "cagr receita 5 anos": "cresc_rec_5a_i10",
+        }
+
+        container_ind = soup.find(id="table-indicators") or soup
+        for cell in container_ind.find_all("div", class_=re.compile(r"\bcell\b")):
+            val_div = cell.find("div", class_=re.compile(r"\bvalue\b"))
+            lbl_raw = ""
+            for child in cell.find_all(["span", "h3", "h4", "div"], recursive=False):
+                cls_ch = " ".join(child.get("class", []))
+                if "value" in cls_ch or "compare" in cls_ch:
+                    continue
+                t_ch = " ".join(child.get_text(" ", strip=True).split()).rstrip("?").strip()
+                if t_ch:
+                    lbl_raw = t_ch
+                    break
+            if not lbl_raw:
+                sp_first = cell.find("span")
+                if sp_first and (not val_div or sp_first not in val_div.descendants):
+                    lbl_raw = " ".join(sp_first.get_text(" ", strip=True).split()).rstrip("?").strip()
+
+            lbl_norm = _norm_txt(lbl_raw)
+            chave_dst = mapa_campos.get(lbl_norm)
+            if not chave_dst:
+                continue
+
+            txt_val = ""
+            if val_div:
+                for sp in val_div.find_all("span"):
+                    cand_s = " ".join(sp.get_text(" ", strip=True).split())
+                    if re.search(r"[\d]|^-+$|^N/[AD]$", cand_s, re.IGNORECASE):
+                        txt_val = cand_s
+                        break
+                if not txt_val:
+                    txt_val = re.split(r"\bSetor\b|\bSubsetor\b|\bSegmento\b", val_div.get_text(" ", strip=True), flags=re.IGNORECASE)[0]
+            else:
+                txt_cell = " ".join(cell.get_text(" ", strip=True).split())
+                txt_sem_lbl = txt_cell[len(lbl_raw):].strip() if txt_cell.lower().startswith(lbl_raw.lower()) else txt_cell
+                txt_val = re.split(r"\bSetor\b|\bSubsetor\b|\bSegmento\b", txt_sem_lbl, flags=re.IGNORECASE)[0]
+
+            val_num = _parse_i10_num(txt_val)
+            if val_num is not None:
+                dados[chave_dst] = val_num
+
+        return ticker, dados
+    except Exception:
+        return ticker, {}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def buscar_investidor10_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
+    if not tickers_tuple:
+        return {}
+    out: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for tk, dados in ex.map(_fetch_investidor10, tickers_tuple):
+            out[tk] = dados
+    return out
+
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def buscar_cambio_brl(moeda: str) -> pd.Series:
     if not moeda or moeda.upper() == "BRL":
@@ -2109,9 +2243,9 @@ def buscar_historico_fundamentalista(
     # 3) Linha ATUAL (recalculada pela cotação vigente)
     cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
     val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
-    pl_atual = (val_merc_atual / lliq_12) if (val_merc_atual and lliq_12 and lliq_12 != 0) else (pl_live if pl_live is not None else pl_12)
+    pl_atual = pl_live if pl_live is not None else ((val_merc_atual / lliq_12) if (val_merc_atual and lliq_12 and lliq_12 != 0) else pl_12)
     patr_atual = parse_br_num(det_fund.get("Patrim. Líq")) or ((vpa_12 * acoes_info) if (vpa_12 and acoes_info) else None)
-    pvp_atual = (val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else (pvp_live if pvp_live is not None else pvp_12)
+    pvp_atual = pvp_live if pvp_live is not None else ((val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else pvp_12)
     pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
 
     # 2.5) Linha MÉDIA (anos inteiros + meses inéditos do ano atual, sem repetir meses do ano anterior em ÚLT. 12M)
@@ -2205,7 +2339,7 @@ def buscar_historico_fundamentalista(
         "ano": f"ATUAL{cot_txt}",
         "pl": pl_atual,
         "pvp": pvp_atual,
-        "vpa": vpa_12 if vpa_12 is not None else vpa_live,
+        "vpa": vpa_live if vpa_live is not None else vpa_12,
         "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_12,
         "pebitda": pebitda_atual, "val_merc": val_merc_atual,
         "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
@@ -3263,7 +3397,7 @@ def render_grafico_e_tabela_ativo(
 
                 c2_ok = (
                     (ml_bh is not None and ml_bh >= 10.0)
-                    or (eh_bco_bh and (ml_bh is None or ml_bh == 0.0) and (roe_bh is not None and roe_bh >= 10.0) and (pl_bh is None or pl_bh > 0.0) and liq2m_bh >= 1_000_000)
+                    or (eh_bco_bh and (ml_bh is None or ml_bh == 0.0 or ml_bh >= 5.0) and (roe_bh is not None and roe_bh >= 10.0) and (pl_bh is None or pl_bh > 0.0) and liq2m_bh >= 1_000_000)
                 )
                 c2_det = "Banco de grande porte / lucrativo" if (eh_bco_bh and (ml_bh is None or ml_bh == 0.0)) else (f"Margem Líq.: {fmt_num(ml_bh, 1)}%" if ml_bh is not None else "Margem indisponível")
 
@@ -4342,9 +4476,10 @@ for ex in extras_obrigatorios:
     if ex and ex not in tickers_para_yf:
         tickers_para_yf.append(ex)
 
-with st.spinner(f"Buscando dados de 6 anos, indicadores técnicos e notícias para {len(tickers_para_yf)} ativos..."):
+with st.spinner(f"Buscando dados de 6 anos, indicadores fundamentalistas, técnicos e notícias para {len(tickers_para_yf)} ativos..."):
     dados_yf = buscar_yahoo_lote(tuple(tickers_para_yf))
     dados_news = buscar_sentimento_noticias_lote(tuple(tickers_para_yf))
+    dados_i10 = buscar_investidor10_lote(tuple(tickers_para_yf))
 
 nomes_cvm_mapa = carregar_nomes_cvm_tickers()
 falt_meta_fund = [
@@ -4370,7 +4505,8 @@ def montar_item_completo(a: dict) -> dict:
     t = a["ticker"]
     yf_info = dados_yf.get(t, {})
     news_info = dados_news.get(t, {})
-    cot = yf_info.get("cotacao_yf") or a.get("cotacao") or 0.0
+    i10_info = dados_i10.get(t, {})
+    cot = yf_info.get("cotacao_yf") or i10_info.get("cotacao_i10") or a.get("cotacao") or 0.0
     nome_yf = yf_info.get("nome")
     nome_cvm = nomes_cvm_mapa.get(t)
     nome_fd = mapa_nomes_fund_extra.get(t)
@@ -4384,38 +4520,65 @@ def montar_item_completo(a: dict) -> dict:
         nome = nome_cvm
     else:
         nome = t
-    lpa = a.get("lpa") if a.get("lpa") is not None else yf_info.get("lpa_yf")
-    vpa = a.get("vpa") if a.get("vpa") is not None else yf_info.get("vpa_yf")
-    roe = a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf")
-    pl = (cot / lpa) if (cot > 0 and lpa is not None and lpa != 0) else a.get("pl")
-    pvp = (cot / vpa) if (cot > 0 and vpa is not None and vpa != 0) else a.get("pvp")
+
+    cot_i10 = i10_info.get("cotacao_i10")
+    pl_i10 = i10_info.get("pl_i10")
+    pvp_i10 = i10_info.get("pvp_i10")
+    lpa_i10 = i10_info.get("lpa_i10")
+    vpa_i10 = i10_info.get("vpa_i10")
+    roe_i10 = i10_info.get("roe_i10")
+    dy_i10 = i10_info.get("dy_i10")
+
+    lpa = lpa_i10 if lpa_i10 is not None else (a.get("lpa") if a.get("lpa") is not None else yf_info.get("lpa_yf"))
+    vpa = vpa_i10 if vpa_i10 is not None else (a.get("vpa") if a.get("vpa") is not None else yf_info.get("vpa_yf"))
+    roe = roe_i10 if roe_i10 is not None else (a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf"))
+
+    if pl_i10 is not None and cot > 0 and cot_i10 and cot_i10 > 0:
+        pl = pl_i10 * (cot / cot_i10)
+    elif cot > 0 and lpa is not None and lpa != 0:
+        pl = cot / lpa
+    else:
+        pl = pl_i10 if pl_i10 is not None else a.get("pl")
+
+    if pvp_i10 is not None and cot > 0 and cot_i10 and cot_i10 > 0:
+        pvp = pvp_i10 * (cot / cot_i10)
+    elif cot > 0 and vpa is not None and vpa != 0:
+        pvp = cot / vpa
+    else:
+        pvp = pvp_i10 if pvp_i10 is not None else a.get("pvp")
 
     dy_fund = float(a.get("dy_12m") or 0.0)
     dpa_confiavel = (cot * (dy_fund / 100.0)) if (cot > 0 and dy_fund > 0) else 0.0
 
-    dpa_12m_yf = yf_info.get("dpa_12m_yf")
-    if dpa_12m_yf is not None and cot > 0:
-        dy_yf_12m = (float(dpa_12m_yf) / cot) * 100.0
-        if dy_fund > 0:
-            dpa_12m = dpa_confiavel if (abs(dy_yf_12m - dy_fund) / dy_fund > 0.40) else float(dpa_12m_yf)
-        else:
-            dpa_12m = 0.0 if dy_yf_12m > 1.0 else float(dpa_12m_yf)
+    if dy_i10 is not None and dy_i10 > 0 and cot > 0 and cot_i10 and cot_i10 > 0:
+        dpa_12m = float(cot_i10) * (float(dy_i10) / 100.0)
+        dy_12m = (dpa_12m / cot) * 100.0
     else:
-        dpa_12m = dpa_confiavel if dpa_confiavel > 0 else float(a.get("dpa_12m") or 0.0)
+        dpa_12m_yf = yf_info.get("dpa_12m_yf")
+        if dpa_12m_yf is not None and cot > 0:
+            dy_yf_12m = (float(dpa_12m_yf) / cot) * 100.0
+            if dy_fund > 0:
+                dpa_12m = dpa_confiavel if (abs(dy_yf_12m - dy_fund) / dy_fund > 0.40) else float(dpa_12m_yf)
+            else:
+                dpa_12m = 0.0 if dy_yf_12m > 1.0 else float(dpa_12m_yf)
+        else:
+            dpa_12m = dpa_confiavel if dpa_confiavel > 0 else float(a.get("dpa_12m") or 0.0)
+        dy_12m = (dpa_12m / cot) * 100.0 if (dpa_12m and cot > 0) else dy_fund
 
-    dy_12m = (dpa_12m / cot) * 100.0 if (dpa_12m and cot > 0) else dy_fund
     dpa_med_6a = yf_info.get("dpa_med_6a")
     anos_hist = yf_info.get("anos_hist", 0)
 
+    dy_ref_proj = dy_12m if dy_12m > 0 else dy_fund
+    dpa_ref_proj = dpa_12m if dpa_12m > 0 else dpa_confiavel
     dpa_proj_yf = yf_info.get("dpa_proj")
     if dpa_proj_yf is not None and cot > 0:
         dy_yf_proj = (float(dpa_proj_yf) / cot) * 100.0
-        if dy_fund > 0:
-            dpa_proj = dpa_confiavel if (abs(dy_yf_proj - dy_fund) / dy_fund > 0.40) else float(dpa_proj_yf)
+        if dy_ref_proj > 0:
+            dpa_proj = dpa_ref_proj if (abs(dy_yf_proj - dy_ref_proj) / dy_ref_proj > 0.40) else float(dpa_proj_yf)
         else:
             dpa_proj = 0.0 if (dpa_12m == 0.0 and dy_yf_proj > 1.0) else float(dpa_proj_yf)
     else:
-        dpa_proj = dpa_confiavel if dpa_confiavel > 0 else None
+        dpa_proj = dpa_ref_proj if dpa_ref_proj > 0 else None
 
     pt_med = (dpa_med_6a / 0.06) if (dpa_med_6a and dpa_med_6a > 0) else None
     pt_proj = (dpa_proj / 0.06) if (dpa_proj and dpa_proj > 0) else None
@@ -4428,8 +4591,22 @@ def montar_item_completo(a: dict) -> dict:
         k in _norm_txt(setor_oficial_t) for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
     )
 
+    a_merged = dict(a)
+    for k_base, k_i10 in (
+        ("roic", "roic_i10"),
+        ("marg_liq", "marg_liq_i10"),
+        ("marg_ebit", "marg_ebit_i10"),
+        ("ev_ebitda", "ev_ebitda_i10"),
+        ("ev_ebit", "ev_ebit_i10"),
+        ("liq_corr", "liq_corr_i10"),
+        ("div_brut_patrim", "div_brut_patrim_i10"),
+        ("cresc_rec_5a", "cresc_rec_5a_i10"),
+    ):
+        if i10_info.get(k_i10) is not None:
+            a_merged[k_base] = i10_info[k_i10]
+
     item = {
-        **a,
+        **a_merged,
         "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t, "eh_banco_seg": eh_banco_seg,
         "pl": pl, "pvp": pvp, "lpa": lpa, "vpa": vpa, "roe": roe,
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
@@ -4882,6 +5059,31 @@ with tab1:
             resultados_ordenados = sort_resultados(lista_tab, chave_ord, reverso)
             exibir = resultados_ordenados if max_linhas == 0 else resultados_ordenados[:int(max_linhas)]
 
+            falt_i10_tab = tuple(r["ticker"] for r in exibir if r["ticker"] not in dados_i10)
+            mapa_res_tab = {r["ticker"]: r for r in resultados_tab}
+            if falt_i10_tab and len(falt_i10_tab) <= 60:
+                if len(falt_i10_tab) <= 15:
+                    falt_yf_t = tuple(tk for tk in falt_i10_tab if tk not in dados_yf)
+                    if falt_yf_t:
+                        dados_yf.update(buscar_yahoo_lote(falt_yf_t))
+                    falt_nw_t = tuple(tk for tk in falt_i10_tab if tk not in dados_news)
+                    if falt_nw_t:
+                        dados_news.update(buscar_sentimento_noticias_lote(falt_nw_t))
+                dados_i10.update(buscar_investidor10_lote(falt_i10_tab))
+                mapa_base_todos = {a["ticker"]: a for a in todos_ativos}
+                exibir_upd = []
+                for r_ex in exibir:
+                    tk_ex = r_ex["ticker"]
+                    if tk_ex in falt_i10_tab and tk_ex in mapa_base_todos:
+                        it_upd = montar_item_completo(mapa_base_todos[tk_ex])
+                        it_upd["pos_ranking"] = r_ex["pos_ranking"]
+                        it_upd["score_ativo"] = it_upd[chave_score_ativo]
+                        exibir_upd.append(it_upd)
+                        mapa_res_tab[tk_ex] = it_upd
+                    else:
+                        exibir_upd.append(r_ex)
+                exibir = exibir_upd
+
             st.caption(f"Mostrando **{len(exibir)}** de **{len(lista_tab)}** ativos.")
 
             if not exibir:
@@ -5058,7 +5260,7 @@ with tab1:
                 render_tabela_e_raiox(
                     exibir,
                     [r["ticker"] for r in exibir],
-                    {r["ticker"]: r for r in resultados_tab},
+                    mapa_res_tab,
                     comp_set,
                     chave_score_ativo,
                 )
@@ -5574,10 +5776,13 @@ with tab2:
         faltantes_nw = tuple(t for t in selecionados if t not in dados_news)
         if faltantes_nw:
             dados_news.update(buscar_sentimento_noticias_lote(faltantes_nw))
+        faltantes_i10 = tuple(t for t in selecionados if t not in dados_i10)
+        if faltantes_i10:
+            dados_i10.update(buscar_investidor10_lote(faltantes_i10))
 
         itens_comp = []
         for t in selecionados:
-            if t in mapa_res and t not in extra_yf and t not in faltantes_nw:
+            if t in mapa_res and t not in extra_yf and t not in faltantes_nw and t not in faltantes_i10:
                 itens_comp.append(mapa_res[t])
             else:
                 dados_yf[t] = dados_yf.get(t) or extra_yf.get(t, {})
@@ -5674,6 +5879,9 @@ with tab3:
             faltantes_cn = tuple(t for t in tickers_cart if t not in dados_news)
             if faltantes_cn:
                 dados_news.update(buscar_sentimento_noticias_lote(faltantes_cn))
+            faltantes_ci = tuple(t for t in tickers_cart if t not in dados_i10)
+            if faltantes_ci:
+                dados_i10.update(buscar_investidor10_lote(faltantes_ci))
 
             hist_cart = buscar_divs_e_precos_carteira(tickers_cart)
             mapa_setores_full = carregar_mapa_todos_setores()
@@ -5972,6 +6180,9 @@ with tab3:
                         falt_fn = tuple(t for t in favs_extras if t not in dados_news)
                         if falt_fn:
                             dados_news.update(buscar_sentimento_noticias_lote(falt_fn))
+                        falt_fi = tuple(t for t in favs_extras if t not in dados_i10)
+                        if falt_fi:
+                            dados_i10.update(buscar_investidor10_lote(falt_fi))
                         for tf in favs_extras:
                             it_fav_ap = montar_item_completo(mapa_todos[tf])
                             it_fav_ap["saldo"] = 0.0

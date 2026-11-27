@@ -843,15 +843,15 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 @st.cache_data(ttl=86400, show_spinner=False)
 def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...]) -> list[str]:
     rotas: list[str] = []
-    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,140})\1""")
-    for su in script_urls[:6]:
+    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,160})\1""")
+    for su in script_urls[:18]:
         try:
-            r = requests.get(su, headers=HEADERS, timeout=4)
+            r = requests.get(su, headers=HEADERS, timeout=5)
             if r.status_code != 200:
                 continue
             for _, path in pat.findall(r.text):
                 p_low = path.lower()
-                if any(k in p_low for k in ("cotac", "chart", "quot", "hist", "acao", "stock")):
+                if any(k in p_low for k in ("chart", "cotac", "quot", "hist")):
                     if path not in rotas:
                         rotas.append(path)
         except Exception:
@@ -860,14 +860,14 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...]) -> list[str]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def buscar_serie_investidor10_chart(
+def buscar_serie_investidor10_chart_com_info(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 3,
-) -> pd.Series:
-    """Tenta obter a série diária exata do gráfico do Investidor10 (retorna vazia se bloqueada/indisponível)."""
+    _v: int = 4,
+) -> tuple[pd.Series, str]:
+    """Tenta obter a série diária exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
         "7 D": 7,
         "30 D": 30,
@@ -879,7 +879,7 @@ def buscar_serie_investidor10_chart(
         "15 A": 5475,
     }
     if periodo_label not in mapa_dias:
-        return pd.Series(dtype=float)
+        return pd.Series(dtype=float), "período não suportado"
 
     dias = mapa_dias[periodo_label]
     adj_str = "true" if ajustada else "false"
@@ -893,37 +893,46 @@ def buscar_serie_investidor10_chart(
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
         "Referer": "https://investidor10.com.br/",
     })
+    i10_cookie = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
+    if i10_cookie:
+        sess.headers["Cookie"] = i10_cookie
 
     cands_urls: list[str] = []
     csrf_tok = ""
     tid = ""
+    diag_motivo = "indisponível"
     try:
         resp_pg = sess.get(url_pg, timeout=8)
-        if resp_pg.status_code != 200 or "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
-            return pd.Series(dtype=float)
+        if resp_pg.status_code != 200:
+            return pd.Series(dtype=float), f"página HTTP {resp_pg.status_code}"
+        if "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
+            return pd.Series(dtype=float), "bloqueio Cloudflare"
 
         m_csrf = re.search(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
         if m_csrf:
             csrf_tok = m_csrf.group(1)
 
-        m_chart_id = re.search(r'/api/cotacoes/acao/chart/(\d{1,7})/', resp_pg.text, re.IGNORECASE)
-        if m_chart_id:
-            tid = m_chart_id.group(1)
-        else:
-            m_id = re.search(
-                r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|stock[_-]?id)\s*[:=]\s*["\']?(\d{1,7})',
-                resp_pg.text,
-                re.IGNORECASE,
-            ) or re.search(r'data-id\s*=\s*["\']?(\d{1,7})', resp_pg.text, re.IGNORECASE)
+        for pat_tid in (
+            r'/api/cotacoes/acao/chart/(\d{1,7})/',
+            r'["\']?ticker[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
+            r'data-ticker-id\s*=\s*["\']?(\d{1,7})',
+            r'["\']?(?:acao|stock)[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
+            r'["\']?company[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
+            r'data-id\s*=\s*["\']?(\d{1,7})',
+        ):
+            m_id = re.search(pat_tid, resp_pg.text, re.IGNORECASE)
             if m_id:
                 tid = m_id.group(1)
+                break
 
         rotas_desc: list[str] = []
-        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,140})\1""", resp_pg.text):
-            if any(k in path.lower() for k in ("cotac", "chart", "quot", "hist", "acao", "stock")):
-                rotas_desc.append(path)
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,160})\1""", resp_pg.text):
+            if any(k in path.lower() for k in ("chart", "cotac", "quot", "hist")):
+                if path not in rotas_desc:
+                    rotas_desc.append(path)
+        has_chart_route = any("chart" in r.lower() for r in rotas_desc)
 
-        if not rotas_desc:
+        if not has_chart_route:
             srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
             local_srcs = []
             for s in srcs:
@@ -935,43 +944,62 @@ def buscar_serie_investidor10_chart(
                 elif "investidor10.com.br" in s_low:
                     local_srcs.append(s)
             if local_srcs:
-                rotas_desc = _descobrir_rotas_chart_i10(tuple(local_srcs))
+                for rt_js in _descobrir_rotas_chart_i10(tuple(local_srcs)):
+                    if rt_js not in rotas_desc:
+                        rotas_desc.append(rt_js)
+    except Exception:
+        return pd.Series(dtype=float), "erro de conexão"
 
+    mapa_cands = {
+        "7 D": [7],
+        "30 D": [30],
+        "6 M": [180, 182],
+        "YTD": [dias, "ytd"],
+        "1 A": [365, 366],
+        "5 A": [1825, 1826, "5y"],
+        "10 A": [3650, 3652, "10y"],
+        "15 A": [5475, 5478, "15y"],
+    }
+    dias_cands = mapa_cands.get(periodo_label, [dias])
+
+    for d_c in dias_cands:
+        d_s = str(d_c)
         for r_tpl in rotas_desc:
             url_mont = r_tpl if r_tpl.startswith("http") else ("https://investidor10.com.br" + (r_tpl if r_tpl.startswith("/") else "/" + r_tpl))
             url_mont = re.sub(r"\$\{[^}]*(?:id|ticker)[^}]*\}|\{(?:id|ticker_id|acao_id|company_id)\}", tid or ticker.upper(), url_mont, flags=re.IGNORECASE)
-            url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", str(dias), url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", d_s, url_mont, flags=re.IGNORECASE)
             url_mont = re.sub(r"\$\{[^}]*adj[^}]*\}|\{(?:adjusted|ajustada)\}", adj_str, url_mont, flags=re.IGNORECASE)
             url_mont = re.sub(r"\$\{[^}]*(?:curr|moeda)[^}]*\}|\{(?:currency|moeda)\}", "real", url_mont, flags=re.IGNORECASE)
             if "/chart/" in url_mont.lower():
                 url_mont = re.sub(
                     r"(/chart/[^/]+/)\d+((?:/(?:true|false|1|0))(?:/[^/?#]+)?)?",
-                    lambda m: f"{m.group(1)}{dias}" + (f"/{adj_str}" + ("/real" if m.group(2) and m.group(2).count("/") >= 2 else "") if m.group(2) else ""),
+                    lambda m, _ds=d_s: f"{m.group(1)}{_ds}" + (f"/{adj_str}" + ("/real" if m.group(2) and m.group(2).count("/") >= 2 else "") if m.group(2) else ""),
                     url_mont,
                     flags=re.IGNORECASE,
                 )
-            if "${" not in url_mont and "{" not in url_mont and re.search(rf"(?:/|=){dias}(?:/|&|$)", url_mont):
+            if "${" not in url_mont and "{" not in url_mont and re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
                 cands_urls.append(url_mont)
-    except Exception:
-        return pd.Series(dtype=float)
-
-    if tid:
-        cands_urls.extend([
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}/real",
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_int}/real",
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}",
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}",
-        ])
-    cands_urls.extend([
-        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}/real",
-        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}",
-    ])
+        if tid:
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
+            ])
+        if d_c == dias_cands[0]:
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}",
+            ])
 
     api_hdrs = {
         **HEADERS,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+        "Origin": "https://investidor10.com.br",
         "Referer": url_pg,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
         "X-Requested-With": "XMLHttpRequest",
     }
     if csrf_tok:
@@ -983,12 +1011,14 @@ def buscar_serie_investidor10_chart(
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
 
-    for url_c in urls_unicas[:6]:
+    for url_c in urls_unicas[:8]:
         try:
             r_c = sess.get(url_c, headers=api_hdrs, timeout=6)
             if r_c.status_code in (401, 403, 429):
+                diag_motivo = f"HTTP {r_c.status_code}"
                 break
             if r_c.status_code != 200:
+                diag_motivo = f"HTTP {r_c.status_code}"
                 continue
             js = r_c.json()
             lista_pts = None
@@ -996,10 +1026,19 @@ def buscar_serie_investidor10_chart(
                 lista_pts = js
             elif isinstance(js, dict):
                 for k_l in ("real", "data", "prices", "cotacoes", "chart", "series"):
-                    if isinstance(js.get(k_l), list) and js[k_l]:
-                        lista_pts = js[k_l]
+                    v_l = js.get(k_l)
+                    if isinstance(v_l, list) and v_l:
+                        lista_pts = v_l
                         break
+                    if isinstance(v_l, dict):
+                        for k_sub in ("real", "data", "prices", "cotacoes", "series"):
+                            if isinstance(v_l.get(k_sub), list) and v_l[k_sub]:
+                                lista_pts = v_l[k_sub]
+                                break
+                        if lista_pts:
+                            break
             if not lista_pts:
+                diag_motivo = "lista vazia na API"
                 continue
 
             datas, vals = [], []
@@ -1023,8 +1062,12 @@ def buscar_serie_investidor10_chart(
                 elif isinstance(dt_raw, (int, float)) and dt_raw > 1e8:
                     dt_p = pd.to_datetime(dt_raw, unit="s", errors="coerce")
                 else:
-                    dt_p = pd.to_datetime(dt_raw, dayfirst=bool(re.match(r"^\d{2}/\d{2}/\d{4}", str(dt_raw))), errors="coerce")
-                vl_p = parse_br_num(str(vl_raw)) if (isinstance(vl_raw, str) and "," in vl_raw) else pd.to_numeric(vl_raw, errors="coerce")
+                    dt_str_raw = str(dt_raw).strip()
+                    dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
+                if isinstance(vl_raw, str) and ("," in vl_raw or "R$" in vl_raw):
+                    vl_p = _parse_i10_num(vl_raw)
+                else:
+                    vl_p = pd.to_numeric(vl_raw, errors="coerce")
                 if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
                     datas.append(dt_p.tz_localize(None) if getattr(dt_p, "tzinfo", None) else dt_p)
                     vals.append(float(vl_p))
@@ -1038,18 +1081,31 @@ def buscar_serie_investidor10_chart(
                 min_spans = {"6 M": 100, "1 A": 240, "5 A": 1400, "10 A": 3100, "15 A": 4700}
                 max_spans = {"7 D": 21, "30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
                 if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
+                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
                     continue
                 if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
+                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
                     continue
                 if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                    diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
                     continue
-                if cot_live and float(cot_live) > 0.0 and abs(float(s_out.iloc[-1]) - float(cot_live)) / float(cot_live) > 0.001:
-                    s_out.iloc[-1] = float(cot_live)
-                return s_out
+                return s_out, "Investidor10"
+            diag_motivo = "menos de 3 pontos válidos"
         except Exception:
+            diag_motivo = "erro ao ler JSON"
             break
 
-    return pd.Series(dtype=float)
+    return pd.Series(dtype=float), diag_motivo
+
+
+def buscar_serie_investidor10_chart(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+    _v: int = 4,
+) -> pd.Series:
+    return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
 
 def _calc_ticks_y_i10(y_min: float, y_max: float) -> list[float]:
@@ -3611,6 +3667,8 @@ def render_grafico_e_tabela_ativo(
         eh_candles_req = bool(st.session_state[k_candles])
         usar_custom_range = (dt_custom_ini is not None and dt_custom_fim is not None and dt_custom_ini < dt_custom_fim)
 
+        usou_i10_graf = False
+        diag_i10_graf = ""
         if usar_custom_range:
             df_ohlcv = buscar_ohlcv_preco(ticker, "15 A", ajustada, cot_live=cot_ref_live)
             if df_ohlcv is not None and not df_ohlcv.empty:
@@ -3619,10 +3677,14 @@ def render_grafico_e_tabela_ativo(
             lbl_per_exib = f"{dt_custom_ini.strftime('%d/%m/%y')}–{dt_custom_fim.strftime('%d/%m/%y')}"
         else:
             lbl_per_exib = periodo
-            serie_i10_c = pd.Series(dtype=float) if (eh_candles_req or periodo == "1 D") else buscar_serie_investidor10_chart(ticker, periodo, ajustada, cot_live=cot_ref_live)
+            if eh_candles_req or periodo == "1 D":
+                serie_i10_c = pd.Series(dtype=float)
+            else:
+                serie_i10_c, diag_i10_graf = buscar_serie_investidor10_chart_com_info(ticker, periodo, ajustada, cot_live=cot_ref_live)
             df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_live=cot_ref_live) if (eh_candles_req or serie_i10_c.empty) else pd.DataFrame()
             if not serie_i10_c.empty:
                 serie = serie_i10_c
+                usou_i10_graf = True
             else:
                 serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
 
@@ -3960,7 +4022,16 @@ def render_grafico_e_tabela_ativo(
                 config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
                 key=f"{key_prefix}_plot_{ticker}",
             )
-            st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
+            fonte_graf_lbl = (
+                "🟢 Fonte dos pontos: Investidor10"
+                if usou_i10_graf
+                else (
+                    f"🟡 Fonte dos pontos: Yahoo Finance (Investidor10: {diag_i10_graf})"
+                    if diag_i10_graf
+                    else "🟡 Fonte dos pontos: Yahoo Finance"
+                )
+            )
+            st.caption(f"💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover. · {fonte_graf_lbl}")
 
         serie_selic_bcb, _ = buscar_historico_selic_bcb()
         with st.container(border=True):

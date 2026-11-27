@@ -840,6 +840,25 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
     return pd.Series(dtype=float)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...]) -> list[str]:
+    rotas: list[str] = []
+    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,140})\1""")
+    for su in script_urls[:6]:
+        try:
+            r = requests.get(su, headers=HEADERS, timeout=4)
+            if r.status_code != 200:
+                continue
+            for _, path in pat.findall(r.text):
+                p_low = path.lower()
+                if any(k in p_low for k in ("cotac", "chart", "quot", "hist", "acao", "stock")):
+                    if path not in rotas:
+                        rotas.append(path)
+        except Exception:
+            continue
+    return rotas
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def buscar_serie_investidor10_chart(
     ticker: str,
@@ -863,37 +882,98 @@ def buscar_serie_investidor10_chart(
 
     dias = mapa_dias[periodo_label]
     adj_str = "true" if ajustada else "false"
+    adj_int = "1" if ajustada else "0"
+    url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
+
     sess = requests.Session()
     sess.headers.update({
         **HEADERS,
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-        "Referer": f"https://investidor10.com.br/acoes/{ticker.lower()}/",
-        "X-Requested-With": "XMLHttpRequest",
+        "Referer": "https://investidor10.com.br/",
     })
 
     cands_urls: list[str] = []
+    csrf_tok = ""
+    tid = ""
     try:
-        resp_pg = sess.get(f"https://investidor10.com.br/acoes/{ticker.lower()}/", timeout=4)
+        resp_pg = sess.get(url_pg, timeout=4)
         if resp_pg.status_code != 200 or "cf-browser-verification" in resp_pg.text:
             return pd.Series(dtype=float)
+
+        m_csrf = re.search(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
+        if m_csrf:
+            csrf_tok = m_csrf.group(1)
+
         m_id = re.search(
-            r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|data-id)\s*[:=]\s*["\']?(\d{1,7})',
+            r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|stock[_-]?id|data-id)\s*[:=]\s*["\']?(\d{1,7})',
             resp_pg.text,
             re.IGNORECASE,
         )
         if m_id:
             tid = m_id.group(1)
-            cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}/real")
-            cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}")
+
+        rotas_desc: list[str] = []
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,140})\1""", resp_pg.text):
+            if any(k in path.lower() for k in ("cotac", "chart", "quot", "hist", "acao", "stock")):
+                rotas_desc.append(path)
+
+        if not rotas_desc:
+            srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
+            local_srcs = []
+            for s in srcs:
+                s_low = s.lower()
+                if any(ig in s_low for ig in ("google", "gtm", "facebook", "clarity", "hotjar", "jquery", "bootstrap", "ads", "analytics")):
+                    continue
+                if s.startswith("/"):
+                    local_srcs.append("https://investidor10.com.br" + s)
+                elif "investidor10.com.br" in s_low:
+                    local_srcs.append(s)
+            if local_srcs:
+                rotas_desc = _descobrir_rotas_chart_i10(tuple(local_srcs))
+
+        for r_tpl in rotas_desc:
+            url_mont = r_tpl if r_tpl.startswith("http") else ("https://investidor10.com.br" + (r_tpl if r_tpl.startswith("/") else "/" + r_tpl))
+            url_mont = re.sub(r"\$\{[^}]*(?:id|ticker)[^}]*\}|\{(?:id|ticker_id|acao_id|company_id)\}", tid or ticker.upper(), url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", str(dias), url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*adj[^}]*\}|\{(?:adjusted|ajustada)\}", adj_str, url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*(?:curr|moeda)[^}]*\}|\{(?:currency|moeda)\}", "real", url_mont, flags=re.IGNORECASE)
+            if "${" not in url_mont and "{" not in url_mont:
+                cands_urls.append(url_mont)
     except Exception:
         return pd.Series(dtype=float)
 
-    cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}")
+    if tid:
+        cands_urls.extend([
+            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}/real",
+            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_int}/real",
+            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}",
+            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}",
+        ])
+    cands_urls.extend([
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}/real",
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}",
+    ])
 
-    for url_c in cands_urls[:2]:
+    api_hdrs = {
+        **HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+        "Referer": url_pg,
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    if csrf_tok:
+        api_hdrs["X-CSRF-TOKEN"] = csrf_tok
+    xsrf_c = sess.cookies.get("XSRF-TOKEN")
+    if xsrf_c:
+        api_hdrs["X-XSRF-TOKEN"] = requests.utils.unquote(xsrf_c)
+
+    vistos_u: set[str] = set()
+    urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
+
+    for url_c in urls_unicas[:4]:
         try:
-            r_c = sess.get(url_c, timeout=4)
+            r_c = sess.get(url_c, headers=api_hdrs, timeout=3.5)
             if r_c.status_code in (401, 403, 429):
                 break
             if r_c.status_code != 200:
@@ -903,7 +983,7 @@ def buscar_serie_investidor10_chart(
             if isinstance(js, list):
                 lista_pts = js
             elif isinstance(js, dict):
-                for k_l in ("real", "data", "prices", "cotacoes", "chart"):
+                for k_l in ("real", "data", "prices", "cotacoes", "chart", "series"):
                     if isinstance(js.get(k_l), list) and js[k_l]:
                         lista_pts = js[k_l]
                         break
@@ -912,21 +992,31 @@ def buscar_serie_investidor10_chart(
 
             datas, vals = [], []
             for pt in lista_pts:
-                if not isinstance(pt, dict):
-                    continue
-                dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp")
-                vl_raw = (
-                    pt.get("price") if pt.get("price") is not None
-                    else (pt.get("value") if pt.get("value") is not None
-                    else (pt.get("close") if pt.get("close") is not None else pt.get("cotacao")))
-                )
+                dt_raw, vl_raw = None, None
+                if isinstance(pt, dict):
+                    dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("x")
+                    vl_raw = (
+                        pt.get("price") if pt.get("price") is not None
+                        else (pt.get("value") if pt.get("value") is not None
+                        else (pt.get("close") if pt.get("close") is not None
+                        else (pt.get("cotacao") if pt.get("cotacao") is not None else pt.get("y"))))
+                    )
+                elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                    dt_raw, vl_raw = pt[0], pt[1]
+
                 if dt_raw is None or vl_raw is None:
                     continue
-                dt_p = pd.to_datetime(dt_raw, dayfirst=bool(re.match(r"^\d{2}/\d{2}/\d{4}", str(dt_raw))), errors="coerce")
+                if isinstance(dt_raw, (int, float)) and dt_raw > 1e11:
+                    dt_p = pd.to_datetime(dt_raw, unit="ms", errors="coerce")
+                elif isinstance(dt_raw, (int, float)) and dt_raw > 1e8:
+                    dt_p = pd.to_datetime(dt_raw, unit="s", errors="coerce")
+                else:
+                    dt_p = pd.to_datetime(dt_raw, dayfirst=bool(re.match(r"^\d{2}/\d{2}/\d{4}", str(dt_raw))), errors="coerce")
                 vl_p = parse_br_num(str(vl_raw)) if (isinstance(vl_raw, str) and "," in vl_raw) else pd.to_numeric(vl_raw, errors="coerce")
                 if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
                     datas.append(dt_p.tz_localize(None) if getattr(dt_p, "tzinfo", None) else dt_p)
                     vals.append(float(vl_p))
+
             if len(datas) >= 3:
                 s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
                 s_out = s_out[~s_out.index.duplicated(keep="last")]
@@ -3700,10 +3790,14 @@ def render_grafico_e_tabela_ativo(
                         )
 
             margem_y = (y_max - y_min) * 0.06 if y_max > y_min else max(0.5, abs(y_max) * 0.05)
-            y_rng_lo = (y_min - (margem_y * (2.4 if eh_candles else 0.7)))
-            if not modo_comparar:
-                y_rng_lo = max(0.0, y_rng_lo)
-            y_rng_hi = y_max + (margem_y * 0.7)
+            if not modo_comparar and not eh_candles and y_min > 0:
+                y_rng_lo = max(0.0, round(y_min * 0.98, 2))
+                y_rng_hi = round(y_max * 1.02, 2)
+            else:
+                y_rng_lo = y_min - (margem_y * (2.4 if eh_candles else 0.7))
+                if not modo_comparar:
+                    y_rng_lo = max(0.0, y_rng_lo)
+                y_rng_hi = y_max + (margem_y * 0.7)
 
             yaxis_cfg = dict(
                 side="left",
@@ -3725,7 +3819,7 @@ def render_grafico_e_tabela_ativo(
                 spikedash="dash",
             )
             if not modo_comparar and not eh_candles:
-                ticks_y = _calc_ticks_y_i10(y_min, y_max)
+                ticks_y = _calc_ticks_y_i10(y_rng_lo, y_rng_hi)
                 yaxis_cfg["tickmode"] = "array"
                 yaxis_cfg["tickvals"] = ticks_y
                 yaxis_cfg["ticktext"] = [f"{simb_moeda} {fmt_num(tv)}" for tv in ticks_y]
@@ -3741,9 +3835,39 @@ def render_grafico_e_tabela_ativo(
                 )
 
             tickfmt_x = "%H:%M" if (not usar_custom_range and periodo == "1 D") else ("%d/%m %H:%M" if (not usar_custom_range and periodo == "7 D") else "%d/%m/%y")
+            xaxis_cfg = dict(
+                showgrid=False,
+                zeroline=False,
+                showline=True,
+                linecolor="rgba(148,163,184,0.35)",
+                linewidth=1,
+                ticks="outside",
+                ticklen=4,
+                tickcolor="rgba(148,163,184,0.35)",
+                tickfont=dict(size=11),
+                tickformat=tickfmt_x,
+                nticks=12,
+                range=[serie.index[0], serie.index[-1]],
+                rangeslider=dict(visible=False),
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
+            )
+            if len(serie.index) >= 8 and (usar_custom_range or periodo not in ("1 D", "7 D")):
+                n_pts_x = len(serie.index)
+                idxs_x = sorted({round(i * (n_pts_x - 1) / 11.0) for i in range(12)})
+                if len(idxs_x) >= 3 and (idxs_x[-1] - idxs_x[-2]) < max(2, n_pts_x // 20):
+                    idxs_x.pop(-2)
+                xaxis_cfg["tickmode"] = "array"
+                xaxis_cfg["tickvals"] = [serie.index[idx_x] for idx_x in idxs_x]
+                xaxis_cfg["ticktext"] = [serie.index[idx_x].strftime("%d/%m/%y") for idx_x in idxs_x]
+
             layout_kw = dict(
                 height=370 if eh_candles else 345,
-                margin=dict(l=76, r=66, t=24 if modo_comparar else 14, b=34),
+                margin=dict(l=76, r=66, t=24 if modo_comparar else 14, b=42),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 separators=",.",
@@ -3751,26 +3875,7 @@ def render_grafico_e_tabela_ativo(
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
                 hovermode="x unified",
                 dragmode="pan",
-                xaxis=dict(
-                    showgrid=False,
-                    zeroline=False,
-                    showline=True,
-                    linecolor="rgba(148,163,184,0.35)",
-                    linewidth=1,
-                    ticks="outside",
-                    ticklen=4,
-                    tickcolor="rgba(148,163,184,0.35)",
-                    tickfont=dict(size=11),
-                    tickformat=tickfmt_x,
-                    nticks=13,
-                    rangeslider=dict(visible=False),
-                    showspikes=True,
-                    spikemode="across",
-                    spikesnap="cursor",
-                    spikethickness=1,
-                    spikecolor="rgba(148,163,184,0.55)",
-                    spikedash="dash",
-                ),
+                xaxis=xaxis_cfg,
                 yaxis=yaxis_cfg,
                 annotations=annots,
             )

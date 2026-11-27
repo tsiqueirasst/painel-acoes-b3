@@ -3414,46 +3414,56 @@ def render_grafico_e_tabela_ativo(
         st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
         serie_selic_bcb, _ = buscar_historico_selic_bcb()
-        serie_max = buscar_serie_max_ajustada(ticker)
-        if not serie_max.empty:
-            with st.container(border=True):
-                s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
-                with s1:
-                    valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
-                with s2:
-                    janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
+        with st.container(border=True):
+            s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
+            with s1:
+                valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
+            with s2:
+                janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
 
-                deltas = {
-                    "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
-                    "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
-                    "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
-                }
-                data_alvo = serie_max.index.max() - deltas[janela_sim]
-                recorte = serie_max[serie_max.index >= data_alvo]
-                dt_base_ts = (recorte.index[0] if not recorte.empty else serie_max.index[0]).normalize()
-                dt_fim_ts = serie_max.index[-1].normalize()
+            mapa_jan_per = {
+                "1 mês": "30 D", "6 meses": "6 M", "1 ano": "1 A",
+                "5 anos": "5 A", "10 anos": "10 A", "15 anos": "15 A",
+            }
+            serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+            if serie_sim.empty:
+                serie_max_fb = buscar_serie_max_ajustada(ticker)
+                if not serie_max_fb.empty:
+                    deltas = {
+                        "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
+                        "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
+                        "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
+                    }
+                    serie_sim = serie_max_fb[serie_max_fb.index >= (serie_max_fb.index.max() - deltas[janela_sim])]
+
+            if not serie_sim.empty:
+                dt_base_ts = serie_sim.index[0].normalize()
+                dt_fim_ts = serie_sim.index[-1].normalize()
                 dias_corridos_sim = max(1, int((dt_fim_ts - dt_base_ts).days))
                 data_efetiva = dt_base_ts.strftime("%d/%m/%Y")
                 data_final_str = dt_fim_ts.strftime("%d/%m/%Y")
 
-                p_base = float(recorte.iloc[0]) if not recorte.empty else float(serie_max.iloc[0])
-                p_hoje = float(serie_max.iloc[-1])
+                p_base = float(serie_sim.iloc[0])
+                p_hoje = float(serie_sim.iloc[-1])
                 valor_acao_bruto = valor_inv * (p_hoje / p_base) if p_base > 0 else valor_inv
                 ganho_acao = valor_acao_bruto - valor_inv
                 if ganho_acao > 0.0 and valor_acao_bruto > 20_000.0:
                     ir_acao = ganho_acao * 0.15
                     valor_acao_liq = valor_acao_bruto - ir_acao
-                    nota_ir_acao = f"IR 15% s/ ganho: -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês) · Bruto: R$ {fmt_num(valor_acao_bruto)}"
+                    nota_ir_acao = f"IR (15% s/ ganho): -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês)"
                 elif ganho_acao > 0.0:
                     ir_acao = 0.0
                     valor_acao_liq = valor_acao_bruto
-                    nota_ir_acao = f"IR: Isento (venda ≤ R$ 20k/mês) · Bruto: R$ {fmt_num(valor_acao_bruto)}"
+                    nota_ir_acao = "IR: Isento (venda ≤ R$ 20k/mês) · Reinvestindo dividendos"
                 else:
                     ir_acao = 0.0
                     valor_acao_liq = valor_acao_bruto
-                    nota_ir_acao = "IR: Isento (sem lucro tributável no período)"
+                    nota_ir_acao = "IR: Isento (sem lucro tributável) · Reinvestindo dividendos"
 
                 ret_acao_pct = ((valor_acao_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                ret_acao_bruto_pct = ((valor_acao_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                s_acao_liq = f"{'+' if ret_acao_pct >= 0 else ''}{fmt_num(ret_acao_pct, 2)}%"
+                s_acao_bruto = f"{'+' if ret_acao_bruto_pct >= 0 else ''}{fmt_num(ret_acao_bruto_pct, 2)}%"
                 cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
 
                 valor_selic_bruto = calcular_selic_calculadora_cidadao(data_efetiva, data_final_str, valor_inv)
@@ -3470,37 +3480,44 @@ def render_grafico_e_tabela_ativo(
                     custodia_b3 = excedente_b3 * (((1.0 + 0.002) ** (dias_corridos_sim / 365.0)) - 1.0) if excedente_b3 > 0.0 else 0.0
                     valor_selic_liq = max(0.0, valor_selic_bruto - imp_selic - custodia_b3)
                     ret_selic_pct = ((valor_selic_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                    ret_selic_bruto_pct = ((valor_selic_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                    s_selic_liq = f"{'+' if ret_selic_pct >= 0 else ''}{fmt_num(ret_selic_pct, 2)}%"
+                    s_selic_bruto = f"{'+' if ret_selic_bruto_pct >= 0 else ''}{fmt_num(ret_selic_bruto_pct, 2)}%"
 
                     partes_enc = []
                     if iof_selic > 0.0:
                         partes_enc.append(f"IOF ({fmt_num(aliq_iof_selic, 0)}%): -R$ {fmt_num(iof_selic)}")
                     partes_enc.append(f"IR ({fmt_num(aliq_ir_selic, 1)}%): -R$ {fmt_num(ir_selic)}")
                     if custodia_b3 > 0.0:
-                        partes_enc.append(f"B3: -R$ {fmt_num(custodia_b3)}")
+                        partes_enc.append(f"Custódia B3: -R$ {fmt_num(custodia_b3)}")
                     else:
-                        partes_enc.append("B3: Isento (≤R$ 10k)")
-                    txt_imp_selic = f"Bruto Calc. Cidadão: R$ {fmt_num(valor_selic_bruto)} · " + " · ".join(partes_enc)
+                        partes_enc.append("Custódia B3: Isento (≤ R$ 10k)")
+                    txt_imp_selic = " · ".join(partes_enc)
 
                     card_selic_html = (
                         "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
                         "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                        f"🏛️ No Tesouro Selic (líquido · {data_efetiva} → {data_final_str})"
+                        f"🏛️ No Tesouro Selic ({data_efetiva} → {data_final_str})"
                         "</div>"
                         "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
                         f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_selic_liq)}</strong>"
-                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({ret_selic_pct:+.2f}%)</span>"
+                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({s_selic_liq} líq.)</span>"
                         "</div>"
-                        f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_selic}</div>"
+                        "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
+                        f"Calc. Cidadão (Bruto): R$ {fmt_num(valor_selic_bruto)} ({s_selic_bruto})"
+                        "</div>"
+                        f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_selic}</div>"
                         "</div>"
                     )
                     diff_sim = valor_acao_liq - valor_selic_liq
                     diff_pp = ret_acao_pct - ret_selic_pct
+                    s_diff_pp = f"{'+' if diff_pp >= 0 else ''}{fmt_num(diff_pp, 2)} p.p."
                     if diff_sim >= 0.0:
                         resumo_sim_html = (
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
                             f"border-left:3px solid #22c55e; font-size:12.5px;'>"
-                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({diff_pp:+.2f} p.p.) a mais que o Tesouro Selic (Calculadora do Cidadão) "
+                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({s_diff_pp}) a mais que o Tesouro Selic (Calculadora do Cidadão) "
                             f"(já descontando impostos e custódia nos dois casos)."
                             f"</div>"
                         )
@@ -3508,15 +3525,15 @@ def render_grafico_e_tabela_ativo(
                         resumo_sim_html = (
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
                             f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
-                            f"🏛️ O <strong>Tesouro Selic (Calculadora do Cidadão)</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({abs(diff_pp):.2f} p.p.) a mais que {ticker} no período "
+                            f"🏛️ O <strong>Tesouro Selic (Calculadora do Cidadão)</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({fmt_num(abs(diff_pp), 2)} p.p.) a mais que {ticker} no período "
                             f"(já descontando impostos e custódia nos dois casos)."
                             f"</div>"
                         )
                 else:
                     card_selic_html = (
                         "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
-                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏛️ No Tesouro Selic (líquido)</div>"
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
+                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏛️ No Tesouro Selic</div>"
                         "<div style='font-size:13px; opacity:0.75;'>Indisponível no momento</div>"
                         "<div style='font-size:11px; opacity:0.7;'>API do Banco Central temporariamente indisponível.</div>"
                         "</div>"
@@ -3526,15 +3543,18 @@ def render_grafico_e_tabela_ativo(
                 st.markdown(
                     "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; align-items:stretch; margin-top:6px;'>"
                     "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
-                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
                     "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                    f"📈 Em {ticker} (líquido · {data_efetiva} → {data_final_str})"
+                    f"📈 Em {ticker} ({data_efetiva} → {data_final_str})"
                     "</div>"
                     "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
                     f"<strong style='color:{cor_sim}; font-size:21px;'>R$ {fmt_num(valor_acao_liq)}</strong>"
-                    f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({ret_acao_pct:+.2f}%)</span>"
+                    f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({s_acao_liq} líq.)</span>"
                     "</div>"
-                    f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{nota_ir_acao} · Reinvestindo dividendos</div>"
+                    "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
+                    f"Bruto (c/ dividendos): R$ {fmt_num(valor_acao_bruto)} ({s_acao_bruto})"
+                    "</div>"
+                    f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{nota_ir_acao}</div>"
                     "</div>"
                     f"{card_selic_html}"
                     "</div>"

@@ -1810,7 +1810,7 @@ def render_widget_ibov_google():
         st.plotly_chart(
             fig_ib,
             use_container_width=True,
-            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
             key="ibov_google_chart",
         )
 
@@ -3115,7 +3115,7 @@ def render_grafico_e_tabela_ativo(
         st.plotly_chart(
             fig,
             use_container_width=True,
-            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
             key=f"{key_prefix}_plot_{ticker}",
         )
         st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
@@ -5641,7 +5641,7 @@ with tab2:
         st.plotly_chart(
             fig_comp,
             use_container_width=True,
-            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
         )
         st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
@@ -5847,7 +5847,7 @@ with tab3:
                     st.plotly_chart(
                         fig_ev,
                         use_container_width=True,
-                        config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["lasso2d", "select2d"]},
+                        config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
                     )
                     st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%).")
 
@@ -6213,6 +6213,7 @@ _js_chart_measure = """
 (function() {
     const pWin = __USE_PARENT__ ? window.parent : window;
     const pDoc = pWin.document;
+    const SVG_NS = "http://www.w3.org/2000/svg";
 
     function fmtNumBr(v, dec) {
         if (!Number.isFinite(v)) return "—";
@@ -6223,7 +6224,7 @@ _js_chart_measure = """
         if (!gd || !gd._fullLayout) return false;
         const xa = gd._fullLayout.xaxis;
         const ya = gd._fullLayout.yaxis;
-        return !!(xa && ya && typeof xa.p2c === "function" && typeof ya.p2c === "function" && typeof xa.c2p === "function" && typeof ya.c2p === "function");
+        return !!(xa && ya && (typeof xa.c2p === "function" || Array.isArray(xa.range)));
     }
 
     function getDragEl(gd) {
@@ -6241,6 +6242,38 @@ _js_chart_measure = """
         if (ax.type === "log") return Math.pow(10, c);
         if (typeof ax.c2d === "function") return ax.c2d(c);
         return c;
+    }
+
+    function toPxX(ax, c, width) {
+        if (typeof ax.c2p === "function") return ax.c2p(c);
+        const r0 = axisD2C(ax, ax.range[0]);
+        const r1 = axisD2C(ax, ax.range[1]);
+        const len = ax._length || width || 1;
+        return ((c - r0) / (r1 - r0 || 1)) * len;
+    }
+
+    function toPxY(ax, c, height) {
+        if (typeof ax.c2p === "function") return ax.c2p(c);
+        const r0 = axisD2C(ax, ax.range[0]);
+        const r1 = axisD2C(ax, ax.range[1]);
+        const len = ax._length || height || 1;
+        return len - ((c - r0) / (r1 - r0 || 1)) * len;
+    }
+
+    function toCoordX(ax, px, width) {
+        if (typeof ax.p2c === "function") return ax.p2c(px);
+        const r0 = axisD2C(ax, ax.range[0]);
+        const r1 = axisD2C(ax, ax.range[1]);
+        const len = ax._length || width || 1;
+        return r0 + (px / len) * (r1 - r0);
+    }
+
+    function toCoordY(ax, py, height) {
+        if (typeof ax.p2c === "function") return ax.p2c(py);
+        const r0 = axisD2C(ax, ax.range[0]);
+        const r1 = axisD2C(ax, ax.range[1]);
+        const len = ax._length || height || 1;
+        return r1 - (py / len) * (r1 - r0);
     }
 
     function formatXDisplay(ax, pt) {
@@ -6274,7 +6307,7 @@ _js_chart_measure = """
         const calcArr = gd.calcdata || [];
         const dataArr = gd.data || [];
         const visibleCnt = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly" && t.hoverinfo !== "skip"; }).length;
-        const maxDy = visibleCnt <= 1 ? 34 : 20;
+        const maxDy = visibleCnt <= 1 ? 36 : 22;
 
         for (let ti = 0; ti < calcArr.length; ti++) {
             const tr = dataArr[ti];
@@ -6286,12 +6319,12 @@ _js_chart_measure = """
             for (let i = 0; i < pts.length; i++) {
                 const cpt = pts[i];
                 if (!cpt) continue;
-                let ptCx = cpt.x;
-                let ptCy = (cpt.c !== undefined && Number.isFinite(cpt.c)) ? cpt.c : cpt.y;
+                const ptCx = cpt.x;
+                const ptCy = Number.isFinite(cpt.close) ? cpt.close : (Number.isFinite(cpt.c) ? cpt.c : cpt.y);
                 if (!Number.isFinite(ptCx) || !Number.isFinite(ptCy)) continue;
 
-                const ptPx = xa.c2p(ptCx);
-                const ptPy = ya.c2p(ptCy);
+                const ptPx = toPxX(xa, ptCx, rect.width);
+                const ptPy = toPxY(ya, ptCy, rect.height);
                 const dx = ptPx - px;
                 const dy = ptPy - py;
                 if (Math.abs(dy) <= maxDy && Math.abs(dx) <= 24) {
@@ -6315,8 +6348,8 @@ _js_chart_measure = """
 
         if (bestPt) return bestPt;
 
-        const cx = xa.p2c(px);
-        const cy = ya.p2c(py);
+        const cx = toCoordX(xa, px, rect.width);
+        const cy = toCoordY(ya, py, rect.height);
         const valY = Number(axisC2D(ya, cy));
         return {
             cx: cx,
@@ -6327,6 +6360,16 @@ _js_chart_measure = """
             traceIdx: null,
             snapped: false
         };
+    }
+
+    function svgEl(tag, attrs) {
+        const el = pDoc.createElementNS(SVG_NS, tag);
+        if (attrs) {
+            Object.keys(attrs).forEach(function(k) {
+                el.setAttribute(k, String(attrs[k]));
+            });
+        }
+        return el;
     }
 
     function updateToolbarBtn(gd) {
@@ -6349,7 +6392,7 @@ _js_chart_measure = """
         gd.__measureState = null;
         gd.__measureArmed = false;
         const ov = gd.querySelector(".tv-measure-overlay");
-        if (ov) ov.innerHTML = "";
+        if (ov) ov.replaceChildren();
         if (pWin.__activeMeasuringGd === gd) {
             pWin.__activeMeasuringGd = null;
         }
@@ -6362,7 +6405,7 @@ _js_chart_measure = """
         const stM = gd.__measureState;
         let ov = gd.querySelector(".tv-measure-overlay");
         if (!stM || !stM.p1 || !stM.p2) {
-            if (ov) ov.innerHTML = "";
+            if (ov) ov.replaceChildren();
             return;
         }
         if (!ov) {
@@ -6384,10 +6427,10 @@ _js_chart_measure = """
         const xa = gd._fullLayout.xaxis;
         const ya = gd._fullLayout.yaxis;
 
-        const px1 = Math.max(0, Math.min(dragRect.width, xa.c2p(stM.p1.cx)));
-        const py1 = Math.max(0, Math.min(dragRect.height, ya.c2p(stM.p1.cy)));
-        const px2 = Math.max(0, Math.min(dragRect.width, xa.c2p(stM.p2.cx)));
-        const py2 = Math.max(0, Math.min(dragRect.height, ya.c2p(stM.p2.cy)));
+        const px1 = Math.max(0, Math.min(dragRect.width, toPxX(xa, stM.p1.cx, dragRect.width)));
+        const py1 = Math.max(0, Math.min(dragRect.height, toPxY(ya, stM.p1.cy, dragRect.height)));
+        const px2 = Math.max(0, Math.min(dragRect.width, toPxX(xa, stM.p2.cx, dragRect.width)));
+        const py2 = Math.max(0, Math.min(dragRect.height, toPxY(ya, stM.p2.cy, dragRect.height)));
 
         const x1 = offL + px1;
         const y1 = offT + py1;
@@ -6415,7 +6458,7 @@ _js_chart_measure = """
 
         const ehAlta = diff >= 0;
         const corMain = ehAlta ? "#16a34a" : "#e11d48";
-        const corStroke = ehAlta ? "rgba(34, 197, 94, 0.88)" : "rgba(244, 63, 94, 0.88)";
+        const corStroke = ehAlta ? "rgba(34, 197, 94, 0.90)" : "rgba(244, 63, 94, 0.90)";
         const corFill = ehAlta ? "rgba(34, 197, 94, 0.18)" : "rgba(244, 63, 94, 0.18)";
         const sinalD = diff > 0 ? "+" : "";
         const sinalP = pct > 0 ? "+" : "";
@@ -6445,62 +6488,107 @@ _js_chart_measure = """
             spanTxt = xLbl1 + " → " + xLbl2;
         }
 
+        const svg = svgEl("svg", { class: "tv-measure-svg" });
+        svg.appendChild(svgEl("rect", {
+            x: rx, y: ry, width: rw, height: rh,
+            fill: corFill, stroke: corStroke, "stroke-width": "1.2", "stroke-dasharray": "4 3"
+        }));
+        svg.appendChild(svgEl("line", {
+            x1: offL, y1: y1, x2: offL + dragRect.width, y2: y1,
+            stroke: "rgba(148,163,184,0.45)", "stroke-width": "1", "stroke-dasharray": "3 3"
+        }));
+        svg.appendChild(svgEl("line", {
+            x1: offL, y1: y2, x2: offL + dragRect.width, y2: y2,
+            stroke: corStroke, "stroke-width": "1", "stroke-dasharray": "3 3"
+        }));
+
         const midX = rx + rw / 2;
         const midY = ry + rh / 2;
-        const arrowV = (rh > 14)
-            ? `<line x1="${midX}" y1="${y1}" x2="${midX}" y2="${y2}" stroke="${corStroke}" stroke-width="1.6" />`
-            : "";
-        const arrowH = (rw > 14)
-            ? `<line x1="${x1}" y1="${midY}" x2="${x2}" y2="${midY}" stroke="${corStroke}" stroke-width="1.6" />`
-            : "";
-
-        let headV = "";
         if (rh > 14) {
+            svg.appendChild(svgEl("line", {
+                x1: midX, y1: y1, x2: midX, y2: y2,
+                stroke: corStroke, "stroke-width": "1.6"
+            }));
             const dirV = y2 >= y1 ? 1 : -1;
-            headV = `<polygon points="${midX},${y2} ${midX - 5},${y2 - 7 * dirV} ${midX + 5},${y2 - 7 * dirV}" fill="${corStroke}" />`;
+            svg.appendChild(svgEl("polygon", {
+                points: midX + "," + y2 + " " + (midX - 5) + "," + (y2 - 7 * dirV) + " " + (midX + 5) + "," + (y2 - 7 * dirV),
+                fill: corStroke
+            }));
         }
-        let headH = "";
         if (rw > 14) {
+            svg.appendChild(svgEl("line", {
+                x1: x1, y1: midY, x2: x2, y2: midY,
+                stroke: corStroke, "stroke-width": "1.6"
+            }));
             const dirH = x2 >= x1 ? 1 : -1;
-            headH = `<polygon points="${x2},${midY} ${x2 - 7 * dirH},${midY - 5} ${x2 - 7 * dirH},${midY + 5}" fill="${corStroke}" />`;
+            svg.appendChild(svgEl("polygon", {
+                points: x2 + "," + midY + " " + (x2 - 7 * dirH) + "," + (midY - 5) + " " + (x2 - 7 * dirH) + "," + (midY + 5),
+                fill: corStroke
+            }));
         }
 
-        const svgHtml = `
-            <svg class="tv-measure-svg">
-                <rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="${corFill}" stroke="${corStroke}" stroke-width="1.2" stroke-dasharray="4 3" />
-                <line x1="${offL}" y1="${y1}" x2="${offL + dragRect.width}" y2="${y1}" stroke="rgba(148,163,184,0.45)" stroke-width="1" stroke-dasharray="3 3" />
-                <line x1="${offL}" y1="${y2}" x2="${offL + dragRect.width}" y2="${y2}" stroke="${corStroke}" stroke-width="1" stroke-dasharray="3 3" />
-                ${arrowV}${headV}${arrowH}${headH}
-                <circle cx="${x1}" cy="${y1}" r="4.5" fill="#3b82f6" stroke="#ffffff" stroke-width="1.5" />
-                <circle cx="${x2}" cy="${y2}" r="4.8" fill="${corMain}" stroke="#ffffff" stroke-width="1.5" />
-            </svg>
-        `;
+        svg.appendChild(svgEl("circle", {
+            cx: x1, cy: y1, r: "4.5", fill: "#3b82f6", stroke: "#ffffff", "stroke-width": "1.5"
+        }));
+        svg.appendChild(svgEl("circle", {
+            cx: x2, cy: y2, r: "4.8", fill: corMain, stroke: "#ffffff", "stroke-width": "1.5"
+        }));
 
         const tagSideX = ya.side === "right" ? (offL + dragRect.width + 4) : Math.max(2, offL - 66);
-        const tagY1 = `<div class="tv-measure-tag" style="left:${tagSideX}px; top:${Math.max(0, y1 - 10)}px; background:#2563eb;">${v1Fmt}</div>`;
-        const tagY2 = `<div class="tv-measure-tag" style="left:${tagSideX}px; top:${Math.max(0, y2 - 10)}px; background:${corMain};">${v2Fmt}</div>`;
+        const tag1 = pDoc.createElement("div");
+        tag1.className = "tv-measure-tag";
+        tag1.style.left = tagSideX + "px";
+        tag1.style.top = Math.max(0, y1 - 10) + "px";
+        tag1.style.background = "#2563eb";
+        tag1.textContent = v1Fmt;
+
+        const tag2 = pDoc.createElement("div");
+        tag2.className = "tv-measure-tag";
+        tag2.style.left = tagSideX + "px";
+        tag2.style.top = Math.max(0, y2 - 10) + "px";
+        tag2.style.background = corMain;
+        tag2.textContent = v2Fmt;
 
         const cardWEst = 240;
         const cardLeft = Math.max(offL + 4, Math.min(offL + dragRect.width - cardWEst, midX - 110));
-        const abaixo = (ry + rh + 66 <= offT + dragRect.height + 10);
-        const cardTop = abaixo ? (ry + rh + 8) : Math.max(4, ry - 64);
+        const abaixo = (ry + rh + 64 <= offT + dragRect.height + 10);
+        const cardTop = abaixo ? (ry + rh + 8) : Math.max(offT + 4, ry - 64);
 
-        const hintSub = stM.state === "measuring"
-            ? "<div style='font-size:10.5px; opacity:0.85;'>Solte o arraste ou clique no ponto final</div>"
-            : (spanTxt ? `<div style='font-size:10.5px; opacity:0.9;'>${spanTxt}</div>` : "");
+        const card = pDoc.createElement("div");
+        card.className = "tv-measure-card";
+        card.style.left = cardLeft + "px";
+        card.style.top = cardTop + "px";
+        card.style.background = corMain;
 
-        const cardHtml = `
-            <div class="tv-measure-card" style="left:${cardLeft}px; top:${cardTop}px; background:${corMain};">
-                <div class="tv-measure-card-head">
-                    <span>${diffFmt}</span>
-                    <span class="tv-measure-close" title="Fechar medição (Esc)">✕</span>
-                </div>
-                <div style="font-size:11px; opacity:0.95; font-weight:500;">${v1Fmt} → ${v2Fmt}</div>
-                ${hintSub}
-            </div>
-        `;
+        const head = pDoc.createElement("div");
+        head.className = "tv-measure-card-head";
+        const spanDiff = pDoc.createElement("span");
+        spanDiff.textContent = diffFmt;
+        const closeBtn = pDoc.createElement("span");
+        closeBtn.className = "tv-measure-close";
+        closeBtn.title = "Fechar medição (Esc)";
+        closeBtn.textContent = "✕";
+        head.appendChild(spanDiff);
+        head.appendChild(closeBtn);
 
-        ov.innerHTML = svgHtml + tagY1 + tagY2 + cardHtml;
+        const valsDiv = pDoc.createElement("div");
+        valsDiv.style.fontSize = "11px";
+        valsDiv.style.opacity = "0.95";
+        valsDiv.style.fontWeight = "500";
+        valsDiv.textContent = v1Fmt + " → " + v2Fmt;
+
+        const subDiv = pDoc.createElement("div");
+        subDiv.style.fontSize = "10.5px";
+        subDiv.style.opacity = "0.9";
+        subDiv.textContent = stM.state === "measuring"
+            ? "Solte o arraste ou clique no ponto final"
+            : spanTxt;
+
+        card.appendChild(head);
+        card.appendChild(valsDiv);
+        if (subDiv.textContent) card.appendChild(subDiv);
+
+        ov.replaceChildren(svg, tag1, tag2, card);
     }
 
     function attachPlot(gd) {
@@ -6519,7 +6607,10 @@ _js_chart_measure = """
         gd.dataset.measureReady = "1";
         if (typeof gd.on === "function") {
             gd.on("plotly_relayout", function() { renderMeasure(gd); });
-            gd.on("plotly_afterplot", function() { renderMeasure(gd); });
+            gd.on("plotly_afterplot", function() {
+                attachPlot(gd);
+                renderMeasure(gd);
+            });
         }
     }
 
@@ -6541,24 +6632,33 @@ _js_chart_measure = """
         pWin.__chartMeasureObserver.observe(pDoc.body, { childList: true, subtree: true });
     }
 
-    if (!pWin.__chartMeasureAttached) {
-        pWin.__chartMeasureAttached = true;
+    if (!pWin.__chartMeasureAttachedV2) {
+        pWin.__chartMeasureAttachedV2 = true;
 
-        pDoc.addEventListener("pointerdown", function(e) {
+        function blockEvent(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === "function") {
+                e.stopImmediatePropagation();
+            }
+        }
+
+        function onDownEvent(e) {
             if (e.button !== 0) return;
 
             const pillBtn = e.target && e.target.closest ? e.target.closest(".tv-measure-pill-btn") : null;
             if (pillBtn) {
-                e.preventDefault();
-                e.stopPropagation();
-                const gdP = pillBtn.closest(".js-plotly-plot");
-                if (gdP) {
-                    if (gdP.__measureArmed || (gdP.__measureState && gdP.__measureState.state === "measuring")) {
-                        clearMeasure(gdP);
-                    } else {
-                        clearMeasure(gdP);
-                        gdP.__measureArmed = true;
-                        updateToolbarBtn(gdP);
+                blockEvent(e);
+                if (e.type === "pointerdown") {
+                    const gdP = pillBtn.closest(".js-plotly-plot");
+                    if (gdP) {
+                        if (gdP.__measureArmed || (gdP.__measureState && gdP.__measureState.state === "measuring")) {
+                            clearMeasure(gdP);
+                        } else {
+                            clearMeasure(gdP);
+                            gdP.__measureArmed = true;
+                            updateToolbarBtn(gdP);
+                        }
                     }
                 }
                 return;
@@ -6566,78 +6666,31 @@ _js_chart_measure = """
 
             const closeBtn = e.target && e.target.closest ? e.target.closest(".tv-measure-close") : null;
             if (closeBtn) {
-                e.preventDefault();
-                e.stopPropagation();
-                clearMeasure(closeBtn.closest(".js-plotly-plot"));
+                blockEvent(e);
+                if (e.type === "pointerdown") {
+                    clearMeasure(closeBtn.closest(".js-plotly-plot"));
+                }
                 return;
             }
 
             const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
-            if (!gd || !isCartesianPlot(gd)) return;
+            if (!gd) return;
+
+            if (e.shiftKey) {
+                blockEvent(e);
+            }
+            if (!isCartesianPlot(gd)) return;
             attachPlot(gd);
 
             const dragEl = getDragEl(gd);
             const rect = dragEl.getBoundingClientRect();
-            const dentro = e.clientX >= rect.left - 4 && e.clientX <= rect.right + 4 && e.clientY >= rect.top - 4 && e.clientY <= rect.bottom + 4;
+            const dentro = e.clientX >= rect.left - 6 && e.clientX <= rect.right + 6 && e.clientY >= rect.top - 6 && e.clientY <= rect.bottom + 6;
             if (!dentro) return;
 
             if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd === gd && gd.__measureState && gd.__measureState.state === "measuring") {
-                e.preventDefault();
-                e.stopPropagation();
-                pWin.__suppressPlotClickUntil = Date.now() + 350;
-                gd.__measureState.p2 = pointFromEvent(gd, e);
-                gd.__measureState.state = "locked";
-                pWin.__activeMeasuringGd = null;
-                renderMeasure(gd);
-                return;
-            }
-
-            if (e.shiftKey || gd.__measureArmed) {
-                e.preventDefault();
-                e.stopPropagation();
-                gd.__measureArmed = false;
-                pWin.__suppressPlotClickUntil = Date.now() + 350;
-                if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd !== gd) {
-                    clearMeasure(pWin.__activeMeasuringGd);
-                }
-                const p1 = pointFromEvent(gd, e);
-                gd.__measureState = {
-                    state: "measuring",
-                    p1: p1,
-                    p2: p1,
-                    startX: e.clientX,
-                    startY: e.clientY
-                };
-                pWin.__activeMeasuringGd = gd;
-                renderMeasure(gd);
-                return;
-            }
-
-            if (gd.__measureState && gd.__measureState.state === "locked") {
-                const insideCard = e.target && e.target.closest ? e.target.closest(".tv-measure-card") : null;
-                if (!insideCard) {
-                    gd.__pendingClearStart = { gd: gd, x: e.clientX, y: e.clientY };
-                }
-            }
-        }, true);
-
-        pDoc.addEventListener("pointermove", function(e) {
-            const gd = pWin.__activeMeasuringGd;
-            if (!gd || !gd.__measureState || gd.__measureState.state !== "measuring") return;
-            gd.__measureState.p2 = pointFromEvent(gd, e);
-            renderMeasure(gd);
-        }, true);
-
-        pDoc.addEventListener("pointerup", function(e) {
-            if (e.button !== 0) return;
-
-            const gd = pWin.__activeMeasuringGd;
-            if (gd && gd.__measureState && gd.__measureState.state === "measuring") {
-                const dist = Math.hypot(e.clientX - gd.__measureState.startX, e.clientY - gd.__measureState.startY);
-                if (dist >= 8) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    pWin.__suppressPlotClickUntil = Date.now() + 350;
+                blockEvent(e);
+                if (e.type === "pointerdown") {
+                    pWin.__suppressPlotClickUntil = Date.now() + 400;
                     gd.__measureState.p2 = pointFromEvent(gd, e);
                     gd.__measureState.state = "locked";
                     pWin.__activeMeasuringGd = null;
@@ -6646,39 +6699,99 @@ _js_chart_measure = """
                 return;
             }
 
-            if (gd === undefined || !gd) {
-                pDoc.querySelectorAll(".js-plotly-plot").forEach(function(plotEl) {
-                    if (plotEl.__pendingClearStart) {
-                        const infoC = plotEl.__pendingClearStart;
-                        plotEl.__pendingClearStart = null;
-                        if (Math.hypot(e.clientX - infoC.x, e.clientY - infoC.y) < 6) {
-                            clearMeasure(plotEl);
-                        }
+            if (e.shiftKey || gd.__measureArmed) {
+                blockEvent(e);
+                if (e.type === "pointerdown") {
+                    gd.__measureArmed = false;
+                    pWin.__suppressPlotClickUntil = Date.now() + 400;
+                    if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd !== gd) {
+                        clearMeasure(pWin.__activeMeasuringGd);
                     }
-                });
+                    const p1 = pointFromEvent(gd, e);
+                    gd.__measureState = {
+                        state: "measuring",
+                        p1: p1,
+                        p2: p1,
+                        startX: e.clientX,
+                        startY: e.clientY
+                    };
+                    pWin.__activeMeasuringGd = gd;
+                    renderMeasure(gd);
+                }
+                return;
+            }
+
+            if (e.type === "pointerdown" && gd.__measureState && gd.__measureState.state === "locked") {
+                const insideCard = e.target && e.target.closest ? e.target.closest(".tv-measure-card") : null;
+                if (!insideCard) {
+                    gd.__pendingClearStart = { x: e.clientX, y: e.clientY };
+                }
+            }
+        }
+
+        pWin.addEventListener("pointerdown", onDownEvent, true);
+        pWin.addEventListener("mousedown", onDownEvent, true);
+
+        pWin.addEventListener("pointermove", function(e) {
+            const gd = pWin.__activeMeasuringGd;
+            if (!gd || !gd.__measureState || gd.__measureState.state !== "measuring") return;
+            blockEvent(e);
+            gd.__measureState.p2 = pointFromEvent(gd, e);
+            renderMeasure(gd);
+        }, true);
+
+        pWin.addEventListener("mousemove", function(e) {
+            const gd = pWin.__activeMeasuringGd;
+            if (gd && gd.__measureState && gd.__measureState.state === "measuring") {
+                blockEvent(e);
             }
         }, true);
 
-        pDoc.addEventListener("mousedown", function(e) {
-            const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
-            if (!gd || !isCartesianPlot(gd)) return;
-            if (e.shiftKey || gd.__measureArmed || (pWin.__activeMeasuringGd === gd && gd.__measureState && gd.__measureState.state === "measuring")) {
-                e.preventDefault();
-                e.stopPropagation();
+        pWin.addEventListener("pointerup", function(e) {
+            if (e.button !== 0) return;
+            const gd = pWin.__activeMeasuringGd;
+            if (gd && gd.__measureState && gd.__measureState.state === "measuring") {
+                const dist = Math.hypot(e.clientX - gd.__measureState.startX, e.clientY - gd.__measureState.startY);
+                if (dist >= 6) {
+                    blockEvent(e);
+                    pWin.__suppressPlotClickUntil = Date.now() + 400;
+                    gd.__measureState.p2 = pointFromEvent(gd, e);
+                    gd.__measureState.state = "locked";
+                    pWin.__activeMeasuringGd = null;
+                    renderMeasure(gd);
+                }
+                return;
             }
+            pDoc.querySelectorAll(".js-plotly-plot").forEach(function(plotEl) {
+                if (plotEl.__pendingClearStart) {
+                    const infoC = plotEl.__pendingClearStart;
+                    plotEl.__pendingClearStart = null;
+                    if (Math.hypot(e.clientX - infoC.x, e.clientY - infoC.y) < 6) {
+                        clearMeasure(plotEl);
+                    }
+                }
+            });
         }, true);
 
-        pDoc.addEventListener("click", function(e) {
-            if (pWin.__suppressPlotClickUntil && Date.now() < pWin.__suppressPlotClickUntil) {
+        pWin.addEventListener("mouseup", function(e) {
+            if (e.shiftKey || pWin.__activeMeasuringGd) {
                 const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
-                if (gd) {
-                    e.preventDefault();
-                    e.stopPropagation();
+                if (gd || pWin.__activeMeasuringGd) {
+                    blockEvent(e);
                 }
             }
         }, true);
 
-        pDoc.addEventListener("keydown", function(e) {
+        pWin.addEventListener("click", function(e) {
+            if (pWin.__suppressPlotClickUntil && Date.now() < pWin.__suppressPlotClickUntil) {
+                const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
+                if (gd) {
+                    blockEvent(e);
+                }
+            }
+        }, true);
+
+        pWin.addEventListener("keydown", function(e) {
             if (e.key === "Escape") {
                 pDoc.querySelectorAll(".js-plotly-plot").forEach(function(gd) {
                     if (gd.__measureState || gd.__measureArmed) clearMeasure(gd);

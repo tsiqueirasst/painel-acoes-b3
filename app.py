@@ -3450,7 +3450,7 @@ def render_grafico_e_tabela_ativo(
                 if ganho_acao > 0.0 and valor_acao_bruto > 20_000.0:
                     ir_acao = ganho_acao * 0.15
                     valor_acao_liq = valor_acao_bruto - ir_acao
-                    nota_ir_acao = f"IR (15% s/ ganho): -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês)"
+                    nota_ir_acao = f"IR (15% s/ ganho): -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês) · Reinvestindo dividendos"
                 elif ganho_acao > 0.0:
                     ir_acao = 0.0
                     valor_acao_liq = valor_acao_bruto

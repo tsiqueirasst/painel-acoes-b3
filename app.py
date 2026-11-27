@@ -865,7 +865,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 2,
+    _v: int = 3,
 ) -> pd.Series:
     """Tenta obter a série diária exata do gráfico do Investidor10 (retorna vazia se bloqueada/indisponível)."""
     mapa_dias = {
@@ -898,21 +898,25 @@ def buscar_serie_investidor10_chart(
     csrf_tok = ""
     tid = ""
     try:
-        resp_pg = sess.get(url_pg, timeout=4)
-        if resp_pg.status_code != 200 or "cf-browser-verification" in resp_pg.text:
+        resp_pg = sess.get(url_pg, timeout=8)
+        if resp_pg.status_code != 200 or "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
             return pd.Series(dtype=float)
 
         m_csrf = re.search(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
         if m_csrf:
             csrf_tok = m_csrf.group(1)
 
-        m_id = re.search(
-            r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|stock[_-]?id|data-id)\s*[:=]\s*["\']?(\d{1,7})',
-            resp_pg.text,
-            re.IGNORECASE,
-        )
-        if m_id:
-            tid = m_id.group(1)
+        m_chart_id = re.search(r'/api/cotacoes/acao/chart/(\d{1,7})/', resp_pg.text, re.IGNORECASE)
+        if m_chart_id:
+            tid = m_chart_id.group(1)
+        else:
+            m_id = re.search(
+                r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|stock[_-]?id)\s*[:=]\s*["\']?(\d{1,7})',
+                resp_pg.text,
+                re.IGNORECASE,
+            ) or re.search(r'data-id\s*=\s*["\']?(\d{1,7})', resp_pg.text, re.IGNORECASE)
+            if m_id:
+                tid = m_id.group(1)
 
         rotas_desc: list[str] = []
         for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,140})\1""", resp_pg.text):
@@ -981,7 +985,7 @@ def buscar_serie_investidor10_chart(
 
     for url_c in urls_unicas[:6]:
         try:
-            r_c = sess.get(url_c, headers=api_hdrs, timeout=3.5)
+            r_c = sess.get(url_c, headers=api_hdrs, timeout=6)
             if r_c.status_code in (401, 403, 429):
                 break
             if r_c.status_code != 200:
@@ -1727,6 +1731,7 @@ def buscar_ohlcv_preco(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
+    _v: int = 2,
 ) -> pd.DataFrame:
     tk = yf.Ticker(f"{ticker}.SA")
     eh_intraday = periodo_label in ("1 D", "7 D")
@@ -1802,6 +1807,8 @@ def buscar_ohlcv_preco(
 
         df = df.sort_index()
         ult_d_ref = df.index.normalize().max()
+        hoje_brt_ts = pd.Timestamp(datetime.now(BRT).date())
+        ref_corte = max(ult_d_ref, hoje_brt_ts)
         offsets_per = {
             "30 D": pd.DateOffset(days=30),
             "6 M": pd.DateOffset(months=6),
@@ -1811,9 +1818,9 @@ def buscar_ohlcv_preco(
             "15 A": pd.DateOffset(years=15),
         }
         if periodo_label == "YTD":
-            df = df[df.index.normalize() >= pd.Timestamp(year=ult_d_ref.year, month=1, day=1)]
+            df = df[df.index.normalize() >= pd.Timestamp(year=ref_corte.year, month=1, day=1)]
         elif periodo_label in offsets_per:
-            dt_corte = ult_d_ref - offsets_per[periodo_label]
+            dt_corte = ref_corte - offsets_per[periodo_label]
             sub_corte = df[df.index.normalize() >= dt_corte]
             if not sub_corte.empty:
                 df = sub_corte
@@ -3619,6 +3626,23 @@ def render_grafico_e_tabela_ativo(
             else:
                 serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
 
+        serie_alt = pd.Series(dtype=float)
+        if not serie.empty and (usar_custom_range or periodo != "1 D"):
+            ajustada_alt = not ajustada
+            if usar_custom_range:
+                df_alt = buscar_ohlcv_preco(ticker, "15 A", ajustada_alt, cot_live=cot_ref_live)
+                if df_alt is not None and not df_alt.empty and "Close" in df_alt.columns:
+                    df_alt = df_alt[(df_alt.index.date >= dt_custom_ini) & (df_alt.index.date <= dt_custom_fim)]
+                    serie_alt = df_alt["Close"].dropna()
+            else:
+                serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
+                if serie_alt.empty:
+                    serie_alt = buscar_historico_preco(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
+            if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
+                sub_alt = serie_alt[serie_alt.index.normalize() >= serie.index[0].normalize()]
+                if not sub_alt.empty:
+                    serie_alt = sub_alt
+
         simb_moeda = "R$"
         if moeda_graf == "Dólar" and not serie.empty:
             fx_usd = buscar_cambio_brl("USD")
@@ -3627,6 +3651,9 @@ def render_grafico_e_tabela_ativo(
                 fx_alinhado = fx_usd.reindex(serie.index.normalize(), method="ffill").bfill()
                 fx_vals = pd.Series(fx_alinhado.values, index=serie.index)
                 serie = (serie / fx_vals).dropna()
+                if not serie_alt.empty:
+                    fx_alt = fx_usd.reindex(serie_alt.index.normalize(), method="ffill").bfill()
+                    serie_alt = (serie_alt / pd.Series(fx_alt.values, index=serie_alt.index)).dropna()
                 if not df_ohlcv.empty:
                     df_ohlcv = df_ohlcv.loc[serie.index].copy()
                     fx_df = fx_usd.reindex(df_ohlcv.index.normalize(), method="ffill").bfill()
@@ -3650,13 +3677,35 @@ def render_grafico_e_tabela_ativo(
             fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"
             sinal = "+" if var_pct >= 0 else ""
 
+            sub_px_html = ""
+            if not serie_alt.empty and float(serie_alt.iloc[0]) > 0:
+                pa_ini, pa_fim = float(serie_alt.iloc[0]), float(serie_alt.iloc[-1])
+                var_alt_pct = ((pa_fim - pa_ini) / pa_ini) * 100.0
+                diff_alt_abs = pa_fim - pa_ini
+                cor_alt = "#22c55e" if var_alt_pct >= 0 else "#dc2626"
+                sinal_alt = "+" if var_alt_pct >= 0 else ""
+                sinal_abs_alt = "+" if diff_alt_abs >= 0 else "-"
+                if ajustada:
+                    sub_px_html = (
+                        f"<div style='font-size:12px; opacity:0.90; margin-top:3px;'>"
+                        f"Só valor da ação (sem div.): <strong style='color:{cor_alt};'>{sinal_alt}{fmt_num(var_alt_pct)}% ({sinal_abs_alt}{simb_moeda} {fmt_num(abs(diff_alt_abs))})</strong>"
+                        f"</div>"
+                    )
+                else:
+                    sub_px_html = (
+                        f"<div style='font-size:12px; opacity:0.90; margin-top:3px;'>"
+                        f"Com dividendos (ajustada): <strong style='color:{cor_alt};'>{sinal_alt}{fmt_num(var_alt_pct)}%</strong>"
+                        f"</div>"
+                    )
+
             with c_tb_px:
                 st.markdown(
                     f"<div style='font-size:11px; opacity:0.65; letter-spacing:0.4px;'>BVMF • {ticker}</div>"
                     f"<div style='font-size:24px; font-weight:700; line-height:1.15; margin-top:1px;'>"
                     f"{simb_moeda} {fmt_num(p_fim)} "
                     f"<span style='font-size:14px; color:{cor}; font-weight:700;'>{sinal}{fmt_num(var_pct)}% ({lbl_per_exib})</span>"
-                    f"</div>",
+                    f"</div>"
+                    f"{sub_px_html}",
                     unsafe_allow_html=True,
                 )
 
@@ -3936,7 +3985,8 @@ def render_grafico_e_tabela_ativo(
                         "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
                         "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
                     }
-                    serie_sim = serie_max_fb[serie_max_fb.index >= (serie_max_fb.index.max() - deltas[janela_sim])]
+                    ref_fb = max(serie_max_fb.index.max().normalize(), pd.Timestamp(datetime.now(BRT).date()))
+                    serie_sim = serie_max_fb[serie_max_fb.index.normalize() >= (ref_fb - deltas[janela_sim])]
 
             if not serie_sim.empty:
                 dt_base_ts = serie_sim.index[0].normalize()
@@ -3967,6 +4017,46 @@ def render_grafico_e_tabela_ativo(
                 s_acao_liq = f"{'+' if ret_acao_pct >= 0 else ''}{fmt_num(ret_acao_pct, 2)}%"
                 s_acao_bruto = f"{'+' if ret_acao_bruto_pct >= 0 else ''}{fmt_num(ret_acao_bruto_pct, 2)}%"
                 cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
+
+                per_sim_key = mapa_jan_per[janela_sim]
+                serie_sim_simples = buscar_serie_investidor10_chart(ticker, per_sim_key, False, cot_live=cot_ref_live)
+                if serie_sim_simples.empty:
+                    serie_sim_simples = buscar_historico_preco(ticker, per_sim_key, False, cot_live=cot_ref_live)
+                if not serie_sim_simples.empty:
+                    sub_ss = serie_sim_simples[serie_sim_simples.index.normalize() >= dt_base_ts]
+                    if not sub_ss.empty:
+                        serie_sim_simples = sub_ss
+
+                divs_sim_s = buscar_dividendos_ativo(ticker)
+                divs_win_sim = (
+                    divs_sim_s[(divs_sim_s.index.normalize() > dt_base_ts) & (divs_sim_s.index.normalize() <= dt_fim_ts)]
+                    if not divs_sim_s.empty else pd.Series(dtype=float)
+                )
+
+                bloco_sem_reinv_html = ""
+                if not serie_sim_simples.empty and float(serie_sim_simples.iloc[0]) > 0:
+                    p_base_s = float(serie_sim_simples.iloc[0])
+                    p_hoje_s = float(serie_sim_simples.iloc[-1])
+                    qtd_acoes_sim = valor_inv / p_base_s
+                    valor_so_acao = qtd_acoes_sim * p_hoje_s
+                    ret_so_acao_pct = ((valor_so_acao / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                    divs_caixa_sim = qtd_acoes_sim * float(divs_win_sim.sum()) if not divs_win_sim.empty else 0.0
+                    valor_sem_reinv_bruto = valor_so_acao + divs_caixa_sim
+                    ganho_so_acao = valor_so_acao - valor_inv
+                    if ganho_so_acao > 0.0 and valor_so_acao > 20_000.0:
+                        valor_sem_reinv_liq = valor_sem_reinv_bruto - (ganho_so_acao * 0.15)
+                    else:
+                        valor_sem_reinv_liq = valor_sem_reinv_bruto
+                    ret_sem_reinv_pct = ((valor_sem_reinv_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                    s_so_acao = f"{'+' if ret_so_acao_pct >= 0 else ''}{fmt_num(ret_so_acao_pct, 2)}%"
+                    s_sem_reinv = f"{'+' if ret_sem_reinv_pct >= 0 else ''}{fmt_num(ret_sem_reinv_pct, 2)}%"
+                    cor_sem_reinv = "#22c55e" if valor_sem_reinv_liq >= valor_inv else "#ef4444"
+                    bloco_sem_reinv_html = (
+                        "<div style='font-size:12px; opacity:0.92; margin-top:4px; padding-top:4px; border-top:1px dashed rgba(128,128,128,0.28); line-height:1.4;'>"
+                        f"Sem reinvestir div.: <strong style='color:{cor_sem_reinv};'>R$ {fmt_num(valor_sem_reinv_liq)} ({s_sem_reinv})</strong><br>"
+                        f"<span style='font-size:11px; opacity:0.84;'>Só ação: <strong>R$ {fmt_num(valor_so_acao)}</strong> ({s_so_acao}) + Divs em caixa: <strong>R$ {fmt_num(divs_caixa_sim)}</strong></span>"
+                        "</div>"
+                    )
 
                 valor_selic_bruto = calcular_selic_calculadora_cidadao(data_efetiva, data_final_str, valor_inv)
                 if valor_selic_bruto is None and not serie_selic_bcb.empty:
@@ -4054,9 +4144,10 @@ def render_grafico_e_tabela_ativo(
                     f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({s_acao_liq} líq.)</span>"
                     "</div>"
                     "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
-                    f"Bruto (c/ dividendos): R$ {fmt_num(valor_acao_bruto)} ({s_acao_bruto})"
+                    f"Bruto (reinvestindo div.): R$ {fmt_num(valor_acao_bruto)} ({s_acao_bruto})"
                     "</div>"
-                    f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{nota_ir_acao}</div>"
+                    f"{bloco_sem_reinv_html}"
+                    f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35; margin-top:4px;'>{nota_ir_acao}</div>"
                     "</div>"
                     f"{card_selic_html}"
                     "</div>"

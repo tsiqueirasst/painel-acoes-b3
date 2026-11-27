@@ -1594,6 +1594,108 @@ def buscar_serie_max_ajustada(ticker: str) -> pd.Series:
     return df["Close"].dropna()
 
 
+_TABELA_IOF_RF = (
+    0, 96, 93, 90, 86, 83, 80, 76, 73, 70, 66, 63, 60, 56, 53,
+    50, 46, 43, 40, 36, 33, 30, 26, 23, 20, 16, 13, 10, 6, 3,
+)
+
+
+def _calc_impostos_renda_fixa(ganho_bruto: float, dias_corridos: int) -> tuple[float, float, float, float, float]:
+    """Retorna (iof_val, ir_val, aliq_iof_pct, aliq_ir_pct, imposto_total)."""
+    if ganho_bruto <= 0.0:
+        if dias_corridos <= 180:
+            aliq_ir = 22.5
+        elif dias_corridos <= 360:
+            aliq_ir = 20.0
+        elif dias_corridos <= 720:
+            aliq_ir = 17.5
+        else:
+            aliq_ir = 15.0
+        return 0.0, 0.0, 0.0, aliq_ir, 0.0
+
+    aliq_iof_pct = float(_TABELA_IOF_RF[dias_corridos]) if 0 <= dias_corridos < 30 else 0.0
+    iof_val = ganho_bruto * (aliq_iof_pct / 100.0)
+    base_ir = max(0.0, ganho_bruto - iof_val)
+
+    if dias_corridos <= 180:
+        aliq_ir_pct = 22.5
+    elif dias_corridos <= 360:
+        aliq_ir_pct = 20.0
+    elif dias_corridos <= 720:
+        aliq_ir_pct = 17.5
+    else:
+        aliq_ir_pct = 15.0
+
+    ir_val = base_ir * (aliq_ir_pct / 100.0)
+    return iof_val, ir_val, aliq_iof_pct, aliq_ir_pct, (iof_val + ir_val)
+
+
+@st.cache_data(ttl=43200, show_spinner=False)
+def buscar_historico_cdi_bcb() -> tuple[pd.Series, float | None]:
+    """Retorna (serie_cdi_diario_pct, cdi_anual_atual_pct) via API SGS do Banco Central."""
+    hoje_brt = datetime.now(BRT).date()
+    janelas = [
+        (hoje_brt - timedelta(days=365 * 16 + 30), hoje_brt - timedelta(days=365 * 8 + 1)),
+        (hoje_brt - timedelta(days=365 * 8), hoje_brt),
+    ]
+
+    def _baixar_serie_sgs(cod_serie: int) -> pd.Series:
+        regs = []
+        for d_ini, d_fim in janelas:
+            try:
+                url = (
+                    f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod_serie}/dados"
+                    f"?formato=json&dataInicial={d_ini.strftime('%d/%m/%Y')}&dataFinal={d_fim.strftime('%d/%m/%Y')}"
+                )
+                resp = requests.get(url, headers=HEADERS, timeout=12)
+                if resp.status_code == 200:
+                    js = resp.json()
+                    if isinstance(js, list):
+                        regs.extend(js)
+            except Exception:
+                continue
+        if not regs:
+            return pd.Series(dtype=float)
+        df_s = pd.DataFrame(regs)
+        if not {"data", "valor"}.issubset(df_s.columns):
+            return pd.Series(dtype=float)
+        df_s["dt"] = pd.to_datetime(df_s["data"], format="%d/%m/%Y", errors="coerce")
+        df_s["val"] = pd.to_numeric(df_s["valor"], errors="coerce")
+        df_s = df_s.dropna(subset=["dt", "val"]).drop_duplicates(subset=["dt"]).sort_values("dt")
+        if df_s.empty:
+            return pd.Series(dtype=float)
+        return pd.Series(df_s["val"].values, index=pd.DatetimeIndex(df_s["dt"]))
+
+    serie = _baixar_serie_sgs(12)
+    if serie.empty:
+        serie = _baixar_serie_sgs(11)
+
+    cdi_aa = None
+    for cod_aa, ajuste_aa in ((4389, 0.0), (432, -0.10)):
+        try:
+            url_aa = (
+                f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod_aa}/dados"
+                f"?formato=json&dataInicial={(hoje_brt - timedelta(days=30)).strftime('%d/%m/%Y')}&dataFinal={hoje_brt.strftime('%d/%m/%Y')}"
+            )
+            resp_aa = requests.get(url_aa, headers=HEADERS, timeout=8)
+            if resp_aa.status_code == 200:
+                arr_aa = resp_aa.json()
+                if isinstance(arr_aa, list) and arr_aa:
+                    v_aa = float(arr_aa[-1]["valor"]) + ajuste_aa
+                    if v_aa > 0:
+                        cdi_aa = v_aa
+                        break
+        except Exception:
+            continue
+
+    if cdi_aa is None and not serie.empty:
+        r_ult = float(serie.iloc[-1]) / 100.0
+        if r_ult > 0:
+            cdi_aa = ((1.0 + r_ult) ** 252.0 - 1.0) * 100.0
+
+    return serie, cdi_aa
+
+
 def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
     dt_idx = pd.to_datetime(idx)
     if dt_idx.tz is not None:
@@ -2709,20 +2811,20 @@ def fmt_faixa_preco_html(r: dict) -> str:
         "border-radius:8px; padding:10px 12px; margin:8px 0 10px 0;'>"
         "<div style='font-weight:700; font-size:13px; margin-bottom:8px;'>🎯 Faixa de Preço do Modelo</div>"
         "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:10px; align-items:stretch; margin-bottom:10px;'>"
-        "<div style='background:rgba(34,197,94,0.12); border-left:4px solid #22c55e; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
-        "<div style='font-size:11px; font-weight:700; color:#22c55e;'>🟢 Zona de Desconto / Oportunidade</div>"
-        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_desc'])}</div>"
-        "<div style='font-size:11px; opacity:0.8;'>Preço sugerido de entrada com margem de segurança</div>"
+        "<div style='background:rgba(34,197,94,0.12); border-left:4px solid #22c55e; border-radius:6px; padding:9px 11px; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#22c55e; line-height:1.3;'>🟢 Zona de Desconto / Oportunidade</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:4px 0; line-height:1.25;'>{html.escape(d_fp['z_desc'])}</div>"
+        "<div style='font-size:11px; opacity:0.8; line-height:1.3;'>Preço sugerido de entrada com margem de segurança</div>"
         "</div>"
-        "<div style='background:rgba(234,179,8,0.12); border-left:4px solid #eab308; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
-        "<div style='font-size:11px; font-weight:700; color:#eab308;'>🟡 Zona Neutra / Preço Justo</div>"
-        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_neutro'])}</div>"
-        "<div style='font-size:11px; opacity:0.8;'>Faixa intermediária próxima ao valor justo</div>"
+        "<div style='background:rgba(234,179,8,0.12); border-left:4px solid #eab308; border-radius:6px; padding:9px 11px; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#eab308; line-height:1.3;'>🟡 Zona Neutra / Preço Justo</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:4px 0; line-height:1.25;'>{html.escape(d_fp['z_neutro'])}</div>"
+        "<div style='font-size:11px; opacity:0.8; line-height:1.3;'>Faixa intermediária próxima ao valor justo</div>"
         "</div>"
-        "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:8px 10px; display:flex; flex-direction:column; justify-content:space-between;'>"
-        "<div style='font-size:11px; font-weight:700; color:#ef4444;'>🔴 Zona de Sobrepreço / Alerta</div>"
-        f"<div style='font-size:15px; font-weight:700; margin:3px 0;'>{html.escape(d_fp['z_sobre'])}</div>"
-        f"<div style='font-size:11px; opacity:0.8;'>Região de esticamento ({html.escape(d_fp['regra_sp_lbl'])})</div>"
+        "<div style='background:rgba(239,68,68,0.12); border-left:4px solid #ef4444; border-radius:6px; padding:9px 11px; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+        "<div style='font-size:11px; font-weight:700; color:#ef4444; line-height:1.3;'>🔴 Zona de Sobrepreço / Alerta</div>"
+        f"<div style='font-size:15px; font-weight:700; margin:4px 0; line-height:1.25;'>{html.escape(d_fp['z_sobre'])}</div>"
+        f"<div style='font-size:11px; opacity:0.8; line-height:1.3;'>Região de esticamento ({html.escape(d_fp['regra_sp_lbl'])})</div>"
         "</div>"
         "</div>"
         f"<div style='font-size:13px; padding:6px 10px; border-radius:6px; background:rgba(128,128,128,0.10); border-left:3px solid {d_fp['cor_ver']};'>"
@@ -3019,7 +3121,7 @@ def render_grafico_e_tabela_ativo(
     key_prefix: str = "raiox",
     modo_score_chave: str = "score_geral",
 ):
-    c_tit, c_fav = st.columns([4, 1.3])
+    c_tit, c_fav = st.columns([4, 1.3], vertical_alignment="center")
     eh_fav = ticker in st.session_state["favoritos"]
     with c_tit:
         st.markdown(f"### 📈 COTAÇÃO {ticker} {f'— {nome}' if nome and nome != ticker else ''}")
@@ -3068,21 +3170,23 @@ def render_grafico_e_tabela_ativo(
                 f"(LP: **{score_lp_r}** | CP: **{score_cp_r}** | News: **{news_sc_r:+.1f}**) | {veredito_r}"
             )
             st.markdown(
-                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; margin:8px 0 10px 0;'>"
-                f"<div title='Score de Longo Prazo (0 a 100): avalia Valuation com trava de confiança, Rentabilidade, Saúde Financeira e Notícias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
-                f"<div style='font-size:12px; opacity:0.8;'>🏛️ Longo Prazo (LP) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700;'>{score_lp_r}/100</div></div>"
-                f"<div title='Score de Curto Prazo (0 a 100): avalia ponto técnico (IFR), Médias Móveis, Volume e Notícias recentes.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
-                f"<div style='font-size:12px; opacity:0.8;'>⚡ Curto Prazo (CP) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700;'>{score_cp_r}/100</div></div>"
-                f"<div title='News Score (-10 a +10): sentimento das manchetes dos últimos 30 dias com peso dobrado nos últimos 7 dias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
-                f"<div style='font-size:12px; opacity:0.8;'>📰 Notícias (30d) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700;'>{news_sc_r:+.1f}</div>"
-                f"<div style='font-size:11px; opacity:0.85;'>{html.escape(news_res_r)}</div></div>"
-                f"<div title='IFR 14 dias (RSI): mede força compradora/vendedora (0 a 100). Entre 30 e 48 indica bom ponto de entrada; acima de 70 indica sobrecompra.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:8px 10px; cursor:help;'>"
-                f"<div style='font-size:12px; opacity:0.8;'>📊 IFR (14d) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700;'>{ifr_txt_r}</div>"
-                f"<div style='font-size:11px; opacity:0.85;'>"
+                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; align-items:stretch; margin:8px 0 10px 0;'>"
+                f"<div title='Score de Longo Prazo (0 a 100): avalia Valuation com trava de confiança, Rentabilidade, Saúde Financeira e Notícias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>🏛️ Longo Prazo (LP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_lp_r}/100</div>"
+                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Fundamentos &amp; Valuation</div></div>"
+                f"<div title='Score de Curto Prazo (0 a 100): avalia ponto técnico (IFR), Médias Móveis, Volume e Notícias recentes.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>⚡ Curto Prazo (CP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_cp_r}/100</div>"
+                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Timing &amp; Catalisadores</div></div>"
+                f"<div title='News Score (-10 a +10): sentimento das manchetes dos últimos 30 dias com peso dobrado nos últimos 7 dias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📰 Notícias (30d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{news_sc_r:+.1f}</div>"
+                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>{html.escape(news_res_r)}</div></div>"
+                f"<div title='IFR 14 dias (RSI): mede força compradora/vendedora (0 a 100). Entre 30 e 48 indica bom ponto de entrada; acima de 70 indica sobrecompra.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📊 IFR (14d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{ifr_txt_r}</div>"
+                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>"
                 f"<span title='Distância da Média Móvel de 200 dias: indica tendência principal de longo prazo.'>MM200: {d200_txt_r}</span> | "
                 f"<span title='Distância da Máxima de 52 semanas: quanto o preço atual está abaixo do topo de 1 ano.'>52s: {d52_txt_r}</span>"
                 f"</div></div>"
@@ -3110,7 +3214,7 @@ def render_grafico_e_tabela_ativo(
                     st.markdown(partes_just_rx[1], unsafe_allow_html=True)
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    c_per, c_tipo, c_vis = st.columns([2.6, 1.1, 0.9])
+    c_per, c_tipo, c_vis = st.columns([2.6, 1.1, 0.9], vertical_alignment="bottom")
     with c_per:
         periodo = st.radio(
             "Período:",
@@ -3254,33 +3358,123 @@ def render_grafico_e_tabela_ativo(
         )
         st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
+        serie_cdi_bcb, cdi_aa_atual = buscar_historico_cdi_bcb()
         serie_max = buscar_serie_max_ajustada(ticker)
         if not serie_max.empty:
-            s1, s2, s3 = st.columns([1.4, 1.2, 2.2])
-            with s1:
-                valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
-            with s2:
-                janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
-            deltas = {
-                "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
-                "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
-                "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
-            }
-            data_alvo = serie_max.index.max() - deltas[janela_sim]
-            recorte = serie_max[serie_max.index >= data_alvo]
-            p_base = float(recorte.iloc[0]) if not recorte.empty else float(serie_max.iloc[0])
-            p_hoje = float(serie_max.iloc[-1])
-            valor_hoje = valor_inv * (p_hoje / p_base) if p_base > 0 else valor_inv
-            cor_sim = "#22c55e" if valor_hoje >= valor_inv else "#ef4444"
-            data_efetiva = recorte.index[0].strftime("%d/%m/%Y") if not recorte.empty else serie_max.index[0].strftime("%d/%m/%Y")
-            with s3:
+            with st.container(border=True):
+                s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
+                with s1:
+                    valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
+                with s2:
+                    janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
+
+                deltas = {
+                    "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
+                    "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
+                    "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
+                }
+                data_alvo = serie_max.index.max() - deltas[janela_sim]
+                recorte = serie_max[serie_max.index >= data_alvo]
+                dt_base_ts = (recorte.index[0] if not recorte.empty else serie_max.index[0]).normalize()
+                dt_fim_ts = serie_max.index[-1].normalize()
+                dias_corridos_sim = max(1, int((dt_fim_ts - dt_base_ts).days))
+                data_efetiva = dt_base_ts.strftime("%d/%m/%Y")
+
+                p_base = float(recorte.iloc[0]) if not recorte.empty else float(serie_max.iloc[0])
+                p_hoje = float(serie_max.iloc[-1])
+                valor_acao_bruto = valor_inv * (p_hoje / p_base) if p_base > 0 else valor_inv
+                ganho_acao = valor_acao_bruto - valor_inv
+                if ganho_acao > 0.0 and valor_acao_bruto > 20_000.0:
+                    ir_acao = ganho_acao * 0.15
+                    valor_acao_liq = valor_acao_bruto - ir_acao
+                    nota_ir_acao = f"IR 15% s/ ganho: -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês) · Bruto: R$ {fmt_num(valor_acao_bruto)}"
+                elif ganho_acao > 0.0:
+                    ir_acao = 0.0
+                    valor_acao_liq = valor_acao_bruto
+                    nota_ir_acao = f"IR: Isento (venda ≤ R$ 20k/mês) · Bruto: R$ {fmt_num(valor_acao_bruto)}"
+                else:
+                    ir_acao = 0.0
+                    valor_acao_liq = valor_acao_bruto
+                    nota_ir_acao = "IR: Isento (sem lucro tributável no período)"
+
+                ret_acao_pct = ((valor_acao_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
+
+                if not serie_cdi_bcb.empty:
+                    sub_cdi = serie_cdi_bcb[(serie_cdi_bcb.index > dt_base_ts) & (serie_cdi_bcb.index <= dt_fim_ts)]
+                    fator_cdi = float((1.0 + (sub_cdi / 100.0)).prod()) if not sub_cdi.empty else 1.0
+                    valor_cdi_bruto = valor_inv * fator_cdi
+                    ganho_cdi_bruto = max(0.0, valor_cdi_bruto - valor_inv)
+                    iof_cdi, ir_cdi, aliq_iof_cdi, aliq_ir_cdi, imp_cdi = _calc_impostos_renda_fixa(ganho_cdi_bruto, dias_corridos_sim)
+                    valor_cdi_liq = valor_cdi_bruto - imp_cdi
+                    ret_cdi_pct = ((valor_cdi_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                    txt_imp_cdi = (
+                        f"IOF ({fmt_num(aliq_iof_cdi, 0)}%): -R$ {fmt_num(iof_cdi)} · IR ({fmt_num(aliq_ir_cdi, 1)}%): -R$ {fmt_num(ir_cdi)}"
+                        if iof_cdi > 0.0
+                        else f"IR ({fmt_num(aliq_ir_cdi, 1)}%): -R$ {fmt_num(ir_cdi)} · Bruto: R$ {fmt_num(valor_cdi_bruto)}"
+                    )
+                    card_cdi_html = (
+                        "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
+                        "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
+                        "🏦 Em 100% do CDI (líquido)"
+                        "</div>"
+                        "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
+                        f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_cdi_liq)}</strong>"
+                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({ret_cdi_pct:+.2f}%)</span>"
+                        "</div>"
+                        f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_cdi}</div>"
+                        "</div>"
+                    )
+                    diff_sim = valor_acao_liq - valor_cdi_liq
+                    diff_pp = ret_acao_pct - ret_cdi_pct
+                    if diff_sim >= 0.0:
+                        resumo_sim_html = (
+                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
+                            f"border-left:3px solid #22c55e; font-size:12.5px;'>"
+                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({diff_pp:+.2f} p.p.) a mais que 100% do CDI no período "
+                            f"(já descontando impostos nos dois casos)."
+                            f"</div>"
+                        )
+                    else:
+                        resumo_sim_html = (
+                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
+                            f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
+                            f"🏦 <strong>100% do CDI</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({abs(diff_pp):.2f} p.p.) a mais que {ticker} no período "
+                            f"(já descontando impostos nos dois casos)."
+                            f"</div>"
+                        )
+                else:
+                    card_cdi_html = (
+                        "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
+                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏦 Em 100% do CDI (líquido)</div>"
+                        "<div style='font-size:13px; opacity:0.75;'>Indisponível no momento</div>"
+                        "<div style='font-size:11px; opacity:0.7;'>API do Banco Central temporariamente indisponível.</div>"
+                        "</div>"
+                    )
+                    resumo_sim_html = ""
+
                 st.markdown(
-                    f"<div style='padding-top:26px; font-size:17px;'>"
-                    f"hoje você teria <strong style='color:{cor_sim}; font-size:20px;'>R$ {fmt_num(valor_hoje)}</strong>"
-                    f"<br><small style='opacity:0.7;'>*Desde {data_efetiva}, considerando reinvestimento dos dividendos.</small>"
-                    f"</div>",
+                    "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; align-items:stretch; margin-top:6px;'>"
+                    "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
+                    "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
+                    f"📈 Em {ticker} (líquido · desde {data_efetiva})"
+                    "</div>"
+                    "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
+                    f"<strong style='color:{cor_sim}; font-size:21px;'>R$ {fmt_num(valor_acao_liq)}</strong>"
+                    f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({ret_acao_pct:+.2f}%)</span>"
+                    "</div>"
+                    f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{nota_ir_acao} · Reinvestindo dividendos</div>"
+                    "</div>"
+                    f"{card_cdi_html}"
+                    "</div>"
+                    f"{resumo_sim_html}",
                     unsafe_allow_html=True,
                 )
+    else:
+        _, cdi_aa_atual = buscar_historico_cdi_bcb()
 
     # --- SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
     if base_ativo:
@@ -3290,8 +3484,8 @@ def render_grafico_e_tabela_ativo(
 
         with st.container(border=True):
             st.markdown(f"#### 💰 Simulador de Renda Passiva — {ticker}")
-            sr1, sr2 = st.columns([1.4, 2.6], vertical_alignment="center")
-            with sr1:
+            sr_in1, sr_in2 = st.columns([1.35, 2.65], vertical_alignment="bottom")
+            with sr_in1:
                 meta_mensal = st.number_input(
                     "Meta de Proventos Mensal desejada com este ativo (R$):",
                     min_value=10.0,
@@ -3299,6 +3493,21 @@ def render_grafico_e_tabela_ativo(
                     step=100.0,
                     format="%.2f",
                     key=f"{key_prefix}_meta_renda_{ticker}",
+                )
+            with sr_in2:
+                cdi_badge_txt = f"CDI atual (BCB): {fmt_num(cdi_aa_atual, 2)}% a.a." if cdi_aa_atual else "CDI atual: indisponível"
+                regra_div_txt = (
+                    "Acima de R$ 50 mil/mês por empresa aplica 10% IRRF (Lei 15.270/2025)"
+                    if meta_mensal > 50_000.0
+                    else "Dividendos isentos de IR até R$ 50 mil/mês por empresa"
+                )
+                st.markdown(
+                    "<div style='background:rgba(128,128,128,0.09); border:1px solid rgba(128,128,128,0.24); border-radius:6px; "
+                    "padding:8px 12px; min-height:40px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:12px;'>"
+                    f"<span>🏦 <strong>{cdi_badge_txt}</strong></span>"
+                    f"<span style='opacity:0.85;'>⚖️ {regra_div_txt}</span>"
+                    "</div>",
+                    unsafe_allow_html=True,
                 )
 
             dpa_proj_s = base_ativo.get("dpa_proj")
@@ -3313,29 +3522,103 @@ def render_grafico_e_tabela_ativo(
             else:
                 dpa_base_sim = 0.0
 
-            with sr2:
-                if dpa_base_sim <= 0.0 or cot_sim <= 0.0:
-                    st.info(f"{ticker} não possui histórico recente ou projeção de proventos positivos para simular renda mensal.")
-                else:
-                    meta_anual = meta_mensal * 12.0
-                    qtd_acoes_nec = math.ceil(meta_anual / dpa_base_sim)
-                    custo_total_nec = qtd_acoes_nec * cot_sim
-                    dy_impl_sim = (dpa_base_sim / cot_sim) * 100.0
-                    st.markdown(
-                        "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; align-items:stretch;'>"
-                        "<div style='background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); border-radius:8px; padding:12px 14px; text-align:center; display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:98px;'>"
-                        "<div style='font-size:12px; opacity:0.85;'>📌 Ações Necessárias</div>"
-                        f"<div style='font-size:21px; font-weight:700; color:#60a5fa; margin:3px 0;'>{fmt_num(qtd_acoes_nec, 0)} ações</div>"
-                        f"<div style='font-size:11px; opacity:0.8;'>Meta anual: R$ {fmt_num(meta_anual)} | DPA base: R$ {fmt_num(dpa_base_sim)}</div>"
-                        "</div>"
-                        "<div style='background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); border-radius:8px; padding:12px 14px; text-align:center; display:flex; flex-direction:column; justify-content:center; align-items:center; min-height:98px;'>"
-                        "<div style='font-size:12px; opacity:0.85;'>💵 Total a Investir</div>"
-                        f"<div style='font-size:21px; font-weight:700; color:#22c55e; margin:3px 0;'>R$ {fmt_num(custo_total_nec)}</div>"
-                        f"<div style='font-size:11px; opacity:0.8;'>Cotação: R$ {fmt_num(cot_sim)} | Yield base: {fmt_num(dy_impl_sim, 2)}%</div>"
-                        "</div>"
-                        "</div>",
-                        unsafe_allow_html=True,
-                    )
+            if cdi_aa_atual and cdi_aa_atual > 0:
+                cdi_am_bruto = ((1.0 + (cdi_aa_atual / 100.0)) ** (1.0 / 12.0)) - 1.0
+                cap_cdi_15 = meta_mensal / (cdi_am_bruto * (1.0 - 0.15)) if cdi_am_bruto > 0 else 0.0
+                cap_cdi_225 = meta_mensal / (cdi_am_bruto * (1.0 - 0.225)) if cdi_am_bruto > 0 else 0.0
+                card_cdi_rp = (
+                    "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>"
+                    "🏦 Capital em 100% do CDI Hoje"
+                    "</div>"
+                    "<div style='min-height:36px; display:flex; align-items:center; justify-content:center; margin:4px 0;'>"
+                    f"<span style='font-size:21px; font-weight:700; color:#fbbf24;'>R$ {fmt_num(cap_cdi_15)}</span>"
+                    "</div>"
+                    "<div style='font-size:11px; opacity:0.82; min-height:32px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>"
+                    f"Líq. 15% IR (&gt;2a) · c/ 22,5% IR (≤6m): R$ {fmt_num(cap_cdi_225)}"
+                    "</div>"
+                    "</div>"
+                )
+            else:
+                cap_cdi_15 = None
+                card_cdi_rp = (
+                    "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>🏦 Capital em 100% do CDI Hoje</div>"
+                    "<div style='font-size:14px; opacity:0.75; min-height:36px; display:flex; align-items:center; justify-content:center;'>Indisponível</div>"
+                    "<div style='font-size:11px; opacity:0.7; min-height:32px; display:flex; align-items:center; justify-content:center;'>Taxa CDI do BCB indisponível.</div>"
+                    "</div>"
+                )
+
+            if dpa_base_sim <= 0.0 or cot_sim <= 0.0:
+                qtd_acoes_nec = 0
+                st.markdown(
+                    "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; align-items:stretch; margin-top:8px;'>"
+                    "<div style='background:rgba(59,130,246,0.10); border:1px solid rgba(59,130,246,0.30); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    f"<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>📌 Em {ticker}</div>"
+                    "<div style='font-size:14px; opacity:0.8; min-height:36px; display:flex; align-items:center; justify-content:center;'>Sem proventos base</div>"
+                    f"<div style='font-size:11px; opacity:0.75; min-height:32px; display:flex; align-items:center; justify-content:center;'>{ticker} não possui histórico ou projeção de proventos positivos.</div>"
+                    "</div>"
+                    f"{card_cdi_rp}"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                eh_acima_50k = meta_mensal > 50_000.0
+                meta_anual_liq = meta_mensal * 12.0
+                meta_anual_bruta = (meta_mensal / 0.90) * 12.0 if eh_acima_50k else meta_anual_liq
+                qtd_acoes_nec = math.ceil(meta_anual_bruta / dpa_base_sim)
+                custo_total_nec = qtd_acoes_nec * cot_sim
+                dy_impl_sim = (dpa_base_sim / cot_sim) * 100.0
+                nota_ir_acao_rp = "Já c/ 10% IRRF (&gt;R$50k/mês)" if eh_acima_50k else "Isento IR (≤R$50k/mês)"
+
+                st.markdown(
+                    "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:12px; align-items:stretch; margin-top:8px;'>"
+                    "<div style='background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>📌 Ações Necessárias</div>"
+                    "<div style='min-height:36px; display:flex; align-items:center; justify-content:center; margin:4px 0;'>"
+                    f"<span style='font-size:21px; font-weight:700; color:#60a5fa;'>{fmt_num(qtd_acoes_nec, 0)} ações</span>"
+                    "</div>"
+                    "<div style='font-size:11px; opacity:0.82; min-height:32px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>"
+                    f"Meta anual líq.: R$ {fmt_num(meta_anual_liq)} · DPA: R$ {fmt_num(dpa_base_sim)}"
+                    "</div>"
+                    "</div>"
+                    "<div style='background:rgba(34,197,94,0.12); border:1px solid rgba(34,197,94,0.35); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>💵 Total a Investir na Ação</div>"
+                    "<div style='min-height:36px; display:flex; align-items:center; justify-content:center; margin:4px 0;'>"
+                    f"<span style='font-size:21px; font-weight:700; color:#22c55e;'>R$ {fmt_num(custo_total_nec)}</span>"
+                    "</div>"
+                    "<div style='font-size:11px; opacity:0.82; min-height:32px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>"
+                    f"Cotação: R$ {fmt_num(cot_sim)} · Yield: {fmt_num(dy_impl_sim, 2)}% · {nota_ir_acao_rp}"
+                    "</div>"
+                    "</div>"
+                    f"{card_cdi_rp}"
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
+
+                if cap_cdi_15 and cap_cdi_15 > 0:
+                    diff_cap_rp = custo_total_nec - cap_cdi_15
+                    if diff_cap_rp <= 0:
+                        st.markdown(
+                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
+                            f"border-left:3px solid #22c55e; font-size:12.5px;'>"
+                            f"💡 Pelo yield atual de <strong>{ticker}</strong>, você precisa de <strong>R$ {fmt_num(abs(diff_cap_rp))}</strong> a menos que em 100% do CDI (com IR de 15%) para receber R$ {fmt_num(meta_mensal)}/mês líquidos."
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
+                            f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
+                            f"💡 Hoje, <strong>100% do CDI</strong> exige <strong>R$ {fmt_num(diff_cap_rp)}</strong> a menos de capital inicial que <strong>{ticker}</strong> (já descontando 15% de IR &gt;2a); porém ações tendem a reajustar proventos pela inflação no longo prazo."
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
 
             if dpa_base_sim > 0.0 and st.session_state.get("usuario_email") and st.session_state.get("lancamentos"):
                 pos_usr_rx = consolidar_carteira_por_ativo(st.session_state["lancamentos"])
@@ -4823,16 +5106,16 @@ with tab1:
                 with rc1:
                     with st.container(border=True):
                         st.markdown(
-                            "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                            "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                             "<div>"
-                            "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>🏆 Líder de Atratividade</div>"
-                            f"<div style='font-size:20px; font-weight:700; color:#60a5fa;'>{lider_atr['ticker']}</div>"
-                            f"<div style='font-size:12px; opacity:0.8;'>{html.escape(lider_atr['nome'][:28])}</div>"
+                            "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>🏆 Líder de Atratividade</div>"
+                            f"<div style='font-size:20px; font-weight:700; color:#60a5fa; line-height:1.2;'>{lider_atr['ticker']}</div>"
+                            f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(lider_atr['nome'])}'>{html.escape(lider_atr['nome'])}</div>"
                             "</div>"
                             "<div>"
                             f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(lider_atr['cotacao'])}</strong></div>"
                             f"<div style='font-size:13px;'>Score Ativo: <strong>{fmt_num(lider_atr['score_ativo'], 1)}/100</strong></div>"
-                            f"<div style='margin-top:4px;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>"
+                            f"<div style='margin-top:4px; min-height:22px; display:flex; align-items:center;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>"
                             "</div>"
                             "</div>",
                             unsafe_allow_html=True,
@@ -4856,23 +5139,23 @@ with tab1:
                             bz_dy = top_dy.get("pt_bazin")
                             bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>💰 Maior DY Sustentável</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#22c55e;'>{top_dy['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_dy['nome'][:28])}</div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>💰 Maior DY Sustentável</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#22c55e; line-height:1.2;'>{top_dy['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_dy['nome'])}'>{html.escape(top_dy['nome'])}</div>"
                                 "</div>"
                                 "<div>"
                                 f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_dy['cotacao'])}</strong></div>"
                                 f"<div style='font-size:13px;'>DY 12m: <strong>{fmt_num(top_dy['dy_12m'], 2)}%</strong></div>"
-                                f"<div style='font-size:12px; opacity:0.85;'>Teto Bazin: <strong>{bz_txt}</strong></div>"
+                                f"<div style='font-size:12px; opacity:0.85; min-height:22px; display:flex; align-items:center;'>Teto Bazin:&nbsp;<strong>{bz_txt}</strong></div>"
                                 "</div>"
                                 "</div>",
                                 unsafe_allow_html=True,
                             )
                         else:
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div style='font-size:14px; font-weight:700;'>💰 Maior DY Sustentável</div>"
                                 "<div style='font-size:12px; opacity:0.75;'>Sem ativo elegível com ROE &gt; 10% e DY &gt; 0% neste filtro.</div>"
                                 "<div></div>"
@@ -4903,23 +5186,23 @@ with tab1:
                             d200_i = top_ifr.get("dist_mm200_pct")
                             d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>⚡ Oportunidade Técnica</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#facc15;'>{top_ifr['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_ifr['nome'][:28])}</div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>⚡ Oportunidade Técnica</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#facc15; line-height:1.2;'>{top_ifr['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_ifr['nome'])}'>{html.escape(top_ifr['nome'])}</div>"
                                 "</div>"
                                 "<div>"
                                 f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_ifr['cotacao'])}</strong></div>"
                                 f"<div style='font-size:13px;'>IFR (14d): <strong>{fmt_num(top_ifr['ifr_14'], 1)}</strong></div>"
-                                f"<div style='font-size:12px; opacity:0.85;'>Dist. MM200: <strong>{d200_s}</strong></div>"
+                                f"<div style='font-size:12px; opacity:0.85; min-height:22px; display:flex; align-items:center;'>Dist. MM200:&nbsp;<strong>{d200_s}</strong></div>"
                                 "</div>"
                                 "</div>",
                                 unsafe_allow_html=True,
                             )
                         else:
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div style='font-size:14px; font-weight:700;'>⚡ Oportunidade Técnica</div>"
                                 "<div style='font-size:12px; opacity:0.75;'>Indicadores técnicos não carregados para este filtro.</div>"
                                 "<div></div>"
@@ -4940,23 +5223,23 @@ with tab1:
                         if cands_gr:
                             ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px;'>🛡️ Maior Desconto Graham</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#38bdf8;'>{top_gr['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8;'>{html.escape(top_gr['nome'][:28])}</div>"
+                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>🛡️ Maior Desconto Graham</div>"
+                                f"<div style='font-size:20px; font-weight:700; color:#38bdf8; line-height:1.2;'>{top_gr['ticker']}</div>"
+                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_gr['nome'])}'>{html.escape(top_gr['nome'])}</div>"
                                 "</div>"
                                 "<div>"
                                 f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_gr['cotacao'])}</strong></div>"
                                 f"<div style='font-size:13px;'>Graham: <strong>R$ {fmt_num(top_gr['graham'])}</strong></div>"
-                                f"<div style='font-size:12px; color:#22c55e; font-weight:700;'>Margem: +{fmt_num(ms_best, 1)}%</div>"
+                                f"<div style='font-size:12px; color:#22c55e; font-weight:700; min-height:22px; display:flex; align-items:center;'>Margem: +{fmt_num(ms_best, 1)}%</div>"
                                 "</div>"
                                 "</div>",
                                 unsafe_allow_html=True,
                             )
                         else:
                             st.markdown(
-                                "<div style='min-height:155px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                                 "<div style='font-size:14px; font-weight:700;'>🛡️ Maior Desconto Graham</div>"
                                 "<div style='font-size:12px; opacity:0.75;'>Nenhum ativo abaixo do valor de Graham neste filtro.</div>"
                                 "<div></div>"
@@ -4967,7 +5250,7 @@ with tab1:
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
             with st.container(border=True):
-                c_modo_sc, c_filt_ver, c_dic_tab = st.columns([2.0, 1.35, 0.9])
+                c_modo_sc, c_filt_ver, c_dic_tab = st.columns([2.0, 1.35, 0.9], vertical_alignment="bottom")
                 with c_modo_sc:
                     st.radio(
                         "🎯 Modo de Análise / Score:",
@@ -4985,11 +5268,10 @@ with tab1:
                         on_change=_sync_ver_tab,
                     )
                 with c_dic_tab:
-                    st.markdown("<div style='padding-top:26px;'></div>", unsafe_allow_html=True)
                     if st.button("📖 Dicionário de Termos", key="btn_dic_tab1", use_container_width=True):
                         modal_dicionario()
 
-            c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2])
+            c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2], vertical_alignment="bottom")
             opcoes_ordenacao = {
                 "Atratividade (Score Ativo)": "score_ativo",
                 "Score Geral (60% LP + 40% CP)": "score_geral",
@@ -5091,7 +5373,7 @@ with tab1:
             else:
                 comp_set = set(st.session_state.get("comp_selecionados", []))
                 if comp_set:
-                    c_info_cmp, c_btn_cmp = st.columns([4, 1])
+                    c_info_cmp, c_btn_cmp = st.columns([4, 1], vertical_alignment="center")
                     with c_info_cmp:
                         st.info(
                             f"⚖️ **{len(comp_set)} ativo(s) selecionado(s) para comparar:** "
@@ -5219,7 +5501,7 @@ with tab1:
                                 unsafe_allow_html=True,
                             )
                             with st.container(border=True):
-                                c_rx1, c_rx2 = st.columns([3.8, 1])
+                                c_rx1, c_rx2 = st.columns([3.8, 1], vertical_alignment="bottom")
                                 with c_rx1:
                                     st.selectbox(
                                         "🔎 Raio-X do Ativo selecionado:",
@@ -5227,7 +5509,6 @@ with tab1:
                                         key="raiox_ativo_sel",
                                     )
                                 with c_rx2:
-                                    st.markdown("<div style='padding-top:28px;'></div>", unsafe_allow_html=True)
                                     if st.button("✖️ Fechar Raio-X", key="btn_fechar_raiox", use_container_width=True):
                                         st.session_state["raiox_visivel"] = False
                                         st.rerun()
@@ -5709,7 +5990,7 @@ with tab1:
                     if st.session_state.get("_last_limite_news") != limite_news:
                         st.session_state["qtd_news_input"] = limite_news
                         st.session_state["_last_limite_news"] = limite_news
-                    c_nw1, c_nw2 = st.columns([1.4, 2.6])
+                    c_nw1, c_nw2 = st.columns([1.4, 2.6], vertical_alignment="bottom")
                     with c_nw1:
                         qtd_news = st.number_input(
                             f"Buscar notícias para os primeiros N ativos (1 a {limite_news}):",
@@ -5794,8 +6075,12 @@ with tab2:
         for idx, r in enumerate(itens_comp):
             with cols[idx % len(cols)]:
                 with st.container(border=True):
-                    st.markdown(f"### {r['ticker']} ({r['pos_ranking']}º)")
-                    st.caption(r["nome"])
+                    st.markdown(
+                        f"<h3 style='margin:0 0 2px 0;'>{r['ticker']} ({r['pos_ranking']}º)</h3>"
+                        f"<div style='font-size:12.5px; opacity:0.75; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:8px;' "
+                        f"title='{html.escape(r['nome'])}'>{html.escape(r['nome'])}</div>",
+                        unsafe_allow_html=True,
+                    )
                     st.metric("Cotação Atual", f"R$ {fmt_num(r['cotacao'])}", f"DY 12m: {fmt_num(r['dy_12m'])}%")
                     st.write(f"**Score:** {r['score']}/100")
                     pvp_txt = f"{fmt_num(r['pvp'])} {'🟢' if r['pvp'] < 1 else '🔴'}" if r["pvp"] is not None else "N/A"
@@ -5809,7 +6094,7 @@ with tab2:
                     st.markdown(f"**Graham:** {html_preco_ms(r['graham'], r['cotacao'])}", unsafe_allow_html=True)
 
         st.markdown("### 📈 Comparação de Rentabilidade (%) no Período")
-        cp1, cp2 = st.columns([3, 1.2])
+        cp1, cp2 = st.columns([3, 1.2], vertical_alignment="bottom")
         with cp1:
             per_comp = st.radio("Período da comparação:", ["30 D", "6 M", "YTD", "1 A", "5 A", "10 A"], index=3, horizontal=True, key="comp_per")
         with cp2:
@@ -5861,7 +6146,7 @@ with tab3:
     if not usuario_atual:
         render_tela_login(key_prefix="tab_cart")
     else:
-        c_head, c_btn_top = st.columns([3.5, 1.3])
+        c_head, c_btn_top = st.columns([3.5, 1.3], vertical_alignment="center")
         with c_head:
             st.subheader(f"💼 Minha Carteira — {usuario_atual}")
         with c_btn_top:
@@ -6001,26 +6286,46 @@ with tab3:
             with k1:
                 with st.container(border=True):
                     cor_v = "#22c55e" if var_cart_pct >= 0 else "#ef4444"
-                    st.caption("💼 Patrimônio total")
-                    st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(total_atual)}</span> <span style='color:{cor_v}; font-weight:600;'>{var_cart_pct:+.2f}%</span>", unsafe_allow_html=True)
-                    st.caption(f"Valor investido: **R$ {fmt_num(total_investido)}**")
+                    st.markdown(
+                        "<div style='min-height:92px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                        "<div style='font-size:13px; opacity:0.78;'>💼 Patrimônio total</div>"
+                        f"<div style='line-height:1.25;'><span style='font-size:23px; font-weight:700;'>R$ {fmt_num(total_atual)}</span> <span style='color:{cor_v}; font-weight:600;'>{var_cart_pct:+.2f}%</span></div>"
+                        f"<div style='font-size:12.5px; opacity:0.82;'>Valor investido: <strong>R$ {fmt_num(total_investido)}</strong></div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
             with k2:
                 with st.container(border=True):
                     cor_l = "#22c55e" if lucro_total >= 0 else "#ef4444"
-                    st.caption("💰 Lucro total")
-                    st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_l};'>R$ {fmt_num(lucro_total)}</span>", unsafe_allow_html=True)
-                    st.caption(f"Ganho Cap: **R$ {fmt_num(ganho_cap_tot)}** | Divs: **R$ {fmt_num(divs_total_recebidos)}**")
+                    st.markdown(
+                        "<div style='min-height:92px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                        "<div style='font-size:13px; opacity:0.78;'>💰 Lucro total</div>"
+                        f"<div style='font-size:23px; font-weight:700; color:{cor_l}; line-height:1.25;'>R$ {fmt_num(lucro_total)}</div>"
+                        f"<div style='font-size:12.5px; opacity:0.82;'>Ganho Cap: <strong>R$ {fmt_num(ganho_cap_tot)}</strong> | Divs: <strong>R$ {fmt_num(divs_total_recebidos)}</strong></div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
             with k3:
                 with st.container(border=True):
-                    st.caption("💵 Proventos Recebidos (12M)")
-                    st.markdown(f"<span style='font-size:24px; font-weight:700;'>R$ {fmt_num(divs_12m_recebidos)}</span>", unsafe_allow_html=True)
-                    st.caption(f"Total recebido desde compras: **R$ {fmt_num(divs_total_recebidos)}**")
+                    st.markdown(
+                        "<div style='min-height:92px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                        "<div style='font-size:13px; opacity:0.78;'>💵 Proventos Recebidos (12M)</div>"
+                        f"<div style='font-size:23px; font-weight:700; line-height:1.25;'>R$ {fmt_num(divs_12m_recebidos)}</div>"
+                        f"<div style='font-size:12.5px; opacity:0.82;'>Total recebido desde compras: <strong>R$ {fmt_num(divs_total_recebidos)}</strong></div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
             with k4:
                 with st.container(border=True):
                     cor_r = "#22c55e" if rent_total_pct >= 0 else "#ef4444"
-                    st.caption("📈 Rentabilidade (c/ dividendos)")
-                    st.markdown(f"<span style='font-size:24px; font-weight:700; color:{cor_r};'>{rent_total_pct:+.2f}%</span>", unsafe_allow_html=True)
-                    st.caption(f"Variação pura do preço: **{var_cart_pct:+.2f}%**")
+                    st.markdown(
+                        "<div style='min-height:92px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                        "<div style='font-size:13px; opacity:0.78;'>📈 Rentabilidade (c/ dividendos)</div>"
+                        f"<div style='font-size:23px; font-weight:700; color:{cor_r}; line-height:1.25;'>{rent_total_pct:+.2f}%</div>"
+                        f"<div style='font-size:12.5px; opacity:0.82;'>Variação pura do preço: <strong>{var_cart_pct:+.2f}%</strong></div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
 
             g_esq, g_dir = st.columns([1.8, 1])
             with g_esq:
@@ -6144,7 +6449,7 @@ with tab3:
             st.markdown(html_c, unsafe_allow_html=True)
 
             with st.expander("🧭 Assistente de Aporte Inteligente — Sugestão de Onde Aportar este Mês", expanded=False):
-                ca1, ca2 = st.columns([1.4, 2.2])
+                ca1, ca2 = st.columns([1.4, 2.2], vertical_alignment="bottom")
                 with ca1:
                     valor_aporte = st.number_input(
                         "Valor disponível para aporte este mês (R$):",
@@ -6321,13 +6626,17 @@ with tab3:
                             with col_s:
                                 with st.container(border=True):
                                     st.markdown(
+                                        "<div style='min-height:205px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                                        "<div>"
                                         f"<div style='font-size:19px; font-weight:700; color:#60a5fa;'>{ca['ticker']}</div>"
-                                        f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px;'>{html.escape(ca['nome'])}</div>"
+                                        f"<div style='font-size:12px; opacity:0.8; margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(ca['nome'])}'>{html.escape(ca['nome'])}</div>"
                                         f"<div style='margin-bottom:6px;'>{badge_veredito_html(ca.get('veredito', ''))}</div>"
                                         f"<div style='font-size:15px; font-weight:700; color:#22c55e;'>Comprar: {sug['qtd']} ações</div>"
                                         f"<div style='font-size:14px; margin-bottom:6px;'>Custo do lote: <strong>R$ {fmt_num(sug['custo'])}</strong></div>"
                                         f"<div style='font-size:12px; opacity:0.9;'>Cotação: <strong>R$ {fmt_num(ca['cotacao'])}</strong> vs Teto: <strong>{sug['teto_txt']}</strong></div>"
-                                        f"<div style='font-size:12px; opacity:0.85; margin-top:6px;'>📝 {html.escape(sug['motivo'])}</div>",
+                                        "</div>"
+                                        f"<div style='font-size:12px; opacity:0.85; margin-top:8px;'>📝 {html.escape(sug['motivo'])}</div>"
+                                        "</div>",
                                         unsafe_allow_html=True,
                                     )
 
@@ -6337,7 +6646,7 @@ with tab3:
                 render_grafico_e_tabela_ativo(tk_c_sel, it_c_sel["nome"], base_ativo=it_c_sel, key_prefix="cart_rx")
 
         st.markdown("---")
-        c_l1, c_l2 = st.columns([3.5, 1.3])
+        c_l1, c_l2 = st.columns([3.5, 1.3], vertical_alignment="top")
         with c_l2:
             if st.button("➕ Adicionar Lançamento", type="primary", use_container_width=True, key="btn_add_bot"):
                 modal_adicionar_lancamento(tickers_b3)
@@ -6347,7 +6656,7 @@ with tab3:
                 if st.session_state["lancamentos"]:
                     df_l = pd.DataFrame(st.session_state["lancamentos"])
                     st.dataframe(df_l, use_container_width=True)
-                    c_del, c_limp, c_dl = st.columns([2, 1, 1.2])
+                    c_del, c_limp, c_dl = st.columns([2, 1, 1.2], vertical_alignment="bottom")
                     with c_del:
                         op_del = [
                             f"{i}: {x['data']} | {'Compra' if x['tipo']=='C' else 'Venda'} {x['qtd']:g} {x['ticker']} @ R$ {x['preco']:.2f}"

@@ -865,6 +865,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
+    _v: int = 2,
 ) -> pd.Series:
     """Tenta obter a série diária exata do gráfico do Investidor10 (retorna vazia se bloqueada/indisponível)."""
     mapa_dias = {
@@ -938,7 +939,14 @@ def buscar_serie_investidor10_chart(
             url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", str(dias), url_mont, flags=re.IGNORECASE)
             url_mont = re.sub(r"\$\{[^}]*adj[^}]*\}|\{(?:adjusted|ajustada)\}", adj_str, url_mont, flags=re.IGNORECASE)
             url_mont = re.sub(r"\$\{[^}]*(?:curr|moeda)[^}]*\}|\{(?:currency|moeda)\}", "real", url_mont, flags=re.IGNORECASE)
-            if "${" not in url_mont and "{" not in url_mont:
+            if "/chart/" in url_mont.lower():
+                url_mont = re.sub(
+                    r"(/chart/[^/]+/)\d+((?:/(?:true|false|1|0))(?:/[^/?#]+)?)?",
+                    lambda m: f"{m.group(1)}{dias}" + (f"/{adj_str}" + ("/real" if m.group(2) and m.group(2).count("/") >= 2 else "") if m.group(2) else ""),
+                    url_mont,
+                    flags=re.IGNORECASE,
+                )
+            if "${" not in url_mont and "{" not in url_mont and re.search(rf"(?:/|=){dias}(?:/|&|$)", url_mont):
                 cands_urls.append(url_mont)
     except Exception:
         return pd.Series(dtype=float)
@@ -971,7 +979,7 @@ def buscar_serie_investidor10_chart(
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
 
-    for url_c in urls_unicas[:4]:
+    for url_c in urls_unicas[:6]:
         try:
             r_c = sess.get(url_c, headers=api_hdrs, timeout=3.5)
             if r_c.status_code in (401, 403, 429):
@@ -1020,6 +1028,17 @@ def buscar_serie_investidor10_chart(
             if len(datas) >= 3:
                 s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
                 s_out = s_out[~s_out.index.duplicated(keep="last")]
+                span_dias = int((s_out.index[-1] - s_out.index[0]).days)
+                dt_ini_s = s_out.index[0].date()
+                dt_fim_s = s_out.index[-1].date()
+                min_spans = {"6 M": 100, "1 A": 240, "5 A": 1400, "10 A": 3100, "15 A": 4700}
+                max_spans = {"7 D": 21, "30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
+                if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
+                    continue
+                if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
+                    continue
+                if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                    continue
                 if cot_live and float(cot_live) > 0.0 and abs(float(s_out.iloc[-1]) - float(cot_live)) / float(cot_live) > 0.001:
                     s_out.iloc[-1] = float(cot_live)
                 return s_out

@@ -1631,8 +1631,8 @@ def _calc_impostos_renda_fixa(ganho_bruto: float, dias_corridos: int) -> tuple[f
 
 
 @st.cache_data(ttl=43200, show_spinner=False)
-def buscar_historico_cdi_bcb() -> tuple[pd.Series, float | None]:
-    """Retorna (serie_cdi_diario_pct, cdi_anual_atual_pct) via API SGS do Banco Central."""
+def buscar_historico_selic_bcb() -> tuple[pd.Series, float | None]:
+    """Retorna (serie_selic_diaria_pct, selic_anual_atual_pct) via API SGS do Banco Central."""
     hoje_brt = datetime.now(BRT).date()
     janelas = [
         (hoje_brt - timedelta(days=365 * 16 + 30), hoje_brt - timedelta(days=365 * 8 + 1)),
@@ -1666,12 +1666,12 @@ def buscar_historico_cdi_bcb() -> tuple[pd.Series, float | None]:
             return pd.Series(dtype=float)
         return pd.Series(df_s["val"].values, index=pd.DatetimeIndex(df_s["dt"]))
 
-    serie = _baixar_serie_sgs(12)
+    serie = _baixar_serie_sgs(11)
     if serie.empty:
-        serie = _baixar_serie_sgs(11)
+        serie = _baixar_serie_sgs(12)
 
-    cdi_aa = None
-    for cod_aa, ajuste_aa in ((4389, 0.0), (432, -0.10)):
+    selic_aa = None
+    for cod_aa in (1178, 432):
         try:
             url_aa = (
                 f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod_aa}/dados"
@@ -1681,19 +1681,74 @@ def buscar_historico_cdi_bcb() -> tuple[pd.Series, float | None]:
             if resp_aa.status_code == 200:
                 arr_aa = resp_aa.json()
                 if isinstance(arr_aa, list) and arr_aa:
-                    v_aa = float(arr_aa[-1]["valor"]) + ajuste_aa
+                    v_aa = float(arr_aa[-1]["valor"])
                     if v_aa > 0:
-                        cdi_aa = v_aa
+                        selic_aa = v_aa
                         break
         except Exception:
             continue
 
-    if cdi_aa is None and not serie.empty:
+    if selic_aa is None and not serie.empty:
         r_ult = float(serie.iloc[-1]) / 100.0
         if r_ult > 0:
-            cdi_aa = ((1.0 + r_ult) ** 252.0 - 1.0) * 100.0
+            selic_aa = ((1.0 + r_ult) ** 252.0 - 1.0) * 100.0
 
-    return serie, cdi_aa
+    return serie, selic_aa
+
+
+@st.cache_data(ttl=43200, show_spinner=False)
+def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: float) -> float | None:
+    """Consulta exatamente a Calculadora do Cidadão do BCB (Correção pela Taxa Selic)."""
+    try:
+        url = "https://www3.bcb.gov.br/CALCIDADAO/publico/corrigirPelaSelic.do?method=corrigirPelaSelic"
+        payload = {
+            "aba": "4",
+            "dataInicial": dt_ini_str,
+            "dataFinal": dt_fim_str,
+            "valorCorrecao": f"{valor:.2f}".replace(".", ","),
+        }
+        resp = requests.post(
+            url,
+            data=payload,
+            headers={
+                **HEADERS,
+                "Referer": "https://www3.bcb.gov.br/CALCIDADAO/publico/exibirFormCorrecaoValores.do?method=exibirFormCorrecaoValores&aba=4",
+            },
+            timeout=6,
+        )
+        if resp.status_code != 200:
+            return None
+        soup = BeautifulSoup(resp.text, "lxml")
+        txt = " ".join(soup.get_text(" ", strip=True).split())
+        m = re.search(r"Valor corrigido na data final\s*:?\s*R\$\s*([\d.]+,\d{2})", txt, flags=re.IGNORECASE)
+        if m:
+            return parse_br_num(m.group(1))
+        m_idx = re.search(r"[ÍI]ndice de corre[çc][ãa]o no per[íi]odo\s*:?\s*([\d.]+,\d+)", txt, flags=re.IGNORECASE)
+        if m_idx:
+            fator = parse_br_num(m_idx.group(1))
+            if fator and fator > 0:
+                return valor * fator
+    except Exception:
+        pass
+    return None
+
+
+def _calc_tesouro_selic_capital_mensal(meta_mensal: float, selic_aa_pct: float, aliq_ir: float) -> float:
+    """Calcula capital necessário hoje no Tesouro Selic para gerar meta_mensal líquida (com IR e Custódia B3 0,20% a.a. > R$ 10k)."""
+    if meta_mensal <= 0.0 or selic_aa_pct <= 0.0:
+        return 0.0
+    selic_am_bruto = ((1.0 + (selic_aa_pct / 100.0)) ** (1.0 / 12.0)) - 1.0
+    taxa_liq_sem_b3 = selic_am_bruto * (1.0 - aliq_ir)
+    if taxa_liq_sem_b3 <= 0.0:
+        return 0.0
+    cap_0 = meta_mensal / taxa_liq_sem_b3
+    if cap_0 <= 10_000.0:
+        return cap_0
+    taxa_b3_am = ((1.0 + 0.002) ** (1.0 / 12.0)) - 1.0
+    denom = taxa_liq_sem_b3 - taxa_b3_am
+    if denom <= 0.0:
+        return cap_0
+    return (meta_mensal - (10_000.0 * taxa_b3_am)) / denom
 
 
 def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
@@ -3358,7 +3413,7 @@ def render_grafico_e_tabela_ativo(
         )
         st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
-        serie_cdi_bcb, cdi_aa_atual = buscar_historico_cdi_bcb()
+        serie_selic_bcb, _ = buscar_historico_selic_bcb()
         serie_max = buscar_serie_max_ajustada(ticker)
         if not serie_max.empty:
             with st.container(border=True):
@@ -3379,6 +3434,7 @@ def render_grafico_e_tabela_ativo(
                 dt_fim_ts = serie_max.index[-1].normalize()
                 dias_corridos_sim = max(1, int((dt_fim_ts - dt_base_ts).days))
                 data_efetiva = dt_base_ts.strftime("%d/%m/%Y")
+                data_final_str = dt_fim_ts.strftime("%d/%m/%Y")
 
                 p_base = float(recorte.iloc[0]) if not recorte.empty else float(serie_max.iloc[0])
                 p_hoje = float(serie_max.iloc[-1])
@@ -3400,55 +3456,67 @@ def render_grafico_e_tabela_ativo(
                 ret_acao_pct = ((valor_acao_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
                 cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
 
-                if not serie_cdi_bcb.empty:
-                    sub_cdi = serie_cdi_bcb[(serie_cdi_bcb.index > dt_base_ts) & (serie_cdi_bcb.index <= dt_fim_ts)]
-                    fator_cdi = float((1.0 + (sub_cdi / 100.0)).prod()) if not sub_cdi.empty else 1.0
-                    valor_cdi_bruto = valor_inv * fator_cdi
-                    ganho_cdi_bruto = max(0.0, valor_cdi_bruto - valor_inv)
-                    iof_cdi, ir_cdi, aliq_iof_cdi, aliq_ir_cdi, imp_cdi = _calc_impostos_renda_fixa(ganho_cdi_bruto, dias_corridos_sim)
-                    valor_cdi_liq = valor_cdi_bruto - imp_cdi
-                    ret_cdi_pct = ((valor_cdi_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                    txt_imp_cdi = (
-                        f"IOF ({fmt_num(aliq_iof_cdi, 0)}%): -R$ {fmt_num(iof_cdi)} · IR ({fmt_num(aliq_ir_cdi, 1)}%): -R$ {fmt_num(ir_cdi)}"
-                        if iof_cdi > 0.0
-                        else f"IR ({fmt_num(aliq_ir_cdi, 1)}%): -R$ {fmt_num(ir_cdi)} · Bruto: R$ {fmt_num(valor_cdi_bruto)}"
-                    )
-                    card_cdi_html = (
+                valor_selic_bruto = calcular_selic_calculadora_cidadao(data_efetiva, data_final_str, valor_inv)
+                if valor_selic_bruto is None and not serie_selic_bcb.empty:
+                    # Convenção oficial da Calculadora do Cidadão: data inicial inclusive, data final exclusive
+                    sub_selic = serie_selic_bcb[(serie_selic_bcb.index >= dt_base_ts) & (serie_selic_bcb.index < dt_fim_ts)]
+                    fator_selic = float((1.0 + (sub_selic / 100.0)).prod()) if not sub_selic.empty else 1.0
+                    valor_selic_bruto = valor_inv * fator_selic
+
+                if valor_selic_bruto is not None:
+                    ganho_selic_bruto = max(0.0, valor_selic_bruto - valor_inv)
+                    iof_selic, ir_selic, aliq_iof_selic, aliq_ir_selic, imp_selic = _calc_impostos_renda_fixa(ganho_selic_bruto, dias_corridos_sim)
+                    excedente_b3 = max(0.0, ((valor_inv + valor_selic_bruto) / 2.0) - 10_000.0)
+                    custodia_b3 = excedente_b3 * (((1.0 + 0.002) ** (dias_corridos_sim / 365.0)) - 1.0) if excedente_b3 > 0.0 else 0.0
+                    valor_selic_liq = max(0.0, valor_selic_bruto - imp_selic - custodia_b3)
+                    ret_selic_pct = ((valor_selic_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+
+                    partes_enc = []
+                    if iof_selic > 0.0:
+                        partes_enc.append(f"IOF ({fmt_num(aliq_iof_selic, 0)}%): -R$ {fmt_num(iof_selic)}")
+                    partes_enc.append(f"IR ({fmt_num(aliq_ir_selic, 1)}%): -R$ {fmt_num(ir_selic)}")
+                    if custodia_b3 > 0.0:
+                        partes_enc.append(f"B3: -R$ {fmt_num(custodia_b3)}")
+                    else:
+                        partes_enc.append("B3: Isento (≤R$ 10k)")
+                    txt_imp_selic = f"Bruto Calc. Cidadão: R$ {fmt_num(valor_selic_bruto)} · " + " · ".join(partes_enc)
+
+                    card_selic_html = (
                         "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
                         "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                        "🏦 Em 100% do CDI (líquido)"
+                        f"🏛️ No Tesouro Selic (líquido · {data_efetiva} → {data_final_str})"
                         "</div>"
                         "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
-                        f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_cdi_liq)}</strong>"
-                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({ret_cdi_pct:+.2f}%)</span>"
+                        f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_selic_liq)}</strong>"
+                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({ret_selic_pct:+.2f}%)</span>"
                         "</div>"
-                        f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_cdi}</div>"
+                        f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_selic}</div>"
                         "</div>"
                     )
-                    diff_sim = valor_acao_liq - valor_cdi_liq
-                    diff_pp = ret_acao_pct - ret_cdi_pct
+                    diff_sim = valor_acao_liq - valor_selic_liq
+                    diff_pp = ret_acao_pct - ret_selic_pct
                     if diff_sim >= 0.0:
                         resumo_sim_html = (
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
                             f"border-left:3px solid #22c55e; font-size:12.5px;'>"
-                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({diff_pp:+.2f} p.p.) a mais que 100% do CDI no período "
-                            f"(já descontando impostos nos dois casos)."
+                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({diff_pp:+.2f} p.p.) a mais que o Tesouro Selic (Calculadora do Cidadão) "
+                            f"(já descontando impostos e custódia nos dois casos)."
                             f"</div>"
                         )
                     else:
                         resumo_sim_html = (
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
                             f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
-                            f"🏦 <strong>100% do CDI</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({abs(diff_pp):.2f} p.p.) a mais que {ticker} no período "
-                            f"(já descontando impostos nos dois casos)."
+                            f"🏛️ O <strong>Tesouro Selic (Calculadora do Cidadão)</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({abs(diff_pp):.2f} p.p.) a mais que {ticker} no período "
+                            f"(já descontando impostos e custódia nos dois casos)."
                             f"</div>"
                         )
                 else:
-                    card_cdi_html = (
+                    card_selic_html = (
                         "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
-                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏦 Em 100% do CDI (líquido)</div>"
+                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
+                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏛️ No Tesouro Selic (líquido)</div>"
                         "<div style='font-size:13px; opacity:0.75;'>Indisponível no momento</div>"
                         "<div style='font-size:11px; opacity:0.7;'>API do Banco Central temporariamente indisponível.</div>"
                         "</div>"
@@ -3458,9 +3526,9 @@ def render_grafico_e_tabela_ativo(
                 st.markdown(
                     "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; align-items:stretch; margin-top:6px;'>"
                     "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
-                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:110px;'>"
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
                     "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                    f"📈 Em {ticker} (líquido · desde {data_efetiva})"
+                    f"📈 Em {ticker} (líquido · {data_efetiva} → {data_final_str})"
                     "</div>"
                     "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
                     f"<strong style='color:{cor_sim}; font-size:21px;'>R$ {fmt_num(valor_acao_liq)}</strong>"
@@ -3468,7 +3536,7 @@ def render_grafico_e_tabela_ativo(
                     "</div>"
                     f"<div style='font-size:11px; opacity:0.82; min-height:30px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{nota_ir_acao} · Reinvestindo dividendos</div>"
                     "</div>"
-                    f"{card_cdi_html}"
+                    f"{card_selic_html}"
                     "</div>"
                     f"{resumo_sim_html}",
                     unsafe_allow_html=True,
@@ -3476,7 +3544,7 @@ def render_grafico_e_tabela_ativo(
 
     # --- SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
     if base_ativo:
-        _, cdi_aa_atual = buscar_historico_cdi_bcb()
+        _, selic_aa_atual = buscar_historico_selic_bcb()
         cot_sim = float(base_ativo.get("cotacao") or 0.0)
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])
@@ -3494,16 +3562,20 @@ def render_grafico_e_tabela_ativo(
                     key=f"{key_prefix}_meta_renda_{ticker}",
                 )
             with sr_in2:
-                cdi_badge_txt = f"CDI atual (BCB): {fmt_num(cdi_aa_atual, 2)}% a.a." if cdi_aa_atual else "CDI atual: indisponível"
+                selic_badge_txt = f"Selic atual (BCB): {fmt_num(selic_aa_atual, 2)}% a.a." if selic_aa_atual else "Selic atual: indisponível"
                 regra_div_txt = (
                     "Acima de R$ 50 mil/mês por empresa aplica 10% IRRF (Lei 15.270/2025)"
                     if meta_mensal > 50_000.0
                     else "Dividendos isentos de IR até R$ 50 mil/mês por empresa"
                 )
                 st.markdown(
-                    "<div style='background:rgba(128,128,128,0.09); border:1px solid rgba(128,128,128,0.24); border-radius:6px; "
-                    "padding:8px 12px; min-height:40px; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:12px;'>"
-                    f"<span>🏦 <strong>{cdi_badge_txt}</strong></span>"
+                    "<style>"
+                    "div[data-testid='stElementContainer']:has(.selic-info-pill),"
+                    "div[data-testid='stMarkdownContainer']:has(.selic-info-pill){margin:0!important;padding:0!important;}"
+                    "</style>"
+                    "<div class='selic-info-pill' style='background:rgba(128,128,128,0.09); border:1px solid rgba(128,128,128,0.24); border-radius:8px; "
+                    "padding:10px 14px; min-height:44px; box-sizing:border-box; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; font-size:12px;'>"
+                    f"<span>🏛️ <strong>{selic_badge_txt}</strong></span>"
                     f"<span style='opacity:0.85;'>⚖️ {regra_div_txt}</span>"
                     "</div>",
                     unsafe_allow_html=True,
@@ -3521,32 +3593,32 @@ def render_grafico_e_tabela_ativo(
             else:
                 dpa_base_sim = 0.0
 
-            if cdi_aa_atual and cdi_aa_atual > 0:
-                cdi_am_bruto = ((1.0 + (cdi_aa_atual / 100.0)) ** (1.0 / 12.0)) - 1.0
-                cap_cdi_15 = meta_mensal / (cdi_am_bruto * (1.0 - 0.15)) if cdi_am_bruto > 0 else 0.0
-                cap_cdi_225 = meta_mensal / (cdi_am_bruto * (1.0 - 0.225)) if cdi_am_bruto > 0 else 0.0
-                card_cdi_rp = (
+            if selic_aa_atual and selic_aa_atual > 0:
+                cap_selic_15 = _calc_tesouro_selic_capital_mensal(meta_mensal, selic_aa_atual, 0.15)
+                cap_selic_225 = _calc_tesouro_selic_capital_mensal(meta_mensal, selic_aa_atual, 0.225)
+                nota_b3_rp = " + B3 0,20% (>10k)" if cap_selic_15 > 10_000.0 else " · Isento B3 (≤10k)"
+                card_selic_rp = (
                     "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
                     "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
                     "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>"
-                    "🏦 Capital em 100% do CDI Hoje"
+                    "🏛️ Capital no Tesouro Selic Hoje"
                     "</div>"
                     "<div style='min-height:36px; display:flex; align-items:center; justify-content:center; margin:4px 0;'>"
-                    f"<span style='font-size:21px; font-weight:700; color:#fbbf24;'>R$ {fmt_num(cap_cdi_15)}</span>"
+                    f"<span style='font-size:21px; font-weight:700; color:#fbbf24;'>R$ {fmt_num(cap_selic_15)}</span>"
                     "</div>"
                     "<div style='font-size:11px; opacity:0.82; min-height:32px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>"
-                    f"Líq. 15% IR (&gt;2a) · c/ 22,5% IR (≤6m): R$ {fmt_num(cap_cdi_225)}"
+                    f"Líq. 15% IR (&gt;2a){nota_b3_rp} · c/ 22,5% IR (≤6m): R$ {fmt_num(cap_selic_225)}"
                     "</div>"
                     "</div>"
                 )
             else:
-                cap_cdi_15 = None
-                card_cdi_rp = (
+                cap_selic_15 = None
+                card_selic_rp = (
                     "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
                     "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:112px;'>"
-                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>🏦 Capital em 100% do CDI Hoje</div>"
+                    "<div style='font-size:12px; opacity:0.88; min-height:22px; display:flex; align-items:center; justify-content:center;'>🏛️ Capital no Tesouro Selic Hoje</div>"
                     "<div style='font-size:14px; opacity:0.75; min-height:36px; display:flex; align-items:center; justify-content:center;'>Indisponível</div>"
-                    "<div style='font-size:11px; opacity:0.7; min-height:32px; display:flex; align-items:center; justify-content:center;'>Taxa CDI do BCB indisponível.</div>"
+                    "<div style='font-size:11px; opacity:0.7; min-height:32px; display:flex; align-items:center; justify-content:center;'>Taxa Selic do BCB indisponível.</div>"
                     "</div>"
                 )
 
@@ -3560,7 +3632,7 @@ def render_grafico_e_tabela_ativo(
                     "<div style='font-size:14px; opacity:0.8; min-height:36px; display:flex; align-items:center; justify-content:center;'>Sem proventos base</div>"
                     f"<div style='font-size:11px; opacity:0.75; min-height:32px; display:flex; align-items:center; justify-content:center;'>{ticker} não possui histórico ou projeção de proventos positivos.</div>"
                     "</div>"
-                    f"{card_cdi_rp}"
+                    f"{card_selic_rp}"
                     "</div>",
                     unsafe_allow_html=True,
                 )
@@ -3595,18 +3667,18 @@ def render_grafico_e_tabela_ativo(
                     f"Cotação: R$ {fmt_num(cot_sim)} · Yield: {fmt_num(dy_impl_sim, 2)}% · {nota_ir_acao_rp}"
                     "</div>"
                     "</div>"
-                    f"{card_cdi_rp}"
+                    f"{card_selic_rp}"
                     "</div>",
                     unsafe_allow_html=True,
                 )
 
-                if cap_cdi_15 and cap_cdi_15 > 0:
-                    diff_cap_rp = custo_total_nec - cap_cdi_15
+                if cap_selic_15 and cap_selic_15 > 0:
+                    diff_cap_rp = custo_total_nec - cap_selic_15
                     if diff_cap_rp <= 0:
                         st.markdown(
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
                             f"border-left:3px solid #22c55e; font-size:12.5px;'>"
-                            f"💡 Pelo yield atual de <strong>{ticker}</strong>, você precisa de <strong>R$ {fmt_num(abs(diff_cap_rp))}</strong> a menos que em 100% do CDI (com IR de 15%) para receber R$ {fmt_num(meta_mensal)}/mês líquidos."
+                            f"💡 Pelo yield atual de <strong>{ticker}</strong>, você precisa de <strong>R$ {fmt_num(abs(diff_cap_rp))}</strong> a menos que no Tesouro Selic (com IR de 15% e custódia B3) para receber R$ {fmt_num(meta_mensal)}/mês líquidos."
                             f"</div>",
                             unsafe_allow_html=True,
                         )
@@ -3614,7 +3686,7 @@ def render_grafico_e_tabela_ativo(
                         st.markdown(
                             f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
                             f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
-                            f"💡 Hoje, <strong>100% do CDI</strong> exige <strong>R$ {fmt_num(diff_cap_rp)}</strong> a menos de capital inicial que <strong>{ticker}</strong> (já descontando 15% de IR &gt;2a); porém ações tendem a reajustar proventos pela inflação no longo prazo."
+                            f"💡 Hoje, o <strong>Tesouro Selic</strong> exige <strong>R$ {fmt_num(diff_cap_rp)}</strong> a menos de capital inicial que <strong>{ticker}</strong> (já descontando 15% de IR &gt;2a e custódia B3); porém ações tendem a reajustar proventos pela inflação no longo prazo."
                             f"</div>",
                             unsafe_allow_html=True,
                         )

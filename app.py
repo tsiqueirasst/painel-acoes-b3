@@ -3473,11 +3473,10 @@ def render_grafico_e_tabela_ativo(
                     f"{resumo_sim_html}",
                     unsafe_allow_html=True,
                 )
-    else:
-        _, cdi_aa_atual = buscar_historico_cdi_bcb()
 
     # --- SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
     if base_ativo:
+        _, cdi_aa_atual = buscar_historico_cdi_bcb()
         cot_sim = float(base_ativo.get("cotacao") or 0.0)
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])

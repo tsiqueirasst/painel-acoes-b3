@@ -1746,8 +1746,8 @@ def render_widget_ibov_google():
             line_color="rgba(154,160,166,0.65)",
         )
         fig_ib.update_layout(
-            height=165,
-            margin=dict(l=4, r=72, t=8, b=20),
+            height=185,
+            margin=dict(l=4, r=72, t=28, b=24),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=False,
@@ -3064,8 +3064,8 @@ def render_grafico_e_tabela_ativo(
 
         margem_y = (y_max - y_min) * 0.09 if y_max > y_min else y_max * 0.05
         layout_kw = dict(
-            height=350 if eh_candles else 320,
-            margin=dict(l=12, r=76, t=15, b=15),
+            height=368 if eh_candles else 340,
+            margin=dict(l=12, r=76, t=34, b=24),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=False,
@@ -5622,7 +5622,7 @@ with tab2:
                     )
                 )
         fig_comp.update_layout(
-            height=340, margin=dict(l=10, r=60, t=20, b=15),
+            height=355, margin=dict(l=10, r=60, t=36, b=24),
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             hovermode="x unified",
             dragmode="pan",
@@ -5829,7 +5829,7 @@ with tab3:
                         hovertemplate="Ganho de Capital: R$ %{y:,.2f}<extra></extra>",
                     ))
                     fig_ev.update_layout(
-                        barmode="relative", height=290, margin=dict(l=10, r=68, t=25, b=10),
+                        barmode="relative", height=305, margin=dict(l=10, r=68, t=36, b=24),
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                         dragmode="pan",
                         yaxis=dict(
@@ -6187,10 +6187,11 @@ with tab3:
 
 st.markdown(
     "<style>"
+    ".js-plotly-plot .plotly .modebar{top:-2px!important;right:4px!important;background:transparent!important;}"
     ".tv-measure-overlay{position:absolute;inset:0;pointer-events:none;z-index:60;overflow:visible;}"
     ".tv-measure-svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;}"
-    ".tv-measure-pill-btn{position:absolute;top:6px;left:10px;z-index:66;pointer-events:auto;"
-    "padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;cursor:pointer;user-select:none;"
+    ".tv-measure-pill-btn{position:absolute;bottom:2px;right:6px;z-index:66;pointer-events:auto;"
+    "padding:2px 8px;border-radius:6px;font-size:10.5px;font-weight:600;cursor:pointer;user-select:none;"
     "background:rgba(30,41,59,0.78);color:#cbd5e1;border:1px solid rgba(148,163,184,0.35);"
     "backdrop-filter:blur(4px);transition:all 0.15s ease;}"
     ".tv-measure-pill-btn:hover{border-color:#60a5fa;color:#ffffff;}"

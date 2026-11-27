@@ -819,13 +819,143 @@ def buscar_cambio_brl(moeda: str) -> pd.Series:
         return pd.Series(dtype=float)
     try:
         tk_fx = yf.Ticker(f"{moeda.upper()}BRL=X")
-        df_fx = tk_fx.history(period="6y", interval="1d")
+        df_fx = tk_fx.history(period="max", interval="1d")
         if df_fx is not None and not df_fx.empty:
             df_fx.index = pd.to_datetime(df_fx.index).tz_localize(None)
             return df_fx["Close"].dropna()
     except Exception:
         pass
     return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def buscar_dividendos_ativo(ticker: str) -> pd.Series:
+    try:
+        divs = yf.Ticker(f"{ticker}.SA").dividends
+        if divs is not None and not divs.empty:
+            divs.index = _idx_para_brt_naive(divs.index)
+            return divs[divs > 0].sort_index()
+    except Exception:
+        pass
+    return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def buscar_serie_investidor10_chart(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+) -> pd.Series:
+    """Tenta obter a série diária exata do gráfico do Investidor10 (retorna vazia se bloqueada/indisponível)."""
+    mapa_dias = {
+        "7 D": 7,
+        "30 D": 30,
+        "6 M": 180,
+        "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
+        "1 A": 365,
+        "5 A": 1825,
+        "10 A": 3650,
+        "15 A": 5475,
+    }
+    if periodo_label not in mapa_dias:
+        return pd.Series(dtype=float)
+
+    dias = mapa_dias[periodo_label]
+    adj_str = "true" if ajustada else "false"
+    sess = requests.Session()
+    sess.headers.update({
+        **HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+        "Referer": f"https://investidor10.com.br/acoes/{ticker.lower()}/",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+
+    cands_urls: list[str] = []
+    try:
+        resp_pg = sess.get(f"https://investidor10.com.br/acoes/{ticker.lower()}/", timeout=4)
+        if resp_pg.status_code != 200 or "cf-browser-verification" in resp_pg.text:
+            return pd.Series(dtype=float)
+        m_id = re.search(
+            r'(?:ticker[_-]?id|company[_-]?id|acao[_-]?id|data-id)\s*[:=]\s*["\']?(\d{1,7})',
+            resp_pg.text,
+            re.IGNORECASE,
+        )
+        if m_id:
+            tid = m_id.group(1)
+            cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}/real")
+            cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{dias}/{adj_str}")
+    except Exception:
+        return pd.Series(dtype=float)
+
+    cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias}/{adj_str}")
+
+    for url_c in cands_urls[:2]:
+        try:
+            r_c = sess.get(url_c, timeout=4)
+            if r_c.status_code in (401, 403, 429):
+                break
+            if r_c.status_code != 200:
+                continue
+            js = r_c.json()
+            lista_pts = None
+            if isinstance(js, list):
+                lista_pts = js
+            elif isinstance(js, dict):
+                for k_l in ("real", "data", "prices", "cotacoes", "chart"):
+                    if isinstance(js.get(k_l), list) and js[k_l]:
+                        lista_pts = js[k_l]
+                        break
+            if not lista_pts:
+                continue
+
+            datas, vals = [], []
+            for pt in lista_pts:
+                if not isinstance(pt, dict):
+                    continue
+                dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp")
+                vl_raw = (
+                    pt.get("price") if pt.get("price") is not None
+                    else (pt.get("value") if pt.get("value") is not None
+                    else (pt.get("close") if pt.get("close") is not None else pt.get("cotacao")))
+                )
+                if dt_raw is None or vl_raw is None:
+                    continue
+                dt_p = pd.to_datetime(dt_raw, dayfirst=bool(re.match(r"^\d{2}/\d{2}/\d{4}", str(dt_raw))), errors="coerce")
+                vl_p = parse_br_num(str(vl_raw)) if (isinstance(vl_raw, str) and "," in vl_raw) else pd.to_numeric(vl_raw, errors="coerce")
+                if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
+                    datas.append(dt_p.tz_localize(None) if getattr(dt_p, "tzinfo", None) else dt_p)
+                    vals.append(float(vl_p))
+            if len(datas) >= 3:
+                s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
+                s_out = s_out[~s_out.index.duplicated(keep="last")]
+                if cot_live and float(cot_live) > 0.0 and abs(float(s_out.iloc[-1]) - float(cot_live)) / float(cot_live) > 0.001:
+                    s_out.iloc[-1] = float(cot_live)
+                return s_out
+        except Exception:
+            break
+
+    return pd.Series(dtype=float)
+
+
+def _calc_ticks_y_i10(y_min: float, y_max: float) -> list[float]:
+    span = y_max - y_min
+    if span <= 0:
+        return [round(y_min, 2)]
+    raw_step = span / 5.0
+    mag = 10 ** math.floor(math.log10(raw_step))
+    cands = [1.0, 2.0, 2.5, 3.0, 5.0, 10.0]
+    step = next((c * mag for c in cands if c * mag >= raw_step), 10.0 * mag)
+    primeiro = math.ceil(y_min / step) * step
+    ticks = [round(y_min, 2)]
+    cur = primeiro
+    while cur < y_max:
+        if (cur - y_min) > step * 0.28 and (y_max - cur) > step * 0.28:
+            ticks.append(round(cur, 2))
+        cur += step
+    ticks.append(round(y_max, 2))
+    return sorted(set(ticks))
 
 
 # --- MOTOR CVM DADOS ABERTOS (DFP + ITR) ---
@@ -1502,14 +1632,9 @@ def buscar_ohlcv_preco(
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
             df = df[df.index >= (df.index.max() - timedelta(days=7))]
-    elif periodo_label == "15 A":
-        df = tk.history(period="max", interval="1d", auto_adjust=ajustada)
-        if df is not None and not df.empty:
-            df.index = _idx_para_brt_naive(df.index)
-            df = df[df.index >= (df.index.max() - pd.DateOffset(years=15))]
     else:
-        mapa = {"30 D": "1mo", "6 M": "6mo", "YTD": "ytd", "1 A": "1y", "5 A": "5y", "10 A": "10y"}
-        df = tk.history(period=mapa.get(periodo_label, "1y"), interval="1d", auto_adjust=ajustada)
+        mapa_fetch = {"30 D": "3mo", "6 M": "1y", "YTD": "2y", "1 A": "2y", "5 A": "10y", "10 A": "max", "15 A": "max"}
+        df = tk.history(period=mapa_fetch.get(periodo_label, "2y"), interval="1d", auto_adjust=ajustada)
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
 
@@ -1565,6 +1690,24 @@ def buscar_ohlcv_preco(
                     df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
                 if "Low" in df.columns:
                     df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
+
+        df = df.sort_index()
+        ult_d_ref = df.index.normalize().max()
+        offsets_per = {
+            "30 D": pd.DateOffset(days=30),
+            "6 M": pd.DateOffset(months=6),
+            "1 A": pd.DateOffset(years=1),
+            "5 A": pd.DateOffset(years=5),
+            "10 A": pd.DateOffset(years=10),
+            "15 A": pd.DateOffset(years=15),
+        }
+        if periodo_label == "YTD":
+            df = df[df.index.normalize() >= pd.Timestamp(year=ult_d_ref.year, month=1, day=1)]
+        elif periodo_label in offsets_per:
+            dt_corte = ult_d_ref - offsets_per[periodo_label]
+            sub_corte = df[df.index.normalize() >= dt_corte]
+            if not sub_corte.empty:
+                df = sub_corte
     elif cot_live and float(cot_live) > 0.0 and periodo_label == "1 D":
         cot_f = float(cot_live)
         if abs(float(df["Close"].iloc[-1]) - cot_f) / cot_f > 0.002:
@@ -3269,149 +3412,382 @@ def render_grafico_e_tabela_ativo(
                     st.markdown(partes_just_rx[1], unsafe_allow_html=True)
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
-    c_per, c_tipo, c_vis = st.columns([2.6, 1.1, 0.9], vertical_alignment="bottom")
-    with c_per:
-        periodo = st.radio(
-            "Período:",
-            ["1 D", "7 D", "30 D", "6 M", "YTD", "1 A", "5 A", "10 A", "15 A"],
-            index=5, horizontal=True, key=f"{key_prefix}_per_{ticker}",
-        )
-    with c_tipo:
-        tipo_cot = st.selectbox(
-            "Tipo:", ["Cotação ajustada", "Cotação simples"],
-            index=0, key=f"{key_prefix}_tipo_{ticker}",
-        )
-    with c_vis:
-        estilo_graf = st.selectbox(
-            "Estilo:", ["Área", "Candles (DEXTools)"],
-            index=0, key=f"{key_prefix}_vis_{ticker}",
-        )
+    opcoes_per_i10 = ["1 D", "7 D", "30 D", "6 M", "YTD", "1 A", "5 A", "10 A", "15 A"]
+    k_candles = f"{key_prefix}_candles_i10_{ticker}"
+    k_marcos = f"{key_prefix}_marcos_i10_{ticker}"
+    k_provs = f"{key_prefix}_provs_i10_{ticker}"
+    k_comp_ativos = f"{key_prefix}_comp_i10_{ticker}"
+    k_comp_ibov = f"{key_prefix}_comp_ibov_i10_{ticker}"
+    k_comp_selic = f"{key_prefix}_comp_selic_i10_{ticker}"
+    if k_candles not in st.session_state:
+        st.session_state[k_candles] = False
+    if k_marcos not in st.session_state:
+        st.session_state[k_marcos] = False
+    if k_provs not in st.session_state:
+        st.session_state[k_provs] = False
 
-    ajustada = tipo_cot == "Cotação ajustada"
-    cot_ref_live = float(base_ativo.get("cotacao") or 0.0) if base_ativo else None
-    df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_live=cot_ref_live)
-    serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
-
-    if serie.empty:
-        st.warning(f"Não foi possível carregar o gráfico de {ticker} para o período {periodo}.")
-    else:
-        p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
-        var_pct = ((p_fim - p_ini) / p_ini) * 100 if p_ini > 0 else 0.0
-        cor = "#22c55e" if var_pct >= 0 else "#ef4444"
-        fill_cor = "rgba(34, 197, 94, 0.22)" if var_pct >= 0 else "rgba(239, 68, 68, 0.22)"
-        sinal = "+" if var_pct >= 0 else ""
-
-        st.markdown(
-            f"<div style='font-size:26px; font-weight:700; margin-bottom:4px;'>"
-            f"R$ {fmt_num(p_fim)} "
-            f"<span style='font-size:16px; color:{cor}; font-weight:600;'>{sinal}{fmt_num(var_pct)}% ({periodo})</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        fig = go.Figure()
-        fmt_hover = "%{x|%d/%m/%Y %H:%M}" if periodo in ("1 D", "7 D") else "%{x|%d/%m/%Y}"
-        eh_candles = (estilo_graf != "Área") and all(c in df_ohlcv.columns for c in ("Open", "High", "Low", "Close"))
-
-        if eh_candles:
-            fig.add_trace(
-                go.Candlestick(
-                    x=df_ohlcv.index,
-                    open=df_ohlcv["Open"],
-                    high=df_ohlcv["High"],
-                    low=df_ohlcv["Low"],
-                    close=df_ohlcv["Close"],
-                    name=ticker,
-                    increasing_line_color="#22c55e",
-                    decreasing_line_color="#ef4444",
-                    increasing_fillcolor="#22c55e",
-                    decreasing_fillcolor="#ef4444",
+    with st.container(border=True):
+        c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
+        with c_i10_hdr1:
+            st.markdown(f"**📈 COTAÇÃO {ticker}**")
+        with c_i10_hdr2:
+            if hasattr(st, "segmented_control"):
+                periodo = st.segmented_control(
+                    "Período:",
+                    options=opcoes_per_i10,
+                    default="1 A",
+                    label_visibility="collapsed",
+                    key=f"{key_prefix}_per_seg_{ticker}",
+                    width="stretch",
                 )
-            )
-            if "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
-                cores_vol = [
-                    "rgba(34,197,94,0.35)" if float(c) >= float(o) else "rgba(239,68,68,0.35)"
-                    for o, c in zip(df_ohlcv["Open"], df_ohlcv["Close"])
-                ]
+                if not periodo:
+                    periodo = "1 A"
+            else:
+                periodo = st.radio(
+                    "Período:",
+                    opcoes_per_i10,
+                    index=5,
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"{key_prefix}_per_{ticker}",
+                )
+        with c_i10_hdr3:
+            dt_custom_ini = None
+            dt_custom_fim = None
+            if hasattr(st, "popover"):
+                with st.popover("📅", help="Filtrar intervalo personalizado de datas"):
+                    usar_custom_dt = st.checkbox("Usar datas personalizadas", key=f"{key_prefix}_use_dt_{ticker}")
+                    if usar_custom_dt:
+                        hoje_d_i10 = datetime.now(BRT).date()
+                        dt_custom_ini = st.date_input("De:", value=hoje_d_i10 - timedelta(days=365), format="DD/MM/YYYY", key=f"{key_prefix}_dt_i_{ticker}")
+                        dt_custom_fim = st.date_input("Até:", value=hoje_d_i10, format="DD/MM/YYYY", key=f"{key_prefix}_dt_f_{ticker}")
+
+        cot_ref_live = float(base_ativo.get("cotacao") or 0.0) if base_ativo else None
+        c_tb_px, c_tb_b1, c_tb_b2, c_tb_b3, c_tb_moeda, c_tb_tipo, c_tb_cmp = st.columns(
+            [1.95, 0.42, 0.42, 0.42, 0.85, 1.25, 0.95],
+            vertical_alignment="center",
+        )
+        with c_tb_b1:
+            if st.button("🎯", key=f"{key_prefix}_btn_m_{ticker}", type="primary" if st.session_state[k_marcos] else "secondary", help="Mostrar/ocultar Máxima, Mínima do período e seu Preço Médio", use_container_width=True):
+                st.session_state[k_marcos] = not st.session_state[k_marcos]
+                st.rerun()
+        with c_tb_b2:
+            if st.button("🕯️", key=f"{key_prefix}_btn_c_{ticker}", type="primary" if st.session_state[k_candles] else "secondary", help="Alternar entre Área e Candles (DEXTools)", use_container_width=True):
+                st.session_state[k_candles] = not st.session_state[k_candles]
+                st.rerun()
+        with c_tb_b3:
+            if st.button("🐷", key=f"{key_prefix}_btn_p_{ticker}", type="primary" if st.session_state[k_provs] else "secondary", help="Mostrar/ocultar dividendos e JCP pagos no período", use_container_width=True):
+                st.session_state[k_provs] = not st.session_state[k_provs]
+                st.rerun()
+        with c_tb_moeda:
+            moeda_graf = st.selectbox("Moeda:", ["Real", "Dólar"], index=0, label_visibility="collapsed", key=f"{key_prefix}_moeda_{ticker}")
+        with c_tb_tipo:
+            tipo_cot = st.selectbox("Tipo:", ["Cotação ajustada", "Cotação simples"], index=0, label_visibility="collapsed", key=f"{key_prefix}_tipo_{ticker}")
+        with c_tb_cmp:
+            if hasattr(st, "popover"):
+                with st.popover("⇄ Comparar", use_container_width=True):
+                    st.checkbox("IBOV (Ibovespa)", key=k_comp_ibov)
+                    st.checkbox("Tesouro Selic", key=k_comp_selic)
+                    opcs_cmp_i10 = sorted({t_c for t_c in ([ticker] + st.session_state.get("favoritos", []) + ["BBAS3", "BBDC3", "ITUB4", "PETR4", "VALE3", "WEGE3", "TAEE11", "SANB11"]) if t_c != ticker})
+                    st.multiselect("Outros ativos B3:", options=opcs_cmp_i10, key=k_comp_ativos, placeholder="Ex: PETR4, ITUB4")
+
+        ajustada = tipo_cot == "Cotação ajustada"
+        eh_candles_req = bool(st.session_state[k_candles])
+        usar_custom_range = (dt_custom_ini is not None and dt_custom_fim is not None and dt_custom_ini < dt_custom_fim)
+
+        if usar_custom_range:
+            df_ohlcv = buscar_ohlcv_preco(ticker, "15 A", ajustada, cot_live=cot_ref_live)
+            if df_ohlcv is not None and not df_ohlcv.empty:
+                df_ohlcv = df_ohlcv[(df_ohlcv.index.date >= dt_custom_ini) & (df_ohlcv.index.date <= dt_custom_fim)]
+            serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+            lbl_per_exib = f"{dt_custom_ini.strftime('%d/%m/%y')}–{dt_custom_fim.strftime('%d/%m/%y')}"
+        else:
+            lbl_per_exib = periodo
+            serie_i10_c = pd.Series(dtype=float) if (eh_candles_req or periodo == "1 D") else buscar_serie_investidor10_chart(ticker, periodo, ajustada, cot_live=cot_ref_live)
+            df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_live=cot_ref_live) if (eh_candles_req or serie_i10_c.empty) else pd.DataFrame()
+            if not serie_i10_c.empty:
+                serie = serie_i10_c
+            else:
+                serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+
+        simb_moeda = "R$"
+        if moeda_graf == "Dólar" and not serie.empty:
+            fx_usd = buscar_cambio_brl("USD")
+            if not fx_usd.empty:
+                simb_moeda = "US$"
+                fx_alinhado = fx_usd.reindex(serie.index.normalize(), method="ffill").bfill()
+                fx_vals = pd.Series(fx_alinhado.values, index=serie.index)
+                serie = (serie / fx_vals).dropna()
+                if not df_ohlcv.empty:
+                    df_ohlcv = df_ohlcv.loc[serie.index].copy()
+                    fx_df = fx_usd.reindex(df_ohlcv.index.normalize(), method="ffill").bfill()
+                    for col_px in ("Open", "High", "Low", "Close"):
+                        if col_px in df_ohlcv.columns:
+                            df_ohlcv[col_px] = df_ohlcv[col_px] / fx_df.values
+
+        comp_ibov_on = bool(st.session_state.get(k_comp_ibov, False))
+        comp_selic_on = bool(st.session_state.get(k_comp_selic, False))
+        comp_tks = list(st.session_state.get(k_comp_ativos, []))
+        modo_comparar = (comp_ibov_on or comp_selic_on or len(comp_tks) > 0) and not serie.empty
+
+        if serie.empty:
+            with c_tb_px:
+                st.markdown(f"<div style='font-size:11px; opacity:0.65;'>BVMF • {ticker}</div><strong>Indisponível</strong>", unsafe_allow_html=True)
+            st.warning(f"Não foi possível carregar o gráfico de {ticker} para o período {lbl_per_exib}.")
+        else:
+            p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
+            var_pct = ((p_fim - p_ini) / p_ini) * 100.0 if p_ini > 0 else 0.0
+            cor = "#22c55e" if var_pct >= 0 else "#dc2626"
+            fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"
+            sinal = "+" if var_pct >= 0 else ""
+
+            with c_tb_px:
+                st.markdown(
+                    f"<div style='font-size:11px; opacity:0.65; letter-spacing:0.4px;'>BVMF • {ticker}</div>"
+                    f"<div style='font-size:24px; font-weight:700; line-height:1.15; margin-top:1px;'>"
+                    f"{simb_moeda} {fmt_num(p_fim)} "
+                    f"<span style='font-size:14px; color:{cor}; font-weight:700;'>{sinal}{fmt_num(var_pct)}% ({lbl_per_exib})</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            fig = go.Figure()
+            fmt_hover = "%{x|%d/%m/%Y %H:%M}" if (not usar_custom_range and periodo in ("1 D", "7 D")) else "%{x|%d/%m/%Y}"
+            eh_candles = (not modo_comparar) and eh_candles_req and (not df_ohlcv.empty) and all(c in df_ohlcv.columns for c in ("Open", "High", "Low", "Close"))
+
+            if modo_comparar:
+                pct_base = ((serie / p_ini) - 1.0) * 100.0 if p_ini > 0 else serie * 0.0
                 fig.add_trace(
-                    go.Bar(
-                        x=df_ohlcv.index,
-                        y=df_ohlcv["Volume"],
-                        name="Volume",
-                        marker_color=cores_vol,
-                        yaxis="y2",
-                        hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+                    go.Scatter(
+                        x=pct_base.index, y=pct_base.values, mode="lines",
+                        name=f"{ticker} ({sinal}{fmt_num(var_pct)}%)",
+                        line=dict(color=cor, width=2.2),
+                        hovertemplate=f"<b>{ticker}</b><br>{fmt_hover}: %{{y:+.2f}}%<extra></extra>",
                     )
                 )
-            y_min = float(df_ohlcv["Low"].min())
-            y_max = float(df_ohlcv["High"].max())
-        else:
-            fig.add_trace(
-                go.Scatter(
-                    x=serie.index, y=serie.values, mode="lines", name=ticker,
-                    line=dict(color=cor, width=2.2), fill="tozeroy", fillcolor=fill_cor,
-                    hovertemplate=f"{fmt_hover}<br><b>R$ %{{y:.2f}}</b><extra></extra>",
+                y_all_vals = list(pct_base.values)
+                if comp_ibov_on:
+                    df_ib_c = buscar_ohlcv_preco("^BVSP".replace("^", ""), periodo, False) if False else None
+                    try:
+                        d_ib_g = buscar_dados_ibov_google({"30 D": "1 M", "6 M": "6 M", "YTD": "YTD", "1 A": "1 A", "5 A": "5 A", "10 A": "Máx", "15 A": "Máx"}.get(periodo, "1 A"))
+                        s_ib = d_ib_g["serie"]
+                        if not s_ib.empty:
+                            s_ib = s_ib[s_ib.index >= serie.index[0]]
+                            if not s_ib.empty and float(s_ib.iloc[0]) > 0:
+                                pct_ib = ((s_ib / float(s_ib.iloc[0])) - 1.0) * 100.0
+                                fig.add_trace(
+                                    go.Scatter(
+                                        x=pct_ib.index, y=pct_ib.values, mode="lines",
+                                        name=f"IBOV ({pct_ib.iloc[-1]:+.2f}%)",
+                                        line=dict(color="#60a5fa", width=1.8),
+                                        hovertemplate=f"<b>IBOV</b><br>{fmt_hover}: %{{y:+.2f}}%<extra></extra>",
+                                    )
+                                )
+                                y_all_vals.extend(list(pct_ib.values))
+                    except Exception:
+                        pass
+                if comp_selic_on:
+                    s_sel_c, _ = buscar_historico_selic_bcb()
+                    if not s_sel_c.empty:
+                        sub_sc = s_sel_c[(s_sel_c.index >= serie.index[0].normalize()) & (s_sel_c.index < serie.index[-1].normalize())]
+                        if not sub_sc.empty:
+                            fator_ac = ((1.0 + (sub_sc / 100.0)).cumprod() - 1.0) * 100.0
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=fator_ac.index, y=fator_ac.values, mode="lines",
+                                    name=f"Tesouro Selic ({fator_ac.iloc[-1]:+.2f}%)",
+                                    line=dict(color="#fbbf24", width=1.8, dash="dot"),
+                                    hovertemplate=f"<b>Selic</b><br>{fmt_hover}: %{{y:+.2f}}%<extra></extra>",
+                                )
+                            )
+                            y_all_vals.extend(list(fator_ac.values))
+                cores_cmp = ["#a78bfa", "#38bdf8", "#f472b6", "#fb923c"]
+                for idx_c, tk_c in enumerate(comp_tks[:4]):
+                    s_cmp = buscar_serie_investidor10_chart(tk_c, periodo, ajustada) if (not usar_custom_range and periodo != "1 D") else pd.Series(dtype=float)
+                    if s_cmp.empty:
+                        s_cmp = buscar_historico_preco(tk_c, periodo if not usar_custom_range else "15 A", ajustada)
+                        if usar_custom_range and not s_cmp.empty:
+                            s_cmp = s_cmp[(s_cmp.index.date >= dt_custom_ini) & (s_cmp.index.date <= dt_custom_fim)]
+                    if not s_cmp.empty and float(s_cmp.iloc[0]) > 0:
+                        pct_c = ((s_cmp / float(s_cmp.iloc[0])) - 1.0) * 100.0
+                        fig.add_trace(
+                            go.Scatter(
+                                x=pct_c.index, y=pct_c.values, mode="lines",
+                                name=f"{tk_c} ({pct_c.iloc[-1]:+.2f}%)",
+                                line=dict(color=cores_cmp[idx_c % len(cores_cmp)], width=1.8),
+                                hovertemplate=f"<b>{tk_c}</b><br>{fmt_hover}: %{{y:+.2f}}%<extra></extra>",
+                            )
+                        )
+                        y_all_vals.extend(list(pct_c.values))
+                y_min, y_max = min(y_all_vals), max(y_all_vals)
+            elif eh_candles:
+                fig.add_trace(
+                    go.Candlestick(
+                        x=df_ohlcv.index,
+                        open=df_ohlcv["Open"], high=df_ohlcv["High"],
+                        low=df_ohlcv["Low"], close=df_ohlcv["Close"],
+                        name=ticker,
+                        increasing_line_color="#22c55e", decreasing_line_color="#dc2626",
+                        increasing_fillcolor="#22c55e", decreasing_fillcolor="#dc2626",
+                    )
                 )
-            )
-            y_min, y_max = float(serie.min()), float(serie.max())
+                if "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
+                    cores_vol = [
+                        "rgba(34,197,94,0.35)" if float(c) >= float(o) else "rgba(220,38,38,0.35)"
+                        for o, c in zip(df_ohlcv["Open"], df_ohlcv["Close"])
+                    ]
+                    fig.add_trace(
+                        go.Bar(
+                            x=df_ohlcv.index, y=df_ohlcv["Volume"], name="Volume",
+                            marker_color=cores_vol, yaxis="y2",
+                            hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+                        )
+                    )
+                y_min = float(df_ohlcv["Low"].min())
+                y_max = float(df_ohlcv["High"].max())
+            else:
+                pct_hover = [((float(v) / p_ini) - 1.0) * 100.0 if p_ini > 0 else 0.0 for v in serie.values]
+                fig.add_trace(
+                    go.Scatter(
+                        x=serie.index, y=serie.values, mode="lines", name=ticker,
+                        customdata=pct_hover,
+                        line=dict(color=cor, width=2.1), fill="tozeroy", fillcolor=fill_cor,
+                        hovertemplate=f"{fmt_hover}<br><b>{simb_moeda} %{{y:,.2f}}</b> (%{{customdata:+.2f}}%)<extra></extra>",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=[serie.index[-1]], y=[p_fim], mode="markers",
+                        marker=dict(color=cor, size=7), hoverinfo="skip", showlegend=False,
+                    )
+                )
+                y_min, y_max = float(serie.min()), float(serie.max())
 
-        margem_y = (y_max - y_min) * 0.09 if y_max > y_min else y_max * 0.05
-        layout_kw = dict(
-            height=368 if eh_candles else 340,
-            margin=dict(l=12, r=76, t=34, b=24),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
-            showlegend=False,
-            hovermode="x unified",
-            dragmode="pan",
-            xaxis=dict(
-                showgrid=True,
-                gridcolor="rgba(128,128,128,0.12)",
-                zeroline=False,
-                rangeslider=dict(visible=False),
-                showspikes=True,
-                spikemode="across",
-                spikesnap="cursor",
-                spikethickness=1,
-                spikecolor="rgba(148,163,184,0.55)",
-                spikedash="dash",
-            ),
-            yaxis=dict(
-                side="right",
-                showgrid=True,
-                gridcolor="rgba(128,128,128,0.22)",
-                tickprefix="R$ ",
-                range=[max(0, y_min - (margem_y * (2.2 if eh_candles else 1.0))), y_max + margem_y],
-                showspikes=True,
-                spikemode="across",
-                spikesnap="cursor",
-                spikethickness=1,
-                spikecolor="rgba(148,163,184,0.55)",
-                spikedash="dash",
-            ),
-            annotations=[
-                dict(xref="paper", x=1.01, y=p_fim, xanchor="left", yanchor="middle",
-                     text=f"<b>{fmt_num(p_fim)}</b>", showarrow=False,
-                     font=dict(color="white", size=12), bgcolor=cor, borderpad=4)
-            ],
-        )
-        if eh_candles and "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
-            v_max = float(df_ohlcv["Volume"].max())
-            layout_kw["yaxis2"] = dict(
-                overlaying="y",
+            if not modo_comparar and st.session_state[k_marcos]:
+                idx_max = serie.idxmax()
+                idx_min = serie.idxmin()
+                fig.add_trace(
+                    go.Scatter(
+                        x=[idx_max, idx_min], y=[float(serie.loc[idx_max]), float(serie.loc[idx_min])],
+                        mode="markers+text", text=[f"Máx {simb_moeda} {fmt_num(float(serie.loc[idx_max]))}", f"Mín {simb_moeda} {fmt_num(float(serie.loc[idx_min]))}"],
+                        textposition=["top center", "bottom center"],
+                        marker=dict(color=["#22c55e", "#f59e0b"], size=8, symbol="circle"),
+                        textfont=dict(size=10.5), showlegend=False, hoverinfo="skip",
+                    )
+                )
+                if st.session_state.get("usuario_email") and st.session_state.get("lancamentos"):
+                    pos_m_usr = consolidar_carteira_por_ativo(st.session_state["lancamentos"])
+                    if ticker in pos_m_usr and pos_m_usr[ticker]["pm"] > 0 and moeda_graf == "Real":
+                        pm_u = float(pos_m_usr[ticker]["pm"])
+                        fig.add_hline(y=pm_u, line_dash="dot", line_color="#60a5fa", line_width=1.4, annotation_text=f"Seu PM: R$ {fmt_num(pm_u)}", annotation_position="top left")
+
+            if not modo_comparar and st.session_state[k_provs] and moeda_graf == "Real":
+                divs_p = buscar_dividendos_ativo(ticker)
+                if not divs_p.empty:
+                    divs_win = divs_p[(divs_p.index >= serie.index[0]) & (divs_p.index <= serie.index[-1])]
+                    if not divs_win.empty:
+                        ys_d, txts_d = [], []
+                        for dt_d, vl_d in divs_win.items():
+                            idx_near = serie.index.get_indexer([dt_d], method="nearest")[0]
+                            ys_d.append(float(serie.iloc[idx_near]))
+                            txts_d.append(f"💰 Provento: R$ {fmt_num(float(vl_d))} ({dt_d.strftime('%d/%m/%Y')})")
+                        fig.add_trace(
+                            go.Scatter(
+                                x=divs_win.index, y=ys_d, mode="markers", name="Proventos",
+                                marker=dict(color="#fbbf24", size=9, symbol="diamond", line=dict(color="#ffffff", width=1)),
+                                text=txts_d, hovertemplate="%{text}<extra></extra>", showlegend=False,
+                            )
+                        )
+
+            margem_y = (y_max - y_min) * 0.06 if y_max > y_min else max(0.5, abs(y_max) * 0.05)
+            y_rng_lo = (y_min - (margem_y * (2.4 if eh_candles else 0.7)))
+            if not modo_comparar:
+                y_rng_lo = max(0.0, y_rng_lo)
+            y_rng_hi = y_max + (margem_y * 0.7)
+
+            yaxis_cfg = dict(
                 side="left",
-                showgrid=False,
-                showticklabels=False,
-                range=[0, v_max * 5.0 if v_max > 0 else 1],
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.14)",
+                gridwidth=1,
+                zeroline=modo_comparar,
+                zerolinecolor="rgba(148,163,184,0.35)",
+                tickprefix="" if modo_comparar else f"{simb_moeda} ",
+                ticksuffix="%" if modo_comparar else "",
+                tickformat=",.2f",
+                tickfont=dict(size=11),
+                range=[y_rng_lo, y_rng_hi],
+                showspikes=True,
+                spikemode="across",
+                spikesnap="cursor",
+                spikethickness=1,
+                spikecolor="rgba(148,163,184,0.55)",
+                spikedash="dash",
             )
-        fig.update_layout(**layout_kw)
-        st.plotly_chart(
-            fig,
-            use_container_width=True,
-            config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
-            key=f"{key_prefix}_plot_{ticker}",
-        )
-        st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
+            if not modo_comparar and not eh_candles:
+                ticks_y = _calc_ticks_y_i10(y_min, y_max)
+                yaxis_cfg["tickmode"] = "array"
+                yaxis_cfg["tickvals"] = ticks_y
+                yaxis_cfg["ticktext"] = [f"{simb_moeda} {fmt_num(tv)}" for tv in ticks_y]
+
+            annots = []
+            if not modo_comparar:
+                annots.append(
+                    dict(
+                        xref="paper", x=1.006, y=p_fim, xanchor="left", yanchor="middle",
+                        text=f"<b>{fmt_num(p_fim)}</b>", showarrow=False,
+                        font=dict(color="white", size=11.5), bgcolor=cor, borderpad=4,
+                    )
+                )
+
+            tickfmt_x = "%H:%M" if (not usar_custom_range and periodo == "1 D") else ("%d/%m %H:%M" if (not usar_custom_range and periodo == "7 D") else "%d/%m/%y")
+            layout_kw = dict(
+                height=370 if eh_candles else 345,
+                margin=dict(l=76, r=66, t=24 if modo_comparar else 14, b=34),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                separators=",.",
+                showlegend=modo_comparar,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                hovermode="x unified",
+                dragmode="pan",
+                xaxis=dict(
+                    showgrid=False,
+                    zeroline=False,
+                    showline=True,
+                    linecolor="rgba(148,163,184,0.35)",
+                    linewidth=1,
+                    ticks="outside",
+                    ticklen=4,
+                    tickcolor="rgba(148,163,184,0.35)",
+                    tickfont=dict(size=11),
+                    tickformat=tickfmt_x,
+                    nticks=13,
+                    rangeslider=dict(visible=False),
+                    showspikes=True,
+                    spikemode="across",
+                    spikesnap="cursor",
+                    spikethickness=1,
+                    spikecolor="rgba(148,163,184,0.55)",
+                    spikedash="dash",
+                ),
+                yaxis=yaxis_cfg,
+                annotations=annots,
+            )
+            if eh_candles and "Volume" in df_ohlcv.columns and df_ohlcv["Volume"].sum() > 0:
+                v_max = float(df_ohlcv["Volume"].max())
+                layout_kw["yaxis2"] = dict(
+                    overlaying="y", side="right", showgrid=False, showticklabels=False,
+                    range=[0, v_max * 5.0 if v_max > 0 else 1],
+                )
+            fig.update_layout(**layout_kw)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                config={"scrollZoom": True, "displaylogo": False, "modeBarButtonsToRemove": ["zoom2d", "zoomIn2d", "zoomOut2d", "lasso2d", "select2d"]},
+                key=f"{key_prefix}_plot_{ticker}",
+            )
+            st.caption("💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover.")
 
         serie_selic_bcb, _ = buscar_historico_selic_bcb()
         with st.container(border=True):
@@ -3425,7 +3801,9 @@ def render_grafico_e_tabela_ativo(
                 "1 mês": "30 D", "6 meses": "6 M", "1 ano": "1 A",
                 "5 anos": "5 A", "10 anos": "10 A", "15 anos": "15 A",
             }
-            serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+            serie_sim = buscar_serie_investidor10_chart(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+            if serie_sim.empty:
+                serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
             if serie_sim.empty:
                 serie_max_fb = buscar_serie_max_ajustada(ticker)
                 if not serie_max_fb.empty:

@@ -1315,6 +1315,366 @@ def buscar_serie_max_ajustada(ticker: str) -> pd.Series:
     return df["Close"].dropna()
 
 
+def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
+    dt_idx = pd.to_datetime(idx)
+    if dt_idx.tz is not None:
+        return dt_idx.tz_convert(BRT).tz_localize(None)
+    return dt_idx
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_resumo_b3_google() -> dict:
+    det = buscar_detalhes_fundamentus("B3SA3")
+    info = {}
+    prev_close = None
+    abertura = None
+    alta = None
+    baixa = None
+    alt_52s = None
+    bai_52s = None
+    cap_merc = parse_br_num(det.get("Valor de mercado"))
+    pl_val = parse_br_num(det.get("P/L"))
+    dy_val = parse_br_num(det.get("Div.Yield"))
+    div_trim = None
+
+    try:
+        tk = yf.Ticker("B3SA3.SA")
+        try:
+            fi = tk.fast_info
+            if fi:
+                prev_close = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
+                if not cap_merc:
+                    cap_merc = fi.get("marketCap")
+                alt_52s = fi.get("yearHigh")
+                bai_52s = fi.get("yearLow")
+        except Exception:
+            pass
+
+        info = tk.info or {}
+        if not prev_close:
+            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
+        if not cap_merc:
+            cap_merc = info.get("marketCap")
+        if not pl_val:
+            pl_val = info.get("trailingPE")
+        if not alt_52s:
+            alt_52s = info.get("fiftyTwoWeekHigh")
+        if not bai_52s:
+            bai_52s = info.get("fiftyTwoWeekLow")
+
+        h1y = tk.history(period="1y", interval="1d", auto_adjust=False)
+        if h1y is not None and not h1y.empty:
+            h1y.index = _idx_para_brt_naive(h1y.index)
+            ult = h1y.iloc[-1]
+            abertura = float(ult["Open"]) if pd.notna(ult.get("Open")) else None
+            alta = float(ult["High"]) if pd.notna(ult.get("High")) else None
+            baixa = float(ult["Low"]) if pd.notna(ult.get("Low")) else None
+            if len(h1y) >= 2 and not prev_close:
+                prev_close = float(h1y["Close"].iloc[-2])
+            if not alt_52s and "High" in h1y.columns:
+                alt_52s = float(h1y["High"].dropna().max())
+            if not bai_52s and "Low" in h1y.columns:
+                bai_52s = float(h1y["Low"].dropna().min())
+
+        divs = tk.dividends
+        if divs is not None and not divs.empty:
+            divs_pos = divs[divs > 0]
+            if not divs_pos.empty:
+                div_trim = float(divs_pos.iloc[-1])
+                if dy_val is None and alta:
+                    divs_idx = _idx_para_brt_naive(divs_pos.index)
+                    divs_pos.index = divs_idx
+                    hoje_n = pd.Timestamp.now(BRT).tz_localize(None)
+                    d12 = float(divs_pos[divs_pos.index >= (hoje_n - timedelta(days=365))].sum())
+                    px_ref_d = float(h1y["Close"].dropna().iloc[-1]) if (h1y is not None and not h1y.empty) else None
+                    if px_ref_d and px_ref_d > 0 and d12 > 0:
+                        dy_val = (d12 / px_ref_d) * 100.0
+    except Exception:
+        pass
+
+    return {
+        "prev_close": float(prev_close) if prev_close else None,
+        "abertura": abertura,
+        "alta": alta,
+        "baixa": baixa,
+        "cap_merc": float(cap_merc) if cap_merc else None,
+        "pl": float(pl_val) if pl_val else None,
+        "alt_52s": float(alt_52s) if alt_52s else None,
+        "bai_52s": float(bai_52s) if bai_52s else None,
+        "dy": float(dy_val) if dy_val is not None else None,
+        "div_trim": div_trim,
+    }
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def buscar_serie_b3_google(periodo: str) -> tuple[pd.Series, float | None, datetime | None]:
+    tk = yf.Ticker("B3SA3.SA")
+    resumo = buscar_resumo_b3_google()
+    prev_close = resumo.get("prev_close")
+
+    try:
+        if periodo == "1 D":
+            df = tk.history(period="5d", interval="5m", auto_adjust=False)
+            if df is not None and not df.empty and "Close" in df.columns:
+                df.index = _idx_para_brt_naive(df.index)
+                close_all = df["Close"].dropna()
+                if not close_all.empty:
+                    ult_dia = close_all.index.date[-1]
+                    serie = close_all[close_all.index.date == ult_dia]
+                    ant = close_all[close_all.index.date < ult_dia]
+                    if not ant.empty and not prev_close:
+                        prev_close = float(ant.iloc[-1])
+                    ref = float(prev_close) if prev_close else float(serie.iloc[0])
+                    return serie, ref, serie.index[-1].to_pydatetime()
+
+            df_fb = tk.history(period="1mo", interval="1d", auto_adjust=False)
+            if df_fb is not None and not df_fb.empty:
+                df_fb.index = _idx_para_brt_naive(df_fb.index)
+                s_fb = df_fb["Close"].dropna().tail(2)
+                if not s_fb.empty:
+                    ref = float(s_fb.iloc[0]) if len(s_fb) > 1 else float(s_fb.iloc[-1])
+                    return s_fb.tail(1), ref, s_fb.index[-1].to_pydatetime()
+            return pd.Series(dtype=float), prev_close, None
+
+        mapa_per = {
+            "5 D": ("5d", "15m"),
+            "1 M": ("1mo", "1d"),
+            "6 M": ("6mo", "1d"),
+            "YTD": ("ytd", "1d"),
+            "1 A": ("1y", "1d"),
+            "5 A": ("5y", "1wk"),
+            "Máx": ("max", "1wk"),
+        }
+        per_yf, int_yf = mapa_per.get(periodo, ("1mo", "1d"))
+        df = tk.history(period=per_yf, interval=int_yf, auto_adjust=False)
+        if df is None or df.empty or "Close" not in df.columns:
+            return pd.Series(dtype=float), None, None
+        df.index = _idx_para_brt_naive(df.index)
+        serie = df["Close"].dropna()
+        if serie.empty:
+            return pd.Series(dtype=float), None, None
+        ref = float(serie.iloc[0])
+        return serie, ref, serie.index[-1].to_pydatetime()
+    except Exception:
+        return pd.Series(dtype=float), prev_close, None
+
+
+@st.fragment
+def render_widget_b3_google():
+    meses_pt = {
+        1: "jan.", 2: "fev.", 3: "mar.", 4: "abr.", 5: "mai.", 6: "jun.",
+        7: "jul.", 8: "ago.", 9: "set.", 10: "out.", 11: "nov.", 12: "dez.",
+    }
+    periodos_g = ["1 D", "5 D", "1 M", "6 M", "YTD", "1 A", "5 A", "Máx"]
+
+    with st.container(border=True):
+        st.markdown(
+            "<span class='b3-google-anchor' style='display:none;'></span>"
+            "<style>"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor){"
+            "padding:10px 14px!important;}"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup']{"
+            "gap:2px!important;flex-wrap:wrap!important;border-bottom:1px solid rgba(128,128,128,0.22);"
+            "padding-bottom:3px!important;margin-top:2px!important;margin-bottom:4px!important;}"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label{"
+            "padding:2px 7px!important;margin:0!important;border-radius:6px!important;font-size:12px!important;}"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label > div:first-child{"
+            "display:none!important;}"
+            "div[data-testid='stVerticalBlockBorderWrapper']:has(.b3-google-anchor) div[role='radiogroup'] label:has(input:checked){"
+            "background:rgba(96,165,250,0.16)!important;color:#60a5fa!important;font-weight:700!important;"
+            "border-bottom:2px solid #60a5fa!important;border-radius:6px 6px 0 0!important;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
+        periodo_sel = st.session_state.get("b3_google_per", "1 D")
+        serie, ref_px, dt_ult = buscar_serie_b3_google(periodo_sel)
+        resumo = buscar_resumo_b3_google()
+
+        if serie.empty:
+            st.markdown(
+                "<div style='display:flex; align-items:center; gap:8px; margin-bottom:6px;'>"
+                "<span style='display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; "
+                "border-radius:6px; background:#1a73e8; color:#fff; font-weight:800; font-size:12px;'>[B]³</span>"
+                "<div><div style='font-size:14px; font-weight:700; line-height:1.1;'>B3 SA - Brasil Bolsa Balcao</div>"
+                "<div style='font-size:11px; opacity:0.7;'>BVMF: B3SA3</div></div></div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Cotação B3SA3 temporariamente indisponível.")
+            return
+
+        p_fim = float(serie.iloc[-1])
+        ref_val = float(ref_px) if (ref_px is not None and ref_px > 0) else float(serie.iloc[0])
+        diff_val = p_fim - ref_val
+        diff_pct = (diff_val / ref_val) * 100.0 if ref_val > 0 else 0.0
+
+        if abs(diff_pct) < 0.005:
+            cor_ln = "#9aa0a6"
+            fill_ln = "rgba(154,160,166,0.15)"
+            pill_bg = "rgba(154,160,166,0.22)"
+            pill_fg = "#e5e7eb"
+            seta_txt = ""
+        elif diff_val > 0:
+            cor_ln = "#22c55e"
+            fill_ln = "rgba(34,197,94,0.18)"
+            pill_bg = "rgba(34,197,94,0.20)"
+            pill_fg = "#4ade80"
+            seta_txt = "↑ "
+        else:
+            cor_ln = "#ef4444"
+            fill_ln = "rgba(239,68,68,0.18)"
+            pill_bg = "rgba(239,68,68,0.20)"
+            pill_fg = "#f87171"
+            seta_txt = "↓ "
+
+        sinal_abs = "+" if diff_val > 0.004 else ""
+        lbl_jan = "hoje" if periodo_sel == "1 D" else f"({periodo_sel})"
+        if dt_ult is not None:
+            dt_str = f"{dt_ult.day} de {meses_pt.get(dt_ult.month, '')}, {dt_ult.strftime('%H:%M')} BRT"
+        else:
+            dt_str = datetime.now(BRT).strftime("%d/%m/%Y %H:%M BRT")
+
+        st.markdown(
+            "<div style='display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:8px; margin-bottom:2px;'>"
+            "<div style='display:flex; align-items:center; gap:9px;'>"
+            "<span style='display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; "
+            "border-radius:7px; background:#1a73e8; color:#ffffff; font-weight:800; font-size:12px; flex-shrink:0;'>[B]³</span>"
+            "<div>"
+            "<div style='font-size:14px; font-weight:700; line-height:1.15;'>B3 SA - Brasil Bolsa Balcao</div>"
+            "<div style='font-size:11px; opacity:0.72;'>BVMF: B3SA3</div>"
+            "</div>"
+            "</div>"
+            "<div style='text-align:right;'>"
+            "<div style='display:flex; align-items:baseline; justify-content:flex-end; gap:6px; flex-wrap:wrap;'>"
+            f"<span style='font-size:21px; font-weight:700; line-height:1.1;'>{fmt_num(p_fim)}</span>"
+            "<span style='font-size:11px; opacity:0.72;'>BRL</span>"
+            f"<span style='display:inline-block; padding:2px 7px; border-radius:6px; font-size:11px; font-weight:700; "
+            f"background:{pill_bg}; color:{pill_fg};'>{seta_txt}{fmt_num(abs(diff_pct) if diff_pct < 0 else diff_pct)}%</span>"
+            f"<span style='font-size:12px; font-weight:600; color:{pill_fg};'>{sinal_abs}{fmt_num(diff_val)} {lbl_jan}</span>"
+            "</div>"
+            f"<div style='font-size:10.5px; opacity:0.68; margin-top:2px;'>{html.escape(dt_str)}</div>"
+            "</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        periodo_sel = st.radio(
+            "Período B3:",
+            options=periodos_g,
+            index=0,
+            horizontal=True,
+            label_visibility="collapsed",
+            key="b3_google_per",
+        )
+
+        fig_b3 = go.Figure()
+        fmt_hv = "%{x|%d/%m %H:%M}" if periodo_sel in ("1 D", "5 D") else "%{x|%d/%m/%Y}"
+        fig_b3.add_trace(
+            go.Scatter(
+                x=serie.index,
+                y=serie.values,
+                mode="lines",
+                line=dict(color=cor_ln, width=2.0),
+                fill="tozeroy",
+                fillcolor=fill_ln,
+                hovertemplate=f"{fmt_hv}<br><b>%{{y:.2f}} BRL</b><extra></extra>",
+            )
+        )
+        fig_b3.add_trace(
+            go.Scatter(
+                x=[serie.index[-1]],
+                y=[p_fim],
+                mode="markers",
+                marker=dict(color=cor_ln, size=7),
+                hoverinfo="skip",
+            )
+        )
+
+        y_vals_all = list(serie.values) + [ref_val]
+        y_min = min(y_vals_all)
+        y_max = max(y_vals_all)
+        pad_y = (y_max - y_min) * 0.14 if y_max > y_min else max(0.2, p_fim * 0.03)
+        ref_lbl = f"Pré-fechamento<br><b>{fmt_num(ref_val)}</b>" if periodo_sel == "1 D" else f"Início<br><b>{fmt_num(ref_val)}</b>"
+
+        fig_b3.add_hline(
+            y=ref_val,
+            line_dash="dot",
+            line_width=1.3,
+            line_color="rgba(154,160,166,0.65)",
+        )
+        fig_b3.update_layout(
+            height=155,
+            margin=dict(l=4, r=82, t=8, b=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            showlegend=False,
+            hovermode="x unified",
+            xaxis=dict(
+                showgrid=False,
+                zeroline=False,
+                tickfont=dict(size=10),
+                tickformat="%H:%M" if periodo_sel == "1 D" else ("%d/%m" if periodo_sel in ("5 D", "1 M", "6 M", "YTD") else "%m/%Y"),
+                nticks=5,
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor="rgba(128,128,128,0.20)",
+                zeroline=False,
+                tickfont=dict(size=10),
+                range=[max(0.0, y_min - pad_y), y_max + pad_y],
+                nticks=4,
+            ),
+            annotations=[
+                dict(
+                    xref="paper",
+                    x=1.01,
+                    y=ref_val,
+                    xanchor="left",
+                    yanchor="middle",
+                    text=ref_lbl,
+                    showarrow=False,
+                    align="left",
+                    font=dict(size=10, color="rgba(200,205,213,0.9)"),
+                )
+            ],
+        )
+        st.plotly_chart(
+            fig_b3,
+            use_container_width=True,
+            config={"displayModeBar": False},
+            key="b3_google_chart",
+        )
+
+        ab_s = fmt_num(resumo["abertura"]) if resumo.get("abertura") is not None else "—"
+        al_s = fmt_num(resumo["alta"]) if resumo.get("alta") is not None else "—"
+        bx_s = fmt_num(resumo["baixa"]) if resumo.get("baixa") is not None else "—"
+        cap_s = fmt_bi_mi(resumo.get("cap_merc")).lower().replace(" bi", " bi").replace(" mi", " mi") if resumo.get("cap_merc") else "—"
+        pl_s = fmt_num(resumo["pl"]) if resumo.get("pl") is not None else "—"
+        a52_s = fmt_num(resumo["alt_52s"]) if resumo.get("alt_52s") is not None else "—"
+        b52_s = fmt_num(resumo["bai_52s"]) if resumo.get("bai_52s") is not None else "—"
+        dy_s = f"{fmt_num(resumo['dy'])}%" if resumo.get("dy") is not None else "—"
+        dt_s = fmt_num(resumo["div_trim"]) if resumo.get("div_trim") is not None else "—"
+
+        st.markdown(
+            "<div style='display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px 12px; "
+            "font-size:11px; line-height:1.45; border-top:1px solid rgba(128,128,128,0.20); padding-top:6px; margin-top:2px;'>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Abertura</span><strong>{ab_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Cap. merc.</span><strong>{cap_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Dividendo</span><strong>{dy_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Alta</span><strong>{al_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Índice P/L</span><strong>{pl_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Div. trim.</span><strong>{dt_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Baixa</span><strong>{bx_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Alt 52 sem</span><strong>{a52_s}</strong></div>"
+            f"<div style='display:flex; justify-content:space-between;'><span style='opacity:0.7;'>Bai 52 sem</span><strong>{b52_s}</strong></div>"
+            "</div>"
+            "<div style='font-size:10px; opacity:0.6; margin-top:4px; text-align:right;'>"
+            "💡 Shift + Clique em 2 pontos de qualquer gráfico para medir variação (%)"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def buscar_divs_e_precos_carteira(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
     def _one(t: str):
@@ -2122,20 +2482,35 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
             return f" ({data_s})"
         return ""
 
+    def _fmt_item_noticia_html(icone: str, rotulo: str, n: dict) -> str:
+        titulo_n = html.escape(str(n.get("titulo") or "").strip())
+        meta_n = html.escape(_fmt_meta_noticia(n))
+        link_n = str(n.get("link") or "").strip()
+        if link_n.startswith(("http://", "https://")):
+            href_n = html.escape(link_n, quote=True)
+            tit_html = (
+                f"<a href='{href_n}' target='_blank' rel='noopener noreferrer' "
+                f"style='color:#93c5fd; text-decoration:underline; text-decoration-style:dotted;' "
+                f"title='Abrir notícia em nova aba'>'{titulo_n}' ↗</a>"
+            )
+        else:
+            tit_html = f"'{titulo_n}'"
+        return f"<div style='margin:2px 0;'>{icone} <strong>{html.escape(rotulo)}:</strong> {tit_html}{meta_n}</div>"
+
     linhas_news = []
     if top_neg and top_neg.get("titulo"):
         linhas_news.append(
-            f"🔴 **Notícia Negativa Recente (Pressão de Queda):** '{str(top_neg['titulo']).strip()}'{_fmt_meta_noticia(top_neg)}"
+            _fmt_item_noticia_html("🔴", "Notícia Negativa Recente (Pressão de Queda)", top_neg)
         )
     if top_pos and top_pos.get("titulo"):
         linhas_news.append(
-            f"🟢 **Notícia Positiva Recente (Catalisador de Alta):** '{str(top_pos['titulo']).strip()}'{_fmt_meta_noticia(top_pos)}"
+            _fmt_item_noticia_html("🟢", "Notícia Positiva Recente (Catalisador de Alta)", top_pos)
         )
     if not linhas_news:
         linhas_news.append(
-            "⚪ **Notícias Recentes:** Sem manchetes de forte impacto nos últimos 30 dias."
+            "<div>⚪ <strong>Notícias Recentes:</strong> Sem manchetes de forte impacto nos últimos 30 dias.</div>"
         )
-    bloco_news_linhas = "  \n".join(linhas_news)
+    bloco_news_linhas = "".join(linhas_news)
 
     riscos_trap = []
     if marg_liq is not None and marg_liq < 0:
@@ -2435,7 +2810,7 @@ def render_grafico_e_tabela_ativo(
                         "<div style='margin:10px 0 8px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
                         unsafe_allow_html=True,
                     )
-                    st.markdown(partes_just_rx[1])
+                    st.markdown(partes_just_rx[1], unsafe_allow_html=True)
         st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
     c_per, c_tipo = st.columns([3, 1.2])
@@ -2495,6 +2870,7 @@ def render_grafico_e_tabela_ativo(
             ],
         )
         st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}_plot_{ticker}")
+        st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
 
         serie_max = buscar_serie_max_ajustada(ticker)
         if not serie_max.empty:
@@ -3359,8 +3735,12 @@ usuario_atual = st.session_state.get("usuario_email")
 
 
 # --- INTERFACE PRINCIPAL ---
-st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
-st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
+c_hdr_esq, c_hdr_dir = st.columns([1.22, 1.0], vertical_alignment="top")
+with c_hdr_esq:
+    st.title("📊 Painel Completo da B3 — Valuation, Raio-X & Carteira")
+    st.caption("Busca ao vivo, Setor BESST, Favoritos por usuário, gráfico interativo, balanço anual CVM, notícias e carteira protegida por login.")
+with c_hdr_dir:
+    render_widget_b3_google()
 st.markdown(
     "<style>"
     "html,body,[data-testid='stApp'],[data-testid='stAppViewContainer']{"
@@ -4746,7 +5126,7 @@ with tab1:
                                     "<div style='margin:8px 0 6px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
                                     unsafe_allow_html=True,
                                 )
-                                st.markdown(partes_just_rk[1])
+                                st.markdown(partes_just_rk[1], unsafe_allow_html=True)
 
         # --- SETOR DE ÚLTIMAS NOTÍCIAS E FATOS RELEVANTES (ABAIXO DO RANKING) ---
         ativos_para_news = exibir if exibir else lista_rank_base
@@ -4895,6 +5275,7 @@ with tab2:
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         )
         st.plotly_chart(fig_comp, use_container_width=True)
+        st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
 
         st.markdown("### 🔍 Gráfico Individual e Histórico Fundamentalista dos Ativos Comparados")
         subtabs = st.tabs([f"📊 {r['ticker']}" for r in itens_comp])
@@ -5087,6 +5468,7 @@ with tab3:
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
                     )
                     st.plotly_chart(fig_ev, use_container_width=True)
+                    st.caption("💡 Dica: Segure **Shift** e clique em dois pontos do gráfico para medir a variação (%).")
 
             with g_dir:
                 with st.container(border=True):
@@ -5421,6 +5803,459 @@ with tab3:
                             st.rerun()
                     except Exception as exc:
                         st.error(f"Arquivo inválido: {exc}")
+
+_usa_st_html_m = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+_js_chart_measure = """
+<style>
+.tv-measure-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 60;
+    overflow: visible;
+}
+.tv-measure-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+}
+.tv-measure-card {
+    position: absolute;
+    pointer-events: auto;
+    padding: 7px 11px;
+    border-radius: 7px;
+    color: #ffffff;
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 12px;
+    line-height: 1.38;
+    font-weight: 600;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.42);
+    white-space: nowrap;
+    z-index: 65;
+    user-select: none;
+}
+.tv-measure-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+.tv-measure-close {
+    cursor: pointer;
+    font-size: 13px;
+    line-height: 1;
+    opacity: 0.85;
+    padding: 0 2px;
+}
+.tv-measure-close:hover {
+    opacity: 1;
+}
+.tv-measure-tag {
+    position: absolute;
+    pointer-events: none;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: #ffffff;
+    white-space: nowrap;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    z-index: 62;
+}
+</style>
+<script>
+(function() {
+    const pWin = __USE_PARENT__ ? window.parent : window;
+    const pDoc = pWin.document;
+
+    function fmtNumBr(v, dec) {
+        if (!Number.isFinite(v)) return "—";
+        return v.toLocaleString("pt-BR", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+    }
+
+    function isCartesianPlot(gd) {
+        if (!gd || !gd._fullLayout) return false;
+        const xa = gd._fullLayout.xaxis;
+        const ya = gd._fullLayout.yaxis;
+        return !!(xa && ya && typeof xa.p2c === "function" && typeof ya.p2c === "function" && typeof xa.c2p === "function" && typeof ya.c2p === "function");
+    }
+
+    function getDragEl(gd) {
+        return gd.querySelector(".nsewdrag") || gd.querySelector("rect.drag") || gd;
+    }
+
+    function axisD2C(ax, d) {
+        if (typeof ax.d2c === "function") return ax.d2c(d);
+        if (ax.type === "log") return Math.log10(Number(d));
+        if (ax.type === "date") return new Date(d).getTime();
+        return Number(d);
+    }
+
+    function axisC2D(ax, c) {
+        if (ax.type === "log") return Math.pow(10, c);
+        if (typeof ax.c2d === "function") return ax.c2d(c);
+        return c;
+    }
+
+    function formatXDisplay(ax, pt) {
+        if (ax.type === "category") {
+            const cats = ax._categories || [];
+            const idx = Math.max(0, Math.min(cats.length - 1, Math.round(pt.cx)));
+            return cats[idx] !== undefined ? String(cats[idx]) : "";
+        }
+        if (ax.type === "date") {
+            const raw = pt.rawX !== undefined ? String(pt.rawX) : String(axisC2D(ax, pt.cx) || "");
+            const m = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})(?:[T\\s](\\d{2}):(\\d{2}))?/);
+            if (m) {
+                const base = m[3] + "/" + m[2] + "/" + m[1];
+                return (m[4] && m[5] && !(m[4] === "00" && m[5] === "00")) ? (base + " " + m[4] + ":" + m[5]) : base;
+            }
+            return raw;
+        }
+        return fmtNumBr(Number(axisC2D(ax, pt.cx)), 2);
+    }
+
+    function pointFromEvent(gd, e) {
+        const dragEl = getDragEl(gd);
+        const rect = dragEl.getBoundingClientRect();
+        const px = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const py = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+        const xa = gd._fullLayout.xaxis;
+        const ya = gd._fullLayout.yaxis;
+
+        let bestPt = null;
+        let bestDist = Infinity;
+        const dataArr = gd.data || [];
+        const singleTrace = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly"; }).length <= 1;
+
+        for (let ti = 0; ti < dataArr.length; ti++) {
+            const tr = dataArr[ti];
+            if (!tr || tr.visible === false || tr.visible === "legendonly") continue;
+            if (tr.type === "pie" || tr.hoverinfo === "skip") continue;
+            const xs = tr.x;
+            const ys = tr.y;
+            if (!xs || !ys || !xs.length) continue;
+            const maxDy = singleTrace ? 34 : 20;
+            for (let i = 0; i < xs.length; i++) {
+                const yRaw = ys[i];
+                if (yRaw === null || yRaw === undefined || Number.isNaN(Number(yRaw))) continue;
+                const ptCx = axisD2C(xa, xs[i]);
+                const ptCy = axisD2C(ya, yRaw);
+                if (!Number.isFinite(ptCx) || !Number.isFinite(ptCy)) continue;
+                const ptPx = xa.c2p(ptCx);
+                const ptPy = ya.c2p(ptCy);
+                const dx = ptPx - px;
+                const dy = ptPy - py;
+                if (Math.abs(dy) <= maxDy && Math.abs(dx) <= 24) {
+                    const dist = Math.hypot(dx, dy);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        bestPt = {
+                            cx: ptCx,
+                            cy: ptCy,
+                            valY: Number(yRaw),
+                            rawX: xs[i],
+                            idx: i,
+                            traceIdx: ti,
+                            snapped: true
+                        };
+                    }
+                }
+            }
+        }
+
+        if (bestPt) return bestPt;
+
+        const cx = xa.p2c(px);
+        const cy = ya.p2c(py);
+        const valY = Number(axisC2D(ya, cy));
+        return {
+            cx: cx,
+            cy: cy,
+            valY: Number.isFinite(valY) ? valY : cy,
+            rawX: undefined,
+            idx: null,
+            traceIdx: null,
+            snapped: false
+        };
+    }
+
+    function clearMeasure(gd) {
+        if (!gd) return;
+        gd.__measureState = null;
+        const ov = gd.querySelector(".tv-measure-overlay");
+        if (ov) ov.innerHTML = "";
+        if (pWin.__activeMeasuringGd === gd) {
+            pWin.__activeMeasuringGd = null;
+        }
+    }
+
+    function renderMeasure(gd) {
+        if (!gd || !isCartesianPlot(gd)) return;
+        const stM = gd.__measureState;
+        let ov = gd.querySelector(".tv-measure-overlay");
+        if (!stM || !stM.p1 || !stM.p2) {
+            if (ov) ov.innerHTML = "";
+            return;
+        }
+        if (!ov) {
+            if (getComputedStyle(gd).position === "static") {
+                gd.style.position = "relative";
+            }
+            ov = pDoc.createElement("div");
+            ov.className = "tv-measure-overlay";
+            gd.appendChild(ov);
+        }
+
+        const dragEl = getDragEl(gd);
+        const gdRect = gd.getBoundingClientRect();
+        const dragRect = dragEl.getBoundingClientRect();
+        if (!dragRect.width || !dragRect.height) return;
+
+        const offL = dragRect.left - gdRect.left;
+        const offT = dragRect.top - gdRect.top;
+        const xa = gd._fullLayout.xaxis;
+        const ya = gd._fullLayout.yaxis;
+
+        const px1 = Math.max(0, Math.min(dragRect.width, xa.c2p(stM.p1.cx)));
+        const py1 = Math.max(0, Math.min(dragRect.height, ya.c2p(stM.p1.cy)));
+        const px2 = Math.max(0, Math.min(dragRect.width, xa.c2p(stM.p2.cx)));
+        const py2 = Math.max(0, Math.min(dragRect.height, ya.c2p(stM.p2.cy)));
+
+        const x1 = offL + px1;
+        const y1 = offT + py1;
+        const x2 = offL + px2;
+        const y2 = offT + py2;
+
+        const rx = Math.min(x1, x2);
+        const ry = Math.min(y1, y2);
+        const rw = Math.max(1, Math.abs(x2 - x1));
+        const rh = Math.max(1, Math.abs(y2 - y1));
+
+        const v1 = stM.p1.valY;
+        const v2 = stM.p2.valY;
+        const diff = v2 - v1;
+        const pref = ya.tickprefix || "";
+        const suf = ya.ticksuffix || "";
+
+        let pct = 0;
+        if (suf === "%") {
+            const base1 = 1 + (v1 / 100);
+            pct = base1 > 0.0001 ? (((1 + (v2 / 100)) / base1) - 1) * 100 : diff;
+        } else {
+            pct = Math.abs(v1) > 1e-9 ? (diff / Math.abs(v1)) * 100 : 0;
+        }
+
+        const ehAlta = diff >= 0;
+        const corMain = ehAlta ? "#16a34a" : "#e11d48";
+        const corStroke = ehAlta ? "rgba(34, 197, 94, 0.85)" : "rgba(244, 63, 94, 0.85)";
+        const corFill = ehAlta ? "rgba(34, 197, 94, 0.16)" : "rgba(244, 63, 94, 0.16)";
+        const sinalD = diff > 0 ? "+" : "";
+        const sinalP = pct > 0 ? "+" : "";
+
+        const v1Fmt = pref + fmtNumBr(v1, 2) + suf;
+        const v2Fmt = pref + fmtNumBr(v2, 2) + suf;
+        const diffFmt = (suf === "%")
+            ? (sinalD + fmtNumBr(diff, 2) + " p.p. (" + sinalP + fmtNumBr(pct, 2) + "%)")
+            : (sinalD + pref + fmtNumBr(diff, 2) + suf + " (" + sinalP + fmtNumBr(pct, 2) + "%)");
+
+        const xLbl1 = formatXDisplay(xa, stM.p1);
+        const xLbl2 = formatXDisplay(xa, stM.p2);
+        let spanTxt = "";
+        if (xa.type === "date") {
+            const msDiff = Math.abs(stM.p2.cx - stM.p1.cx);
+            const dias = Math.round(msDiff / 86400000);
+            const hrs = Math.round(msDiff / 3600000);
+            const dur = dias >= 1 ? (dias + "d") : (hrs >= 1 ? (hrs + "h") : (Math.round(msDiff / 60000) + "min"));
+            if (stM.p1.snapped && stM.p2.snapped && stM.p1.traceIdx === stM.p2.traceIdx && stM.p1.idx !== null && stM.p2.idx !== null) {
+                const pts = Math.abs(stM.p2.idx - stM.p1.idx);
+                spanTxt = pts + " pts · " + dur;
+            } else {
+                spanTxt = dur;
+            }
+            if (xLbl1 && xLbl2) spanTxt = xLbl1 + " → " + xLbl2 + " (" + spanTxt + ")";
+        } else if (xLbl1 && xLbl2) {
+            spanTxt = xLbl1 + " → " + xLbl2;
+        }
+
+        const midX = rx + rw / 2;
+        const midY = ry + rh / 2;
+        const arrowV = (rh > 14)
+            ? `<line x1="${midX}" y1="${y1}" x2="${midX}" y2="${y2}" stroke="${corStroke}" stroke-width="1.6" />`
+            : "";
+        const arrowH = (rw > 14)
+            ? `<line x1="${x1}" y1="${midY}" x2="${x2}" y2="${midY}" stroke="${corStroke}" stroke-width="1.6" />`
+            : "";
+
+        let headV = "";
+        if (rh > 14) {
+            const dirV = y2 >= y1 ? 1 : -1;
+            headV = `<polygon points="${midX},${y2} ${midX - 5},${y2 - 7 * dirV} ${midX + 5},${y2 - 7 * dirV}" fill="${corStroke}" />`;
+        }
+        let headH = "";
+        if (rw > 14) {
+            const dirH = x2 >= x1 ? 1 : -1;
+            headH = `<polygon points="${x2},${midY} ${x2 - 7 * dirH},${midY - 5} ${x2 - 7 * dirH},${midY + 5}" fill="${corStroke}" />`;
+        }
+
+        const svgHtml = `
+            <svg class="tv-measure-svg">
+                <rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" fill="${corFill}" stroke="${corStroke}" stroke-width="1.2" stroke-dasharray="4 3" />
+                <line x1="${offL}" y1="${y1}" x2="${offL + dragRect.width}" y2="${y1}" stroke="rgba(148,163,184,0.45)" stroke-width="1" stroke-dasharray="3 3" />
+                <line x1="${offL}" y1="${y2}" x2="${offL + dragRect.width}" y2="${y2}" stroke="${corStroke}" stroke-width="1" stroke-dasharray="3 3" />
+                ${arrowV}${headV}${arrowH}${headH}
+                <circle cx="${x1}" cy="${y1}" r="4.2" fill="#3b82f6" stroke="#ffffff" stroke-width="1.5" />
+                <circle cx="${x2}" cy="${y2}" r="4.5" fill="${corMain}" stroke="#ffffff" stroke-width="1.5" />
+            </svg>
+        `;
+
+        const tagY1 = `<div class="tv-measure-tag" style="left:${offL + dragRect.width + 4}px; top:${Math.max(0, y1 - 10)}px; background:#2563eb;">${v1Fmt}</div>`;
+        const tagY2 = `<div class="tv-measure-tag" style="left:${offL + dragRect.width + 4}px; top:${Math.max(0, y2 - 10)}px; background:${corMain};">${v2Fmt}</div>`;
+
+        const cardWEst = 235;
+        const cardLeft = Math.max(offL + 4, Math.min(offL + dragRect.width - cardWEst, midX - 110));
+        const abaixo = (ry + rh + 66 <= offT + dragRect.height + 10);
+        const cardTop = abaixo ? (ry + rh + 8) : Math.max(4, ry - 64);
+
+        const hintSub = stM.state === "measuring"
+            ? "<div style='font-size:10.5px; opacity:0.85;'>Clique no ponto final para fixar</div>"
+            : (spanTxt ? `<div style='font-size:10.5px; opacity:0.9;'>${spanTxt}</div>` : "");
+
+        const cardHtml = `
+            <div class="tv-measure-card" style="left:${cardLeft}px; top:${cardTop}px; background:${corMain};">
+                <div class="tv-measure-card-head">
+                    <span>${diffFmt}</span>
+                    <span class="tv-measure-close" title="Fechar medição (Esc)">✕</span>
+                </div>
+                <div style="font-size:11px; opacity:0.95; font-weight:500;">${v1Fmt} → ${v2Fmt}</div>
+                ${hintSub}
+            </div>
+        `;
+
+        ov.innerHTML = svgHtml + tagY1 + tagY2 + cardHtml;
+    }
+
+    function attachPlot(gd) {
+        if (!gd || gd.dataset.measureReady === "1") return;
+        if (!isCartesianPlot(gd)) return;
+        gd.dataset.measureReady = "1";
+        if (typeof gd.on === "function") {
+            gd.on("plotly_relayout", function() { renderMeasure(gd); });
+            gd.on("plotly_afterplot", function() { renderMeasure(gd); });
+        }
+    }
+
+    function scanPlots() {
+        const plots = pDoc.querySelectorAll(".js-plotly-plot");
+        plots.forEach(attachPlot);
+    }
+
+    scanPlots();
+
+    if (!pWin.__chartMeasureObserver) {
+        let tm = null;
+        pWin.__chartMeasureObserver = new MutationObserver(function() {
+            if (tm) clearTimeout(tm);
+            tm = setTimeout(function() {
+                tm = null;
+                scanPlots();
+            }, 80);
+        });
+        pWin.__chartMeasureObserver.observe(pDoc.body, { childList: true, subtree: true });
+    }
+
+    if (!pWin.__chartMeasureAttached) {
+        pWin.__chartMeasureAttached = true;
+
+        pDoc.addEventListener("mousedown", function(e) {
+            const closeBtn = e.target && e.target.closest ? e.target.closest(".tv-measure-close") : null;
+            if (closeBtn) {
+                e.preventDefault();
+                e.stopPropagation();
+                const gdC = closeBtn.closest(".js-plotly-plot");
+                clearMeasure(gdC);
+                return;
+            }
+
+            const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
+            if (!gd || !isCartesianPlot(gd)) return;
+            attachPlot(gd);
+
+            const dragEl = getDragEl(gd);
+            const rect = dragEl.getBoundingClientRect();
+            const dentro = e.clientX >= rect.left - 4 && e.clientX <= rect.right + 4 && e.clientY >= rect.top - 4 && e.clientY <= rect.bottom + 4;
+            if (!dentro) return;
+
+            if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd === gd && gd.__measureState && gd.__measureState.state === "measuring") {
+                e.preventDefault();
+                e.stopPropagation();
+                pWin.__suppressPlotClickUntil = Date.now() + 300;
+                const p2 = pointFromEvent(gd, e);
+                gd.__measureState.p2 = p2;
+                gd.__measureState.state = "locked";
+                pWin.__activeMeasuringGd = null;
+                renderMeasure(gd);
+                return;
+            }
+
+            if (e.shiftKey) {
+                e.preventDefault();
+                e.stopPropagation();
+                pWin.__suppressPlotClickUntil = Date.now() + 300;
+                if (pWin.__activeMeasuringGd && pWin.__activeMeasuringGd !== gd) {
+                    clearMeasure(pWin.__activeMeasuringGd);
+                }
+                const p1 = pointFromEvent(gd, e);
+                gd.__measureState = { state: "measuring", p1: p1, p2: p1 };
+                pWin.__activeMeasuringGd = gd;
+                renderMeasure(gd);
+                return;
+            }
+
+            if (gd.__measureState && gd.__measureState.state === "locked") {
+                const insideCard = e.target && e.target.closest ? e.target.closest(".tv-measure-card") : null;
+                if (!insideCard) {
+                    clearMeasure(gd);
+                }
+            }
+        }, true);
+
+        pDoc.addEventListener("mousemove", function(e) {
+            const gd = pWin.__activeMeasuringGd;
+            if (!gd || !gd.__measureState || gd.__measureState.state !== "measuring") return;
+            gd.__measureState.p2 = pointFromEvent(gd, e);
+            renderMeasure(gd);
+        }, true);
+
+        pDoc.addEventListener("click", function(e) {
+            if (pWin.__suppressPlotClickUntil && Date.now() < pWin.__suppressPlotClickUntil) {
+                const gd = e.target && e.target.closest ? e.target.closest(".js-plotly-plot") : null;
+                if (gd) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                }
+            }
+        }, true);
+
+        pDoc.addEventListener("keydown", function(e) {
+            if (e.key === "Escape") {
+                pDoc.querySelectorAll(".js-plotly-plot").forEach(function(gd) {
+                    if (gd.__measureState) clearMeasure(gd);
+                });
+            }
+        }, true);
+    }
+})();
+</script>
+""".replace("__USE_PARENT__", "false" if _usa_st_html_m else "true")
+
+if _usa_st_html_m:
+    st.html(_js_chart_measure, unsafe_allow_javascript=True)
+else:
+    components.html(_js_chart_measure, height=0)
 
 st.divider()
 st.caption("Aviso: Estudo quantitativo e educacional com dados obtidos via Fundamentus, CVM Dados Abertos e Yahoo Finance. Não constitui recomendação oficial de compra ou venda.")

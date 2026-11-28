@@ -256,7 +256,69 @@ def salvar_dados_usuario_nuvem():
 
 
 # --- NOTÍCIAS (GOOGLE NEWS RSS PT-BR) & SENTIMENTO ---
-def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
+def _eh_pagina_seo_ou_irrelevante(titulo: str, fonte: str = "", link: str = "") -> bool:
+    t = _norm_txt(titulo)
+    f = _norm_txt(fonte)
+    l = _norm_txt(link)
+    if not t:
+        return True
+
+    padroes_seo_exatos = (
+        "resultados, dividendos", "dividendos, cotacao", "cotacao e indicadores",
+        "cotacao, dividendos", "indicadores, dividendos", "cotacao, graficos",
+        "preco alvo, dividendos", "valor justo e dividendos", "o que saber antes",
+        "cotacao hoje, dividendos", "cotacao de hoje", "graficos e noticias",
+        "acoes - cotacao", "ficha tecnica", "raiox completo", "raio-x completo",
+    )
+    if any(p in t for p in padroes_seo_exatos):
+        return True
+
+    kws_ficha = ("resultados", "dividendos", "cotacao", "indicadores", "balancos", "graficos", "proventos", "valuation", "historico")
+    hits_ficha = sum(1 for k in kws_ficha if re.search(rf"\b{k}\b", t))
+    tem_pref_ticker = bool(re.match(r"^[a-z]{4}\d{1,2}\b", t))
+    if hits_ficha >= 3 or (tem_pref_ticker and hits_ficha >= 2 and not re.search(r"\b(lucro|prejuizo|aprova|anuncia|paga|corta|sobe|cai|recua|dispara|avanca|fecha|vende|compra)\b", t)):
+        return True
+
+    dominios_ficha = ("investidor10", "statusinvest", "status invest", "fundamentus", "dadosdemercado", "analisedeacoes", "investsite", "oceans14", "trademap")
+    if (any(d in f for d in dominios_ficha) or any(d in l for d in dominios_ficha)) and hits_ficha >= 2:
+        return True
+
+    return False
+
+def _fator_idade_trimestre_noticia(titulo: str, agora_ts: float | None = None) -> float:
+    t = _norm_txt(titulo)
+    agora_dt = datetime.fromtimestamp(agora_ts if agora_ts is not None else time.time(), tz=BRT).date()
+    matches = re.findall(r"\b([1-4])\s*(?:t|tri)\s*(20\d{2}|2\d)\b", t)
+    matches += re.findall(r"\b([1-4])[o°]?\s*trimestre(?:\s+de)?\s*(20\d{2}|2\d)\b", t)
+    if not matches:
+        return 1.0
+
+    fim_mais_recente = None
+    for tri_s, ano_s in matches:
+        tri = int(tri_s)
+        ano = int(ano_s) if len(ano_s) == 4 else (2000 + int(ano_s))
+        if ano < 2015 or ano > agora_dt.year + 1:
+            continue
+        mes_fim = tri * 3
+        dia_fim = 31 if mes_fim in (3, 12) else 30
+        dt_fim_tri = date(ano, mes_fim, dia_fim)
+        if fim_mais_recente is None or dt_fim_tri > fim_mais_recente:
+            fim_mais_recente = dt_fim_tri
+
+    if fim_mais_recente is None:
+        return 1.0
+
+    dias_passados = (agora_dt - fim_mais_recente).days
+    if dias_passados > 150:
+        return 0.0
+    if dias_passados > 115:
+        return 0.35
+    return 1.0
+
+def _classificar_sentimento_noticia(titulo: str, fonte: str = "", link: str = "") -> tuple[str, str, float]:
+    if _eh_pagina_seo_ou_irrelevante(titulo, fonte=fonte, link=link):
+        return "🚫 SEO/Ficha", "seo", 0.0
+
     t = _norm_txt(titulo)
     t_work = f" {' '.join(re.sub(r'[^a-z0-9%]+', ' ', t).split())} "
 
@@ -267,19 +329,20 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
         "rombo", "intervencao", "liquidacao extrajudicial",
     )
     if any(k in t_work for k in critico_kw):
-        return "🚨 Risco Crítico", "critico", -5.0
+        return "🚨 Risco Crítico", "critico", -6.0
 
     pts_pos = 0.0
     pts_neg = 0.0
+    teve_composto_neg_forte = False
 
     # 1) Expressões compostas positivas (redução de algo ruim / reversão de prejuízo)
     compostos_pos = (
-        ("reverte prejuizo", 3.0),
-        ("revertendo prejuizo", 3.0),
-        ("sai de prejuizo", 3.0),
-        ("sai do prejuizo", 3.0),
-        ("saindo de prejuizo", 3.0),
-        ("saindo do prejuizo", 3.0),
+        ("reverte prejuizo", 3.5),
+        ("revertendo prejuizo", 3.5),
+        ("sai de prejuizo", 3.5),
+        ("sai do prejuizo", 3.5),
+        ("saindo de prejuizo", 3.5),
+        ("saindo do prejuizo", 3.5),
         ("reduz prejuizo", 2.5),
         ("reduziu prejuizo", 2.5),
         ("diminui prejuizo", 2.5),
@@ -316,7 +379,6 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
             pts_pos += peso
             t_work = t_work.replace(frase, " ")
 
-    # Padrões flexíveis positivos (ex: "queda nas despesas operacionais", "redução dos custos fixos")
     pat_pos_flex = re.compile(
         r"\b(?:queda|reducao|diminuicao|corte)\s+(?:de|da|das|do|dos|na|nas|no|nos)\s+"
         r"(?:despesas|custos|divida|alavancagem|inadimplencia)\b"
@@ -325,109 +387,181 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
         pts_pos += 2.5
         t_work = pat_pos_flex.sub(" ", t_work)
 
-    # 2) Expressões compostas negativas (aumento de algo ruim / queda de lucro, receita, margem, dividendos)
+    # 2) Expressões compostas negativas (aumento de algo ruim / queda ou corte de lucro, receita, margem, dividendos)
     compostos_neg = (
-        ("reverte lucro", 3.5),
-        ("lucro desaba", 3.5),
-        ("lucro despenca", 3.5),
-        ("lucro cai", 3.0),
-        ("lucro recua", 2.5),
-        ("queda no lucro", 3.0),
-        ("queda do lucro", 3.0),
-        ("recuo no lucro", 2.5),
-        ("corta dividendo", 3.0),
-        ("suspende dividendo", 3.0),
-        ("prejuizo dispara", 3.5),
-        ("prejuizo sobe", 3.0),
-        ("prejuizo aumenta", 3.0),
-        ("prejuizo cresce", 3.0),
-        ("divida dispara", 3.0),
-        ("divida sobe", 2.5),
-        ("divida cresce", 2.5),
-        ("divida aumenta", 2.5),
-        ("inadimplencia dispara", 3.0),
-        ("inadimplencia sobe", 2.5),
-        ("inadimplencia cresce", 2.5),
-        ("despesas sobem", 2.5),
-        ("custos sobem", 2.5),
-        ("receita cai", 2.5),
-        ("queda de receita", 2.5),
-        ("queda na receita", 2.5),
-        ("margem cai", 2.5),
-        ("margem recua", 2.5),
+        ("reverte lucro", 4.5),
+        ("lucro desaba", 5.0),
+        ("lucro despenca", 5.0),
+        ("lucro cai", 4.0),
+        ("lucro recua", 3.5),
+        ("lucro encolhe", 4.0),
+        ("lucro diminui", 3.5),
+        ("lucro baixa", 3.5),
+        ("queda no lucro", 4.0),
+        ("queda do lucro", 4.0),
+        ("queda de lucro", 4.0),
+        ("recuo no lucro", 3.5),
+        ("recuo do lucro", 3.5),
+        ("baixa no lucro", 3.5),
+        ("corta dividendo", 4.5),
+        ("corte de dividendo", 4.5),
+        ("corte nos dividendos", 4.5),
+        ("corta provento", 4.5),
+        ("corte de provento", 4.5),
+        ("reduz dividendo", 4.0),
+        ("reduz provento", 4.0),
+        ("suspende dividendo", 4.5),
+        ("suspende provento", 4.5),
+        ("duvidas sobre dividendo", 3.5),
+        ("duvidas sobre provento", 3.5),
+        ("dividendos em baixa", 3.5),
+        ("menores dividendos", 3.5),
+        ("menor dividendo", 3.5),
+        ("prejuizo dispara", 4.5),
+        ("prejuizo sobe", 4.0),
+        ("prejuizo aumenta", 4.0),
+        ("prejuizo cresce", 4.0),
+        ("divida dispara", 3.5),
+        ("divida sobe", 3.0),
+        ("divida cresce", 3.0),
+        ("divida aumenta", 3.0),
+        ("inadimplencia dispara", 3.5),
+        ("inadimplencia sobe", 3.0),
+        ("inadimplencia cresce", 3.0),
+        ("despesas sobem", 3.0),
+        ("custos sobem", 3.0),
+        ("receita cai", 3.5),
+        ("receita recua", 3.0),
+        ("queda de receita", 3.5),
+        ("queda na receita", 3.5),
+        ("margem cai", 3.0),
+        ("margem recua", 3.0),
     )
     for frase, peso in compostos_neg:
         if frase in t_work:
             pts_neg += peso
+            teve_composto_neg_forte = True
             t_work = t_work.replace(frase, " ")
 
-    pat_lucro_neg = re.compile(r"\blucro(?:\s+\w+){0,2}\s+(?:cai|recua|desaba|despenca)\b")
-    if pat_lucro_neg.search(t_work):
-        pts_neg += 3.0
-        t_work = pat_lucro_neg.sub(" ", t_work)
-
-    # 3) Fatores positivos individuais sobre o texto restante
-    pos_simples = (
-        ("lucro recorde", 3.5),
-        ("resultado recorde", 3.5),
-        ("supera estimativas", 3.0),
-        ("acima do esperado", 3.0),
-        ("bate estimativas", 3.0),
-        ("lucro dispara", 3.5),
-        ("lucro salta", 3.5),
-        ("lucro sobe", 3.0),
-        ("lucro cresce", 3.0),
-        ("lucro avanca", 3.0),
-        ("melhora do resultado", 2.5),
-        ("juros sobre capital", 2.5),
-        ("dividendo", 2.5),
-        ("provento", 2.5),
-        (" jcp ", 2.5),
-        ("recorde", 2.0),
-        ("lucro", 2.0),
-        ("dispara", 2.0),
-        ("melhora", 1.5),
-        ("supera", 1.5),
-        ("aprova", 1.5),
-        (" sobe ", 1.5),
-        (" alta ", 1.5),
+    pats_neg_flex = (
+        (re.compile(r"\b(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)(?:\s+\w+){0,4}\s+(?:cai|cair|recua|desaba|despenca|encolhe|diminui|reduz|baixa|tomba|frustra|decepciona|pressionad[oa]|abaixo)\b"), 4.5),
+        (re.compile(r"\b(?:queda|recuo|reducao|baixa|corte|tombo|encolhimento|duvida|duvidas|incerteza|pressao)(?:\s+\w+){0,4}\s+(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)\b"), 4.5),
+        (re.compile(r"\b(?:corta|cortar|reduz|reduzir|suspende|adia|cancela|limita|ameaca)(?:\s+\w+){0,3}\s+(?:dividendo|dividendos|provento|proventos|jcp|payout|distribuicao)\b"), 4.5),
     )
-    for kw, peso in pos_simples:
-        if kw in t_work:
-            pts_pos += peso
-            t_work = t_work.replace(kw, " ")
+    for pat_nf, peso_nf in pats_neg_flex:
+        if pat_nf.search(t_work):
+            pts_neg += peso_nf
+            teve_composto_neg_forte = True
+            t_work = pat_nf.sub(" ", t_work)
+
+    # Detecta modificadores negativos restantes na manchete para bloquear falsos positivos
+    mod_neg_kws = (
+        " cai ", " cair ", " queda ", " baixa ", " corta ", " corte ", " cortar ",
+        " reduz ", " reducao ", " reduzir ", " duvida ", " duvidas ", " recua ", " recuo ",
+        " abaixo do esperado ", " abaixo das estimativas ", " pressao ", " pressiona ",
+        " pressionado ", " pressionada ", " desaba ", " despenca ", " derrete ", " tombo ",
+        " frustra ", " decepciona ", " prejuizo ", " piora ", " desacelera ", " suspende ",
+        " adia ", " cancela ", " rebaix", " encolhe ", " menor ", " menores ", " perda ",
+        " perde ", " negativo ", " negativa ", " crise ", " multa ", " inadimpl",
+    )
+    tem_mod_neg = (pts_neg > 0.0) or any(k in t_work for k in mod_neg_kws)
+
+    # 3) Fatores positivos APENAS com contexto/verbo de alta ou aprovação e sem modificadores negativos
+    if not tem_mod_neg:
+        pos_contexto = (
+            ("lucro recorde", 3.5),
+            ("resultado recorde", 3.5),
+            ("supera estimativas", 3.5),
+            ("acima do esperado", 3.5),
+            ("bate estimativas", 3.0),
+            ("lucro dispara", 3.5),
+            ("lucro salta", 3.5),
+            ("lucro sobe", 3.0),
+            ("lucro cresce", 3.0),
+            ("lucro avanca", 3.0),
+            ("lucro aumenta", 3.0),
+            ("melhora do resultado", 2.5),
+            ("aprova dividendos", 3.0),
+            ("aprova dividendo", 3.0),
+            ("aprova proventos", 3.0),
+            ("aprova jcp", 3.0),
+            ("aprova juros sobre capital", 3.0),
+            ("anuncia dividendos", 2.5),
+            ("anuncia dividendo", 2.5),
+            ("anuncia proventos", 2.5),
+            ("anuncia jcp", 2.5),
+            ("anuncia juros sobre capital", 2.5),
+            ("paga dividendos", 2.5),
+            ("paga jcp", 2.5),
+            ("paga proventos", 2.5),
+            ("distribuicao de dividendos", 2.5),
+            ("distribuicao de jcp", 2.5),
+            ("dividendos extraordinarios", 3.0),
+            ("eleva dividendo", 3.0),
+            ("aumenta dividendo", 3.0),
+            ("recompra de acoes", 2.0),
+            ("eleva recomendacao", 2.5),
+            ("eleva preco alvo", 2.5),
+            ("dispara", 2.0),
+            ("melhora", 1.5),
+            ("supera", 1.5),
+            ("aprova", 1.5),
+            (" sobe ", 1.5),
+            (" alta ", 1.5),
+        )
+        for kw, peso in pos_contexto:
+            if kw in t_work:
+                pts_pos += peso
+                t_work = t_work.replace(kw, " ")
 
     # 4) Fatores negativos individuais sobre o texto restante
     neg_simples = (
-        ("abaixo do esperado", 2.5),
-        ("abaixo das estimativas", 2.5),
-        ("queda forte", 2.5),
-        ("prejuizo", 2.5),
-        ("decepciona", 2.5),
-        ("frustra", 2.5),
-        ("desaba", 2.5),
-        ("derrete", 2.5),
-        (" despenc", 2.5),
-        ("tombo", 2.5),
-        ("crise", 2.0),
+        ("abaixo do esperado", 3.0),
+        ("abaixo das estimativas", 3.0),
+        ("queda forte", 3.0),
+        ("prejuizo", 3.0),
+        ("decepciona", 3.0),
+        ("frustra", 3.0),
+        ("desaba", 3.5),
+        ("derrete", 3.0),
+        (" despenc", 3.5),
+        ("tombo", 3.0),
+        ("pressiona", 2.5),
+        ("pressionado", 2.5),
+        ("duvidas", 2.5),
+        ("duvida", 2.5),
+        ("corta", 2.5),
+        ("corte", 2.5),
+        ("reduz", 2.0),
+        ("recua", 2.0),
+        ("baixa", 2.0),
+        ("crise", 2.5),
         ("multa", 2.0),
-        (" inadimpl", 2.0),
-        (" rebaix", 2.0),
-        (" queda ", 1.5),
-        (" cai ", 1.5),
+        (" inadimpl", 2.5),
+        (" rebaix", 2.5),
+        (" queda ", 2.0),
+        (" cai ", 2.0),
     )
     for kw, peso in neg_simples:
         if kw in t_work:
             pts_neg += peso
             t_work = t_work.replace(kw, " ")
 
-    saldo_manchete = round(pts_pos - pts_neg, 2)
-    if saldo_manchete > 0.0:
-        pts_final = round(min(4.0, max(1.5, saldo_manchete)), 1)
-        return "🟢 Positivo/Provento", "positivo", pts_final
-    if saldo_manchete < 0.0:
-        pts_final = round(max(-4.0, min(-1.5, saldo_manchete)), 1)
+    if pts_neg > 0.0:
+        m_pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", t)
+        pct_num = float(m_pct.group(1).replace(",", ".")) if m_pct else 0.0
+        bonus_pct = 2.0 if pct_num >= 25.0 else (1.0 if pct_num >= 10.0 else 0.0)
+        nota_neg = -(pts_neg + bonus_pct)
+        if teve_composto_neg_forte or pct_num >= 10.0:
+            nota_neg = min(-3.0, nota_neg)
+        else:
+            nota_neg = min(-2.0, nota_neg)
+        pts_final = round(max(-8.0, nota_neg), 1)
         return "🔴 Atenção", "negativo", pts_final
+
+    if pts_pos > 0.0:
+        pts_final = round(min(4.0, max(1.5, pts_pos)), 1)
+        return "🟢 Positivo/Provento", "positivo", pts_final
 
     corp_kw = (
         "privatiz", "leilao", "fusao", "aquisicao", " compra ", " venda ",
@@ -438,10 +572,8 @@ def _classificar_sentimento_noticia(titulo: str) -> tuple[str, str, float]:
 
     return "📰 Notícia", "neutro", 0.0
 
-
 def _classificar_noticia(titulo: str) -> str:
     return _classificar_sentimento_noticia(titulo)[0]
-
 
 def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = None) -> dict:
     if not itens:
@@ -480,14 +612,23 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         if ts <= 0.0 or ts < limite_30d:
             continue
 
+        titulo = it.get("titulo") or ""
+        fonte = it.get("fonte", "")
+        link = it.get("link", "")
+        if _eh_pagina_seo_ou_irrelevante(titulo, fonte=fonte, link=link):
+            continue
+
+        fator_trim = _fator_idade_trimestre_noticia(titulo, agora_ts=agora)
+        if fator_trim <= 0.0:
+            continue
+
         qtd_30d += 1
-        peso_tempo = 2.0 if ts >= limite_7d else 1.0
+        peso_tempo = (2.0 if ts >= limite_7d else 1.0) * fator_trim
         if ts >= limite_7d:
             qtd_7d += 1
 
-        titulo = it.get("titulo") or ""
         t_norm = _norm_txt(titulo)
-        _, cat, saldo_manchete = _classificar_sentimento_noticia(titulo)
+        _, cat, saldo_manchete = _classificar_sentimento_noticia(titulo, fonte=fonte, link=link)
         pts = float(saldo_manchete)
 
         impacto = abs(pts) * peso_tempo
@@ -500,15 +641,15 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
                 best_neg_key = cand_n
                 top_neg = {
                     "titulo": titulo,
-                    "fonte": it.get("fonte", ""),
+                    "fonte": fonte,
                     "data_str": it.get("data_str", ""),
-                    "link": it.get("link", ""),
+                    "link": link,
                 }
         if cat == "critico":
             cnt_critico += 1
         elif cat == "negativo" and saldo_manchete < 0.0:
             cnt_neg += 1
-            if any(k in t_norm for k in ("prejuizo", "reverte lucro", "frustra", "queda de receita", "queda na receita")):
+            if any(k in t_norm for k in ("prejuizo", "reverte lucro", "frustra", "queda de receita", "queda na receita", "corta dividendo", "corte de dividendo")):
                 tem_prej_ou_frustra = True
         elif cat == "positivo" and saldo_manchete > 0.0:
             cnt_pos += 1
@@ -517,9 +658,9 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
                 best_pos_key = cand_p
                 top_pos = {
                     "titulo": titulo,
-                    "fonte": it.get("fonte", ""),
+                    "fonte": fonte,
                     "data_str": it.get("data_str", ""),
-                    "link": it.get("link", ""),
+                    "link": link,
                 }
             if any(k in t_norm for k in ("dividendo", "jcp", "juros sobre capital", "provento")):
                 tem_provento = True
@@ -533,7 +674,7 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
     elif cnt_critico > 0:
         news_resumo = "🔴 Alerta em Notícias"
     elif news_score <= -2.0 or (cnt_neg > cnt_pos and news_score < 0.0):
-        news_resumo = "🔴 Prejuízo Recente" if tem_prej_ou_frustra else "🔴 Notícias Negativas"
+        news_resumo = "🔴 Prejuízo / Corte Recente" if tem_prej_ou_frustra else "🔴 Notícias Negativas"
     elif news_score >= 2.0 or (cnt_pos > cnt_neg and news_score > 0.0):
         news_resumo = "🟢 Balanço / Proventos" if (tem_provento or tem_balanco_pos) else "🟢 Positivo"
     else:
@@ -549,9 +690,10 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         "top_noticia_pos": top_pos,
     }
 
-
 @st.cache_data(ttl=1800, show_spinner=False)
-def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, list[dict]]:
+def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 3) -> dict[str, list[dict]]:
+    agora_ts = time.time()
+
     def _one(ticker: str):
         for q_str in (f'"{ticker}"', f"{ticker} ações"):
             try:
@@ -569,6 +711,8 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[st
                     fonte = (fonte_el.text or "").strip() if fonte_el is not None else ""
                     if fonte and titulo.endswith(f" - {fonte}"):
                         titulo = titulo[: -len(f" - {fonte}")].strip()
+                    if not titulo or not link or _eh_pagina_seo_ou_irrelevante(titulo, fonte=fonte, link=link):
+                        continue
                     dt_obj = None
                     dt_str = ""
                     if pub:
@@ -577,15 +721,18 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[st
                             dt_str = dt_obj.astimezone(BRT).strftime("%d/%m/%Y %H:%M")
                         except Exception:
                             dt_str = pub
-                    if titulo and link:
-                        tag, cat, pts_s = _classificar_sentimento_noticia(titulo)
-                        itens.append({
-                            "titulo": titulo, "link": link, "fonte": fonte,
-                            "data_str": dt_str, "tag": tag,
-                            "sentimento_cat": cat, "sentimento_pts": pts_s,
-                            "saldo_manchete": pts_s,
-                            "ts": dt_obj.timestamp() if dt_obj else 0.0,
-                        })
+                    tag, cat, pts_s = _classificar_sentimento_noticia(titulo, fonte=fonte, link=link)
+                    fator_trim = _fator_idade_trimestre_noticia(titulo, agora_ts=agora_ts)
+                    if fator_trim <= 0.0:
+                        tag = "⏳ Trimestre Antigo"
+                        pts_s = 0.0
+                    itens.append({
+                        "titulo": titulo, "link": link, "fonte": fonte,
+                        "data_str": dt_str, "tag": tag,
+                        "sentimento_cat": cat, "sentimento_pts": pts_s,
+                        "saldo_manchete": pts_s,
+                        "ts": dt_obj.timestamp() if dt_obj else 0.0,
+                    })
                 if itens:
                     itens.sort(key=lambda x: x["ts"], reverse=True)
                     return ticker, itens[:12]
@@ -600,7 +747,6 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[st
         for t, res in ex.map(_one, tickers_tuple):
             out[t] = res
     return out
-
 
 def buscar_sentimento_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
     noticias_lote = buscar_noticias_lote(tickers_tuple)
@@ -774,8 +920,15 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
             "liquidez corrente": "liq_corr_i10",
             "divida bruta / patrimonio": "div_brut_patrim_i10",
             "div. bruta / patrimonio": "div_brut_patrim_i10",
+            "divida liquida / ebitda": "div_liq_ebitda_i10",
+            "div. liquida / ebitda": "div_liq_ebitda_i10",
+            "divida liquida / patrimonio": "div_liq_pl_i10",
+            "div. liquida / patrimonio": "div_liq_pl_i10",
+            "div. liquida / pl": "div_liq_pl_i10",
             "cagr receitas 5 anos": "cresc_rec_5a_i10",
             "cagr receita 5 anos": "cresc_rec_5a_i10",
+            "cagr lucros 5 anos": "cresc_lucro_5a_i10",
+            "cagr lucro 5 anos": "cresc_lucro_5a_i10",
         }
 
         container_ind = soup.find(id="table-indicators") or soup
@@ -830,7 +983,7 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def buscar_investidor10_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
+def buscar_investidor10_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, dict]:
     if not tickers_tuple:
         return {}
     out: dict[str, dict] = {}
@@ -1726,11 +1879,15 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         mm20 = None
         mm50 = None
         mm200 = None
+        mm20_incl_pos = None
+        dist_mm20_pct = None
         dist_mm50_pct = None
         dist_mm200_pct = None
         dist_max_52s_pct = None
         razao_volume = None
         var_dia_pct = None
+        ret_5d_pct = None
+        ret_30d_pct = None
 
         try:
             hist_1y = tk.history(period="1y", interval="1d", auto_adjust=False)
@@ -1766,6 +1923,11 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
                     if prev_ref and prev_ref > 0:
                         var_dia_pct = ((px_ref / prev_ref) - 1.0) * 100.0
 
+                    if len(close_s) >= 6 and float(close_s.iloc[-6]) > 0:
+                        ret_5d_pct = ((px_ref / float(close_s.iloc[-6])) - 1.0) * 100.0
+                    if len(close_s) >= 22 and float(close_s.iloc[-22]) > 0:
+                        ret_30d_pct = ((px_ref / float(close_s.iloc[-22])) - 1.0) * 100.0
+
                 if len(close_s) >= 15:
                     delta = close_s.diff().dropna()
                     gain = delta.clip(lower=0.0)
@@ -1783,6 +1945,11 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
 
                 if len(close_s) >= 20:
                     mm20 = float(close_s.tail(20).mean())
+                    if px_ref and mm20 > 0:
+                        dist_mm20_pct = ((px_ref / mm20) - 1.0) * 100.0
+                    if len(close_s) >= 25:
+                        mm20_prev = float(close_s.iloc[-25:-5].mean())
+                        mm20_incl_pos = mm20 > mm20_prev
                 if len(close_s) >= 50:
                     mm50 = float(close_s.tail(50).mean())
                     if px_ref and mm50 > 0:
@@ -1808,10 +1975,37 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             pass
 
         fin_curr = (info.get("financialCurrency") or "BRL").upper()
+        fx_atual_yf = 1.0
+        if fin_curr != "BRL":
+            fx_s_yf = buscar_cambio_brl(fin_curr)
+            if not fx_s_yf.empty:
+                fx_atual_yf = float(fx_s_yf.iloc[-1])
+
         lpa = info.get("trailingEps") if fin_curr == "BRL" else None
         vpa = info.get("bookValue") if fin_curr == "BRL" else None
         roe_raw = info.get("returnOnEquity")
         roe = (roe_raw * 100) if roe_raw is not None else None
+
+        mktcap_yf = info.get("marketCap")
+        tot_debt_raw = info.get("totalDebt")
+        tot_cash_raw = info.get("totalCash")
+        ebitda_raw = info.get("ebitda")
+        fcf_raw = info.get("freeCashflow")
+        earn_g_raw = info.get("earningsGrowth")
+
+        div_liq_ebitda_yf = None
+        div_liq_mktcap_ratio = None
+        fcf_yield_yf = None
+        if tot_debt_raw is not None and tot_cash_raw is not None:
+            div_liq_brl = (float(tot_debt_raw) - float(tot_cash_raw)) * fx_atual_yf
+            if ebitda_raw is not None and float(ebitda_raw) > 0:
+                ebitda_brl = float(ebitda_raw) * fx_atual_yf
+                div_liq_ebitda_yf = div_liq_brl / ebitda_brl
+            if mktcap_yf is not None and float(mktcap_yf) > 0:
+                div_liq_mktcap_ratio = div_liq_brl / float(mktcap_yf)
+        if fcf_raw is not None and mktcap_yf is not None and float(mktcap_yf) > 0:
+            fcf_yield_yf = ((float(fcf_raw) * fx_atual_yf) / float(mktcap_yf)) * 100.0
+        cresc_lucro_yf = (float(earn_g_raw) * 100.0) if earn_g_raw is not None else None
 
         divs = tk.dividends
         dpa_12m = None
@@ -1830,7 +2024,9 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             if not divs_6a.empty:
                 por_ano = divs_6a.groupby(divs_6a.index.year).sum()
                 anos_hist = len(por_ano)
-                dpa_med_6a = float(divs_6a.sum() / min(6, max(1, anos_hist)))
+                ano_min_div = int(por_ano.index.min())
+                serie_anos = [float(por_ano.get(a, 0.0)) for a in anos_validos if a >= ano_min_div]
+                dpa_med_6a = float(pd.Series(serie_anos).median()) if serie_anos else float(por_ano.median())
 
             divs_pos = divs[divs > 0]
             if not divs_pos.empty:
@@ -1858,9 +2054,15 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             "nome": nome,
             "cotacao_yf": float(cot_yf) if cot_yf else None,
             "var_dia_pct": float(var_dia_pct) if var_dia_pct is not None else None,
+            "ret_5d_pct": float(ret_5d_pct) if ret_5d_pct is not None else None,
+            "ret_30d_pct": float(ret_30d_pct) if ret_30d_pct is not None else None,
             "lpa_yf": float(lpa) if lpa is not None else None,
             "vpa_yf": float(vpa) if vpa is not None else None,
             "roe_yf": float(roe) if roe is not None else None,
+            "div_liq_ebitda_yf": float(div_liq_ebitda_yf) if div_liq_ebitda_yf is not None else None,
+            "div_liq_mktcap_ratio": float(div_liq_mktcap_ratio) if div_liq_mktcap_ratio is not None else None,
+            "fcf_yield_yf": float(fcf_yield_yf) if fcf_yield_yf is not None else None,
+            "cresc_lucro_yf": float(cresc_lucro_yf) if cresc_lucro_yf is not None else None,
             "dpa_12m_yf": float(dpa_12m) if dpa_12m is not None else None,
             "dpa_med_6a": float(dpa_med_6a) if dpa_med_6a is not None else None,
             "anos_hist": anos_hist,
@@ -1871,6 +2073,8 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             "mm20": float(mm20) if mm20 is not None else None,
             "mm50": float(mm50) if mm50 is not None else None,
             "mm200": float(mm200) if mm200 is not None else None,
+            "mm20_incl_pos": mm20_incl_pos,
+            "dist_mm20_pct": float(dist_mm20_pct) if dist_mm20_pct is not None else None,
             "dist_mm50_pct": float(dist_mm50_pct) if dist_mm50_pct is not None else None,
             "dist_mm200_pct": float(dist_mm200_pct) if dist_mm200_pct is not None else None,
             "dist_max_52s_pct": float(dist_max_52s_pct) if dist_max_52s_pct is not None else None,
@@ -1879,9 +2083,8 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
     except Exception:
         return ticker, {}
 
-
 @st.cache_data(ttl=300, show_spinner=False)
-def buscar_yahoo_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
+def buscar_yahoo_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, dict]:
     if not tickers_tuple:
         return {}
     resultados = {}
@@ -1889,6 +2092,18 @@ def buscar_yahoo_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
         for ticker, dados in executor.map(_fetch_yf, tickers_tuple):
             resultados[ticker] = dados
     return resultados
+
+@st.cache_data(ttl=600, show_spinner=False)
+def buscar_ret_ibov_30d() -> float | None:
+    try:
+        h = yf.Ticker("^BVSP").history(period="3mo", interval="1d", auto_adjust=False)
+        if h is not None and not h.empty and "Close" in h.columns:
+            c = h["Close"].dropna()
+            if len(c) >= 22 and float(c.iloc[-22]) > 0:
+                return ((float(c.iloc[-1]) / float(c.iloc[-22])) - 1.0) * 100.0
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(ttl=180, show_spinner=False)
@@ -3061,27 +3276,27 @@ DICIONARIO_TERMOS = {
     },
     "Preço Justo Graham": {
         "categoria": "💵 Dividendos & Preços-Teto",
-        "nome_completo": "Valor Intrínseco de Benjamin Graham",
-        "o_que_e": "Fórmula clássica criada pelo mentor de Warren Buffett: raiz quadrada de (22,5 × LPA × VPA), equilibrando lucro e patrimônio.",
-        "como_interpretar": "Representa uma referência conservadora de valor justo. Comprar com a cotação abaixo do Preço Justo de Graham aumenta a margem de segurança patrimonial.",
+        "nome_completo": "Valor Intrínseco de Benjamin Graham Ajustado pelo ROE",
+        "o_que_e": "Adaptação da fórmula clássica √(22,5 × LPA × VPA_efetivo), onde VPA_efetivo = VPA × clamp(ROE / 14%, 0,40, 1,50), ajustando o valor patrimonial ao custo de capital no Brasil.",
+        "como_interpretar": "Evita superestimar empresas com ROE muito baixo abaixo do custo de capital (~14%). Comprar abaixo do Graham Ajustado aumenta a margem de segurança real.",
     },
     "Preço-Teto Médio (6 anos)": {
         "categoria": "💵 Dividendos & Preços-Teto",
-        "nome_completo": "Preço-Teto pela Média de Dividendos de 6 Anos",
-        "o_que_e": "Divide a média anual de dividendos pagos nos últimos 6 anos por 6% (0,06), suavizando anos atípicos muito bons ou muito fracos.",
+        "nome_completo": "Preço-Teto pela Mediana de Dividendos de 6 Anos",
+        "o_que_e": "Divide a mediana anual de dividendos pagos nos últimos 6 anos por 6% (0,06), evitando que um único ano extraordinário (como picos de commodities) infle o teto.",
         "como_interpretar": "É uma régua mais estável e rigorosa que o Bazin de 12 meses, ideal para empresas cíclicas ou pagadoras tradicionais de longo prazo.",
     },
     "Preço-Teto Projetivo": {
         "categoria": "💵 Dividendos & Preços-Teto",
         "nome_completo": "Preço-Teto pelo Dividendo Projetado",
         "o_que_e": "Estima o preço máximo para 6% de yield considerando o dividendo projetado com base no lucro recente e histórico de distribuição (payout).",
-        "como_interpretar": "Ajuda a olhar para frente quando a empresa aumentou ou reduziu sua capacidade de pagamento recentemente.",
+        "como_interpretar": "Quando difere menos de 10% do Bazin 12m, o modelo funde ambos em um único método de Dividendos Sustentáveis para evitar dupla contagem no score.",
     },
     "Faixa de Preço do Modelo": {
         "categoria": "💵 Dividendos & Preços-Teto",
         "nome_completo": "Teto com Margem de Segurança vs Zona de Sobrepreço",
-        "o_que_e": "Define duas faixas de referência: o Teto com Margem (menor valor entre Graham e o Preço-Teto médio de dividendos com 15% de desconto) e a Zona de Sobrepreço calibrada por setor (para Bancos/Seguradoras: menor valor entre Graham e 1,15x o VPA, mínimo +15% sobre o teto; para demais empresas: menor valor entre 1,25x Graham e DY de 4%, mínimo +20% sobre o teto).",
-        "como_interpretar": "Abaixo do Teto com Margem o ativo oferece ótimo desconto; entre o Teto e o Sobrepreço está em faixa intermediária; acima da Zona de Sobrepreço o preço já embute pouca margem de segurança.",
+        "o_que_e": "Define duas faixas: o Teto com Margem (menor valor entre Graham Ajustado e o teto ponderado 60% Bazin Atual/Proj + 40% Mediana 6a com trava 1,25x Bazin Atual, descontado em 15%) e a Zona de Sobrepreço (para Bancos/Seguradoras: menor valor entre Graham e VPA × clamp(ROE/14%, 0,65, 1,50); para demais: menor valor entre 1,25× Graham e DY 4%).",
+        "como_interpretar": "Abaixo do Teto com Margem o ativo oferece ótimo desconto; entre o Teto e o Sobrepreço está em faixa intermediária; acima da Zona de Sobrepreço dispara alerta de esticamento.",
     },
     "ROE": {
         "categoria": "🏛️ Eficiência & Dívida",
@@ -3101,47 +3316,47 @@ DICIONARIO_TERMOS = {
         "o_que_e": "Mostra quantos centavos sobram de lucro limpo para cada R$ 1,00 vendido pela empresa após pagar todos os custos, despesas, juros e impostos.",
         "como_interpretar": "Margens acima de 10% indicam boa folga operacional. Margem negativa significa prejuízo e aciona alerta de risco no painel.",
     },
-    "Dívida Líquida / Patrimônio Líquido": {
+    "Dívida Líquida / EBITDA & Dív/PL": {
         "categoria": "🏛️ Eficiência & Dívida",
-        "nome_completo": "Endividamento sobre o Patrimônio (e Dív.Brut/Patrim)",
-        "o_que_e": "Compara o tamanho das dívidas da empresa com o patrimônio líquido que ela possui. No filtro de risco do painel, também monitora a Dívida Bruta/Patrimônio.",
-        "como_interpretar": "Até 1,0x costuma ser confortável. Entre 1,0x e 2,5x pede atenção em juros altos. Acima de 3,0x (para não-bancos) sinaliza alavancagem elevada e aciona a trava de cautela.",
+        "nome_completo": "Alavancagem Operacional (Dív. Líquida / EBITDA) e Patrimonial",
+        "o_que_e": "Mede quantos anos de geração de caixa operacional (EBITDA) seriam necessários para quitar a dívida líquida da empresa, critério principal em Utilities e Commodities.",
+        "como_interpretar": "Em Commodities, < 1,5x é fortaleza balançária; em Energia/Saneamento, < 2,5x é ideal e até 3,5x aceitável. Acima de 4,5x aciona a trava de risco crítico.",
     },
     "Liquidez Corrente": {
         "categoria": "🏛️ Eficiência & Dívida",
         "nome_completo": "Ativo Circulante dividido pelo Passivo Circulante",
         "o_que_e": "Mede a capacidade da empresa de pagar suas contas e dívidas que vencem nos próximos 12 meses usando seu caixa e recebíveis de curto prazo.",
-        "como_interpretar": "Acima de 1,5 indica folga financeira tranquila no curto prazo. Abaixo de 1,0 significa que as obrigações de curto prazo superam os recursos imediatos.",
+        "como_interpretar": "Acima de 1,2x já é saudável em Utilities (e 0,85x em empresas de giro rápido/commodities). Abaixo de 1,0 em geral exige atenção.",
     },
     "Score Geral": {
         "categoria": "🎯 Conceitos do Painel",
         "nome_completo": "Pontuação Combinada do Painel (0 a 100)",
-        "o_que_e": "Nota principal equilibrada que combina 60% do Score de Longo Prazo (fundamentos, valuation e saúde) com 40% do Score de Curto Prazo (timing técnico e notícias).",
-        "como_interpretar": "Acima de 70 pontos indica forte alinhamento entre empresa boa/barata e bom momento de entrada. Entre 55 e 70 indica equilíbrio razoável.",
+        "o_que_e": "Nota principal com foco em valuation e dividendos: 70% Score Longo Prazo + 30% Score Curto Prazo, com trava de coerência (se LP < 55, Geral ≤ LP + 8).",
+        "como_interpretar": "Acima de 72 pontos (com LP ≥ 70 e MS > 10%) indica forte alinhamento entre qualidade/desconto e bom momento. A trava impede que timing inflado mascare fundamentos fracos.",
     },
     "Score Longo Prazo (LP)": {
         "categoria": "🎯 Conceitos do Painel",
-        "nome_completo": "Pontuação de Fundamentos & Dividendos (0 a 100)",
-        "o_que_e": "Avalia Valuation com trava de confiança (35 pts), Rentabilidade ROE/ROIC/Margem (30 pts), Saúde Financeira/Dívida/Crescimento (25 pts) e Contexto de Notícias (10 pts).",
-        "como_interpretar": "Ideal para quem busca acumular boas ações pensando em anos e dividendos. Possui trava anti-armadilha no teto de 50 pts caso haja prejuízo, dívida crítica ou recuperação judicial.",
+        "nome_completo": "Pontuação de Fundamentos por Trilha Setorial (0 a 100)",
+        "o_que_e": "Avalia Valuation com métodos independentes (35 pts), Rentabilidade adaptada ao setor (30 pts), Saúde Financeira/Dív.Líq÷EBITDA/Proventos (30 pts) e Notícias LP (5 pts), em 3 trilhas: Bancos/Seguros, Utilities e Commodities/Geral.",
+        "como_interpretar": "Possui trava anti-armadilha no teto de 50 pts caso haja prejuízo, alavancagem crítica (Dív.Líq/EBITDA > 4,5x ou Dív/PL > 3,0x) ou recuperação judicial.",
     },
     "Score Curto Prazo (CP)": {
         "categoria": "🎯 Conceitos do Painel",
         "nome_completo": "Pontuação de Timing Técnico & Catalisadores (0 a 100)",
-        "o_que_e": "Avalia ponto de entrada pelo IFR 14 dias (40 pts), posição nas Médias Móveis e distância da máxima de 52 semanas (25 pts), News Score (25 pts) e Volume Comprador (10 pts).",
-        "como_interpretar": "Ajuda a responder se o momento atual do gráfico e das notícias é favorável para comprar agora ou se vale aguardar um respiro.",
+        "o_que_e": "Avalia Tendência nas Médias Móveis MM20/MM50/MM200 (35 pts), IFR 14d contextualizado com trava de MM200 para evitar 'faca caindo' (30 pts), Volume Direcional 5d/60d (15 pts), Força Relativa vs IBOV 30d (10 pts) e Notícias (10 pts).",
+        "como_interpretar": "Ajuda a responder se o momento do gráfico, do fluxo e das notícias é favorável sem premiar quedas severas abaixo da MM200.",
     },
     "News Score (Notícias)": {
         "categoria": "🎯 Conceitos do Painel",
-        "nome_completo": "Analisador de Sentimento de Notícias (30 dias, -10 a +10)",
-        "o_que_e": "Lê manchetes recentes do Google News nos últimos 30 dias (dando peso dobrado para os últimos 7 dias), classificando proventos, lucros, quedas ou riscos críticos.",
-        "como_interpretar": "Valores positivos (+2 a +10) indicam catalisadores como dividendos ou lucros fortes; negativos (-2 a -10) alertam sobre ruídos ou resultados fracos.",
+        "nome_completo": "Analisador Direcional de Sentimento de Notícias (30 dias, -10 a +10)",
+        "o_que_e": "Lê manchetes dos últimos 30 dias (peso 2x nos últimos 7 dias), filtrando páginas estáticas de SEO e trimestres defasados, com bloqueio de falsos positivos quando há termos negativos ('cai', 'corta', 'recua').",
+        "como_interpretar": "Valores positivos (+2 a +10) indicam catalisadores como aprovação de proventos ou lucros em alta; negativos (-2 a -10) alertam sobre cortes ou quedas.",
     },
     "Vereditos do Modelo": {
         "categoria": "🎯 Conceitos do Painel",
-        "nome_completo": "Selos Quantitativos de Classificação (Excelente, Bom, Regular, Indeciso, Esticado, Yield Baixo, Crítico)",
-        "o_que_e": "Resumo visual automático que cruza fundamentos, descontos patrimoniais, nível de preço, técnica e notícias.",
-        "como_interpretar": "🟢 Excelente: alta atratividade geral. 🔵 Bom (LP ou Desconto Patrimonial): boa tese de acúmulo/valor. 🟡 Regular / Yield Baixo: empresa equilibrada ou barata no patrimônio com dividendo baixo. 🟠 Indeciso: empresa lucrativa com ruído negativo ou sinais mistos. 🟣 Esticado: múltiplos caros acima dos tetos. 🔴 Crítico: prejuízo, dívida >3x ou recuperação judicial.",
+        "nome_completo": "Selos Quantitativos de Classificação (Excelente, Bom, Regular, Indeciso, Esticado, Crítico)",
+        "o_que_e": "Resumo visual automático que cruza fundamentos, descontos patrimoniais (P/VP ≤ 1,05), faixa de preço, divergência LP/CP, técnica e notícias.",
+        "como_interpretar": "🟢 Excelente: Geral ≥ 72, LP ≥ 70, MS > +10% e abaixo do sobrepreço. 🔵 Bom: Desconto Patrimonial (P/VP ≤ 1,05), Qualidade (ROE ≥ 15% e MS ≥ -10%) ou Acúmulo LP. 🟠 Indeciso: |LP - CP| ≥ 20 ou notícia negativa/queda de ROE. 🟣 Esticado: IFR ≥ 70 ou Cotação > Sobrepreço. 🔴 Crítico: prejuízo, alavancagem crítica ou RJ.",
     },
 }
 
@@ -3230,6 +3445,7 @@ def badge_veredito_html(veredito: str) -> str:
     estilos = {
         "🟢 Excelente": ("rgba(34,197,94,0.18)", "#22c55e", "rgba(34,197,94,0.45)", "🟢 Excelente"),
         "🔵 Bom (Desconto": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Desc. Patr."),
+        "🔵 Bom (Qualidade": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Qualidade"),
         "🔵 Bom": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Bom (LP)"),
         "🟣 Esticado": ("rgba(168,85,247,0.18)", "#c084fc", "rgba(168,85,247,0.45)", "🟣 Esticado"),
         "🟠 Indeciso": ("rgba(249,115,22,0.18)", "#fb923c", "rgba(249,115,22,0.45)", "🟠 Indeciso"),
@@ -3310,7 +3526,7 @@ def _dados_faixa_preco(r: dict) -> dict:
     eh_banco_seg_fp = bool(r.get("eh_banco_seg", False)) or any(
         k in setor_norm_fp for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
     )
-    regra_sp_lbl = "P/VP 1,15x / Graham · Setor Financeiro" if eh_banco_seg_fp else "DY 4% / Graham 1,25x"
+    regra_sp_lbl = "P/VP(ROE/Ke) / Graham Adj · Setor Financeiro" if eh_banco_seg_fp else "DY 4% / Graham Adj 1,25x"
 
     return {
         "tem_dados": (teto_f is not None or sobre_f is not None),
@@ -3383,6 +3599,8 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
 
     cot = float(r.get("cotacao") or 0.0)
     eh_banco_seg = bool(r.get("eh_banco_seg", False))
+    eh_utilities = bool(r.get("eh_utilities", False))
+    eh_ciclica = bool(r.get("eh_ciclica", False))
     eh_value_trap = bool(r.get("eh_value_trap", False))
 
     score_lp = float(r.get("score_lp") or 0.0)
@@ -3394,6 +3612,7 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     roic = r.get("roic")
     marg_liq = r.get("marg_liq")
     div_brut_patrim = r.get("div_brut_patrim")
+    div_liq_ebitda = r.get("div_liq_ebitda")
     dy_12m = float(r.get("dy_12m") or 0.0)
 
     avg_ms = r.get("avg_ms")
@@ -3405,6 +3624,7 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     dist_mm200 = r.get("dist_mm200_pct")
     dist_52s = r.get("dist_max_52s_pct")
     razao_vol = r.get("razao_volume")
+    forca_rel = r.get("forca_rel_ibov_30d")
 
     news_score = float(r.get("news_score") or 0.0)
     news_resumo = str(r.get("news_resumo") or "⚪ Neutro")
@@ -3454,20 +3674,18 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     bloco_news_linhas = "".join(linhas_news)
 
     riscos_trap = []
-    if marg_liq is not None and marg_liq < 0:
+    if (not eh_banco_seg) and marg_liq is not None and marg_liq < 0:
         riscos_trap.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
     if roe is not None and roe < 0:
         riscos_trap.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
-    if (not eh_banco_seg) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
+    if (not eh_banco_seg) and (div_liq_ebitda is not None) and div_liq_ebitda > 4.5:
+        riscos_trap.append(f"alavancagem crítica (Dív.Líq/EBITDA de {fmt_num(div_liq_ebitda)}x)")
+    elif (not eh_banco_seg) and (not eh_utilities) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
         riscos_trap.append(f"endividamento elevado (Dívida/PL de {fmt_num(div_brut_patrim)}x)")
     if news_tem_rj:
         riscos_trap.append("menção recente a recuperação judicial ou falência nas notícias")
 
-    tem_desc_patr = (
-        (pvp is not None and 0.0 < pvp <= 1.0)
-        or (graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham))
-        or (pl is not None and 0.0 < pl <= 8.0 and roe is not None and roe > 0.0)
-    )
+    tem_desc_patr = (pvp is not None and 0.0 < pvp <= 1.05)
 
     if eh_lp:
         partes = []
@@ -3490,45 +3708,50 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
 
             if (not eh_banco_seg) and roic is not None and roic >= 12.0 and marg_liq is not None and marg_liq >= 10.0:
                 frase_rent += f", ROIC de {fmt_num(roic, 1)}% e margem líquida saudável de {fmt_num(marg_liq, 1)}%"
+            elif (not eh_banco_seg) and roic is not None and roic >= 9.0:
+                frase_rent += f" e ROIC operacional consistente de {fmt_num(roic, 1)}%"
             elif marg_liq is not None and marg_liq >= 10.0 and not (eh_banco_seg and marg_liq == 0.0):
                 frase_rent += f" e margem líquida saudável de {fmt_num(marg_liq, 1)}%"
-            elif marg_liq is not None and 0.0 < marg_liq < 5.0:
+            elif marg_liq is not None and 0.0 < marg_liq < 5.0 and not eh_banco_seg:
                 frase_rent += f", porém com margem líquida mais apertada ({fmt_num(marg_liq, 1)}%)"
 
-            if (not eh_banco_seg) and div_brut_patrim is not None:
-                if div_brut_patrim <= 0.8:
-                    frase_rent += ", aliada a balanço conservador e baixo endividamento"
-                elif div_brut_patrim <= 2.0:
-                    frase_rent += " e dívida sob controle"
-                else:
-                    frase_rent += f", embora peça atenção à alavancagem (Dív/PL de {fmt_num(div_brut_patrim)}x)"
+            if (not eh_banco_seg):
+                if div_liq_ebitda is not None:
+                    lim_div_ok = 2.5 if eh_utilities else 1.5
+                    lim_div_mod = 3.5 if eh_utilities else 3.0
+                    if div_liq_ebitda <= lim_div_ok:
+                        frase_rent += f", aliada a alavancagem saudável (Dív.Líq/EBITDA de {fmt_num(div_liq_ebitda)}x)"
+                    elif div_liq_ebitda <= lim_div_mod:
+                        frase_rent += f" e Dív.Líq/EBITDA sob controle ({fmt_num(div_liq_ebitda)}x)"
+                    else:
+                        frase_rent += f", embora peça atenção à dívida (Dív.Líq/EBITDA de {fmt_num(div_liq_ebitda)}x)"
+                elif div_brut_patrim is not None:
+                    if div_brut_patrim <= 0.8:
+                        frase_rent += ", aliada a balanço conservador e baixo endividamento"
+                    elif div_brut_patrim <= 2.0:
+                        frase_rent += " e dívida sob controle"
+                    else:
+                        frase_rent += f", embora peça atenção à alavancagem (Dív/PL de {fmt_num(div_brut_patrim)}x)"
             partes.append(frase_rent + ".")
 
         if avg_ms is not None and avg_ms >= 15.0:
-            frase_val = f"Negocia com ampla margem de segurança média de {avg_ms:+.1f}% abaixo dos preços-teto do modelo"
+            frase_val = f"Negocia com ampla margem de segurança consolidada de {avg_ms:+.1f}% abaixo do valor justo"
         elif avg_ms is not None and avg_ms > 0.0:
-            frase_val = f"Negocia com desconto moderado ({avg_ms:+.1f}%) frente aos preços-teto estimados"
+            frase_val = f"Negocia com desconto moderado ({avg_ms:+.1f}%) frente aos métodos de valuation"
         elif tem_desc_patr:
-            det_p = []
-            if pvp is not None and 0.0 < pvp <= 1.0:
-                det_p.append(f"P/VP de {fmt_num(pvp)}x")
+            det_p = [f"P/VP de {fmt_num(pvp)}x"]
             if graham is not None and graham > 0.0 and cot > 0.0 and cot <= float(graham):
-                det_p.append(f"abaixo do valor justo de Graham (R$ {fmt_num(graham)})")
-            if pl is not None and 0.0 < pl <= 8.0:
-                det_p.append(f"P/L de {fmt_num(pl)}x")
-            frase_val = (
-                "Mesmo com tetos de dividendos mais contidos, apresenta claro desconto patrimonial "
-                f"({', '.join(det_p)})"
-            )
+                det_p.append(f"abaixo do Graham Ajustado (R$ {fmt_num(graham)})")
+            frase_val = f"Apresenta desconto patrimonial relevante ({', '.join(det_p)})"
         elif avg_ms is not None:
-            frase_val = f"Cotação negocia {abs(avg_ms):.1f}% acima da média dos preços-teto do modelo"
+            frase_val = f"Cotação negocia {abs(avg_ms):.1f}% acima do preço justo consolidado do modelo"
         else:
             frase_val = "Cobertura parcial de preços-teto pelos dados atuais"
 
         if n_metodos == 1:
-            frase_val += " (nota: cobertura de apenas 1 método de valuation, aplicando trava de confiança)"
+            frase_val += " (nota: cobertura de apenas 1 método independente, aplicando trava de confiança)"
         elif n_metodos == 2:
-            frase_val += " (cobertura de 2 métodos de valuation)"
+            frase_val += " (cobertura de 2 métodos independentes)"
         partes.append(frase_val + ".")
 
         if dy_12m >= 6.0:
@@ -3536,7 +3759,7 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
         elif dy_12m >= 3.5:
             partes.append(f"Entrega retorno intermediário em proventos (DY de {fmt_num(dy_12m, 1)}%), equilibrando renda e crescimento.")
         elif dy_12m > 0.0:
-            partes.append(f"Dividend yield ainda modesto ({fmt_num(dy_12m, 1)}%), com tese mais apoiada em valor patrimonial/lucro do que em renda imediata.")
+            partes.append(f"Dividend yield ainda modesto ({fmt_num(dy_12m, 1)}%), com tese mais apoiada em valor/lucro do que em renda imediata.")
         else:
             partes.append("Não distribui dividendos no momento (DY de 0%), zerando a parcela de renda na nota.")
 
@@ -3545,36 +3768,42 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
 
     if eh_cp:
         partes = []
+        trava_ifr_mm200 = bool(detalhes.get("trava_ifr_mm200", False))
         if ifr_14 is not None:
-            if 30.0 <= ifr_14 <= 48.0:
+            if trava_ifr_mm200:
+                partes.append(
+                    f"IFR em {fmt_num(ifr_14, 1)}, porém com trava de tendência acionada (preço >10% abaixo da MM200 sem recuperar MM20), "
+                    "evitando sinal falso de compra em queda."
+                )
+            elif 35.0 <= ifr_14 <= 48.0:
                 partes.append(
                     f"Em excelente ponto de entrada técnico: o IFR está em {fmt_num(ifr_14, 1)} "
-                    "(região de sobrevenda/respiro favorável para retomada)."
+                    "(região de respiro favorável para retomada)."
                 )
-            elif ifr_14 < 30.0:
+            elif ifr_14 < 35.0:
                 partes.append(
-                    f"IFR bastante pressionado em {fmt_num(ifr_14, 1)} (sobrevenda acentuada), sugerindo possível exaustão vendedora, "
-                    "mas exigindo confirmação de piso antes de acelerar compras."
+                    f"IFR pressionado em {fmt_num(ifr_14, 1)} (sobrevenda), sugerindo exaustão vendedora, "
+                    "mas exigindo confirmação de piso."
                 )
-            elif ifr_14 <= 65.0:
-                partes.append(f"O IFR opera em {fmt_num(ifr_14, 1)}, em zona neutra e sem sinais de exaustão.")
+            elif ifr_14 < 70.0:
+                partes.append(f"O IFR opera em {fmt_num(ifr_14, 1)}, em zona neutra/construtiva.")
             else:
                 partes.append(
-                    f"Alerta de esticamento no curto prazo: o IFR já marca {fmt_num(ifr_14, 1)} (sobrecompra), "
+                    f"Alerta de esticamento no curto prazo: o IFR já marca {fmt_num(ifr_14, 1)} (sobrecompra ≥ 70), "
                     "elevando o risco de realização técnica."
                 )
         else:
             partes.append("Leitura de IFR indisponível para este ativo no momento.")
 
         if dist_mm200 is not None:
-            if 0.0 <= dist_mm200 <= 18.0:
+            if dist_mm200 >= 0.0 and dist_mm200 <= 18.0:
                 tr_txt = f"O preço segue {dist_mm200:+.1f}% acima da MM200 (tendência primária construtiva)"
             elif dist_mm200 > 18.0:
                 tr_txt = f"O preço negocia bem esticado acima da MM200 ({dist_mm200:+.1f}%)"
-            elif dist_mm200 >= -12.0:
+            elif dist_mm200 >= -10.0:
                 tr_txt = f"A cotação testa região próxima abaixo da MM200 ({dist_mm200:+.1f}%)"
             else:
-                tr_txt = f"O papel segue {abs(dist_mm200):.1f}% abaixo da MM200, ainda em trajetória corretiva"
+                tr_txt = f"O papel segue {abs(dist_mm200):.1f}% abaixo da MM200, ainda em tendência corretiva forte"
             if dist_52s is not None:
                 if -25.0 <= dist_52s <= -5.0:
                     tr_txt += f", com desconto de {abs(dist_52s):.1f}% frente à máxima de 52 semanas."
@@ -3586,13 +3815,19 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
                 tr_txt += "."
             partes.append(tr_txt)
 
-        if razao_vol is not None and razao_vol >= 1.35:
-            partes.append(f"O volume de negócios acelerou ({fmt_num(razao_vol, 2)}x a média de 60 dias), confirmando maior interesse comprador.")
+        if forca_rel is not None:
+            partes.append(f"Força relativa de {forca_rel:+.1f} p.p. frente ao Ibovespa em 30 dias.")
+
+        if razao_vol is not None and razao_vol >= 1.25:
+            if detalhes.get("trava_vol_dist"):
+                partes.append(f"Volume elevado ({fmt_num(razao_vol, 2)}x) acompanhado de queda recente, acionando trava de distribuição.")
+            else:
+                partes.append(f"O volume de negócios acelerou ({fmt_num(razao_vol, 2)}x a média de 60 dias) em direção positiva.")
 
         texto_fundamentos = " ".join(partes)
         return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
 
-    # Modo Geral (Combinado: Longo Prazo + Curto Prazo)
+    # Modo Geral (Combinado: 70% Longo Prazo + 30% Curto Prazo)
     if eh_value_trap and riscos_trap:
         base_lp = (
             "⚠️ A tese exige cautela máxima nos fundamentos: a trava anti-armadilha foi acionada devido a "
@@ -3618,43 +3853,44 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
 
         base_lp = abertura + (f" com {', '.join(det_lp)}" if det_lp else "")
         if avg_ms is not None and avg_ms > 5.0:
-            base_lp += f" e margem de segurança média de {avg_ms:+.1f}% nos preços-teto"
+            base_lp += f" e margem de segurança consolidada de {avg_ms:+.1f}%"
         elif tem_desc_patr:
-            base_lp += " e negocia com claro desconto patrimonial"
+            base_lp += " e negocia com desconto patrimonial"
         elif avg_ms is not None and avg_ms < -5.0:
-            base_lp += f", embora negocie {abs(avg_ms):.1f}% acima da média dos preços-teto"
+            base_lp += f", embora negocie {abs(avg_ms):.1f}% acima do valor justo consolidado"
 
     sinais_alerta_cp = []
-    if ifr_14 is not None and ifr_14 >= 68.0:
+    if ifr_14 is not None and ifr_14 >= 70.0:
         sinais_alerta_cp.append(f"IFR esticado em {fmt_num(ifr_14, 1)} (sobrecompra)")
     elif ifr_14 is not None and ifr_14 < 30.0:
         sinais_alerta_cp.append(f"IFR fortemente sobrevendido ({fmt_num(ifr_14, 1)})")
     if news_score < 0.0:
         sinais_alerta_cp.append(f"pressão de notícias negativas recentes ({news_score:+.1f} — {news_resumo})")
-    if dist_mm200 is not None and dist_mm200 < -12.0:
-        sinais_alerta_cp.append(f"preço ainda {abs(dist_mm200):.1f}% abaixo da MM200")
+    if dist_mm200 is not None and dist_mm200 < -10.0:
+        sinais_alerta_cp.append(f"preço {abs(dist_mm200):.1f}% abaixo da MM200")
+    if abs(score_lp - score_cp) >= 20.0 and not (score_lp >= 70.0 and score_cp >= 68.0):
+        sinais_alerta_cp.append(f"forte divergência entre LP ({score_lp}) e CP ({score_cp})")
 
     sinais_pos_cp = []
-    if ifr_14 is not None and 30.0 <= ifr_14 <= 48.0:
+    if ifr_14 is not None and 35.0 <= ifr_14 <= 48.0 and not detalhes.get("trava_ifr_mm200"):
         sinais_pos_cp.append(f"IFR em ponto técnico atrativo ({fmt_num(ifr_14, 1)})")
     if news_score >= 2.0:
         sinais_pos_cp.append(f"notícias recentes positivas ({news_score:+.1f} — {news_resumo})")
-    if razao_vol is not None and razao_vol >= 1.35:
+    if razao_vol is not None and razao_vol >= 1.25 and not detalhes.get("trava_vol_dist"):
         sinais_pos_cp.append(f"volume em aceleração ({fmt_num(razao_vol, 2)}x)")
 
     if (not eh_value_trap) and score_lp >= 58.0 and sinais_alerta_cp:
-        texto_fundamentos = f"{base_lp}, mas sinaliza cautela temporária no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
+        texto_fundamentos = f"{base_lp}, mas sinaliza cautela no curto prazo devido a {' e '.join(sinais_alerta_cp)}."
     elif sinais_pos_cp and not sinais_alerta_cp:
         texto_fundamentos = f"{base_lp}, somando bom momento no curto prazo com {' e '.join(sinais_pos_cp)}."
     elif sinais_alerta_cp:
-        texto_fundamentos = f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)} no curto prazo."
+        texto_fundamentos = f"{base_lp}, além de registrar {' e '.join(sinais_alerta_cp)}."
     elif ifr_14 is not None:
         texto_fundamentos = f"{base_lp}, mantendo quadro técnico equilibrado (IFR em {fmt_num(ifr_14, 1)}) e sentimento de mercado {news_resumo.lower()}."
     else:
         texto_fundamentos = f"{base_lp}, com sentimento de mercado {news_resumo.lower()}."
 
     return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
-
 
 def gerar_relatorio_auditoria_ia(
     itens: list[dict],
@@ -3671,97 +3907,8 @@ def gerar_relatorio_auditoria_ia(
         return f"R$ {fmt_num(float(v))}"
 
     agora_s = datetime.now(BRT).strftime("%d/%m/%Y %H:%M:%S BRT")
-    linhas: list[str] = [
-        "# AUDITORIA COMPLETA DO MOTOR QUANTITATIVO — PAINEL VALUATION B3",
-        f"Data/Hora da geração: {agora_s}",
-        f"Total de ativos analisados no filtro atual: {len(itens)}",
-        "",
-        "## 1. FILTROS ATIVOS E CONTEXTO",
-        f"- Modo de Análise ativo na interface: {filtros_ctx.get('modo_ativo', 'Geral')}",
-        f"- Listas rápidas: {', '.join(filtros_ctx.get('listas') or []) or 'Nenhuma (Todas)'}",
-        f"- Setores específicos: {', '.join(filtros_ctx.get('setores') or []) or 'Todos'}",
-        f"- Liquidez mínima (2m): {filtros_ctx.get('liq', 'N/D')}",
-        f"- Filtro de vereditos: {', '.join(filtros_ctx.get('vereditos') or []) or 'Todos'}",
-        f"- Busca código/tabela: {filtros_ctx.get('busca') or 'Nenhuma'}",
-        "",
-        "## 2. METODOLOGIA, FÓRMULAS E PESOS DO SCORE",
-        "- Score Geral (0–100) = 0,60 × Score_LP + 0,40 × Score_CP.",
-        "- Score Longo Prazo (LP, 0–100):",
-        "  • Valuation (até 35 pts): Margem de Segurança média dos métodos disponíveis (PT Médio 6a, PT Projetivo, PT Bazin 12m, Graham) [até 20 pts × Fator de Confiança: 1 método=0,60 | 2=0,85 | 3-4=1,00] + Múltiplos P/VP, P/L e EV/EBITDA (ou P/VP e P/L reescalonados para Bancos/Seguradoras) [até 10 pts] + Dividendos (DY 12m e anos de histórico 6a) [até 5 pts].",
-        "  • Rentabilidade (até 30 pts): Não-bancos (ROE 12, ROIC 10, Marg. Líq 5, Marg. EBIT 3); Bancos/Seguradoras (ROE 20, Marg. Líq 10 ou fallback 5 se ROE>=12% e margem ausente).",
-        "  • Saúde Financeira (até 25 pts): Não-bancos (Dív.Brut/Patrim 10, Liq. Corr 7, Cresc. Rec 5a 8); Bancos/Seguradoras (Solvência via ROE 15, Cresc. Rec 5a 10).",
-        "  • Notícias LP (até 10 pts): News Score (-10 a +10) normalizado para 0–10.",
-        "  • Trava Anti-Armadilha (Value Trap): limita Score LP a no máximo 50 pts se Margem Líquida < 0, ROE < 0, Dív/PL > 3,0x (não-bancos) ou menção a RJ/falência nas notícias.",
-        "- Score Curto Prazo (CP, 0–100):",
-        "  • IFR 14d (40 pts; pico entre 30 e 48) + Médias MM20/MM50/MM200 e Dist. Máx 52s (25 pts) + News Score 30d (25 pts) + Razão Volume 5d/60d com trava em distribuição (10 pts).",
-        "- Faixa de Preço do Modelo: Teto com Margem = min(Graham, PT_div_ref × 0,85); Sobrepreço = para Bancos/Seguradoras min(Graham, 1,15×VPA) com piso +15% sobre Teto; demais min(1,25×Graham, DPA/0,04) com piso +20% sobre Teto.",
-        "- Vereditos: Crítico (value trap) -> Indeciso (lucro sólido com news < 0, ou divergência LP/CP >= 20, ou news <= -2,5) -> Esticado -> Excelente (Geral>=72 e LP>=70 e avg_ms>0) -> Bom (LP/Desc. Patr.) -> Regular.",
-        "",
-    ]
-
-    if not itens:
-        linhas.append("Nenhum ativo encontrado no filtro atual.")
-        return "\n".join(linhas)
-
-    rank_geral = sorted(itens, key=lambda x: x.get("score_geral", 0.0), reverse=True)
-    rank_lp = sorted(itens, key=lambda x: x.get("score_lp", 0.0), reverse=True)
-    rank_cp = sorted(itens, key=lambda x: x.get("score_cp", 0.0), reverse=True)
-    pos_g_map = {r["ticker"]: i for i, r in enumerate(rank_geral, 1)}
-    pos_lp_map = {r["ticker"]: i for i, r in enumerate(rank_lp, 1)}
-    pos_cp_map = {r["ticker"]: i for i, r in enumerate(rank_cp, 1)}
-
-    linhas.append("## 3. COMPARATIVO DOS 3 MÓDULOS DE RANKING")
-    linhas.append("### 3.1 Ranking Geral (60% LP + 40% CP)")
-    for i, r in enumerate(rank_geral, 1):
-        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | Geral: {r['score_geral']} (LP: {r['score_lp']} | CP: {r['score_cp']} | News: {r.get('news_score', 0):+.1f}) | {r.get('veredito', '')}")
-    linhas.append("")
-    linhas.append("### 3.2 Ranking Longo Prazo (Fundamentos & Dividendos)")
-    for i, r in enumerate(rank_lp, 1):
-        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | LP: {r['score_lp']} (Geral: {r['score_geral']} | CP: {r['score_cp']}) | {r.get('veredito', '')}")
-    linhas.append("")
-    linhas.append("### 3.3 Ranking Curto Prazo (Timing & Catalisadores)")
-    for i, r in enumerate(rank_cp, 1):
-        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | CP: {r['score_cp']} (Geral: {r['score_geral']} | LP: {r['score_lp']}) | IFR: {_f(r.get('ifr_14'), 1)} | News: {r.get('news_score', 0):+.1f}")
-    linhas.append("")
-    linhas.append("## 4. ANÁLISE DETALHADA POR ATIVO (TODOS OS MÓDULOS)")
-
-    for r in rank_geral:
-        tk = r["ticker"]
-        det = r.get("detalhes_score") or {}
-        dfp = _dados_faixa_preco(r)
-        j_g = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_geral").split("\n\n")[0])
-        j_lp = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_lp").split("\n\n")[0])
-        j_cp = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_cp").split("\n\n")[0])
-        top_p = r.get("top_noticia_pos")
-        top_n = r.get("top_noticia_neg")
-        linhas.extend([
-            f"### {tk} — {r.get('nome', tk)} | Setor: {r.get('setor_nome') or 'N/D'} | Banco/Seguradora: {'Sim' if r.get('eh_banco_seg') else 'Não'}",
-            f"- Posições: Geral {pos_g_map[tk]}º | Longo Prazo {pos_lp_map[tk]}º | Curto Prazo {pos_cp_map[tk]}º",
-            f"- Cotação: R$ {fmt_num(float(r.get('cotacao') or 0.0))} | Var. Dia: {_f(r.get('var_dia_pct'), 2, '%')} | Liquidez 2m: R$ {fmt_bi_mi(r.get('liq_2m'))}",
-            f"- Scores: Geral={r['score_geral']}/100 | LP={r['score_lp']}/100 [Val={det.get('pts_val_lp', 0)}/35 (conf={det.get('fator_confianca', 1)}, métodos={det.get('n_metodos', 0)}), Rent={det.get('pts_rent_lp', 0)}/30, Saúde={det.get('pts_saude_lp', 0)}/25, NewsLP={det.get('pts_news_lp', 0)}/10, ValueTrap={r.get('eh_value_trap', False)}] | CP={r['score_cp']}/100 [IFR={det.get('pts_ifr_cp', 0)}/40, Médias={det.get('pts_medias_cp', 0)}/25, NewsCP={det.get('pts_news_cp', 0)}/25, Vol={det.get('pts_vol_cp', 0)}/10]",
-            f"- Veredito Quantitativo: {r.get('veredito', '')}",
-            f"- Motivos do Score: {'; '.join(r.get('motivos') or []) or 'Nenhum'}",
-            f"- Fundamentalistas: P/L={_f(r.get('pl'))} | P/VP={_f(r.get('pvp'))} | ROE={_f(r.get('roe'), 1, '%')} | ROIC={_f(r.get('roic'), 1, '%')} | Marg.Líq={_f(r.get('marg_liq'), 1, '%')} | Marg.EBIT={_f(r.get('marg_ebit'), 1, '%')} | EV/EBITDA={_f(r.get('ev_ebitda'))} | Liq.Corr={_f(r.get('liq_corr'))} | Dív.Brut/PL={_f(r.get('div_brut_patrim'))} | Cresc.Rec.5a={_f(r.get('cresc_rec_5a'), 1, '%')} | LPA={_f_rs(r.get('lpa'))} | VPA={_f_rs(r.get('vpa'))}",
-            f"- Dividendos & Valuation: DY 12m={_f(r.get('dy_12m'), 2, '%')} | DPA 12m={_f_rs(r.get('dpa_12m'))} | DPA Méd 6a={_f_rs(r.get('dpa_med_6a'))} ({r.get('anos_hist', 0)}a, {r.get('anos_divs_consec', 0)} consec.) | DPA Proj={_f_rs(r.get('dpa_proj'))} | PT Médio 6a={_f_rs(r.get('pt_med'))} | PT Proj={_f_rs(r.get('pt_proj'))} | PT Bazin={_f_rs(r.get('pt_bazin'))} | Graham={_f_rs(r.get('graham'))} | MS Média={_f(r.get('avg_ms'), 1, '%')}",
-            f"- Faixa de Preço do Modelo ({dfp['regra_sp_lbl']}): Desconto={dfp['z_desc']} | Neutra={dfp['z_neutro']} | Sobrepreço={dfp['z_sobre']} | Veredito={re.sub(r'[*]+', '', dfp['veredito_px'])}",
-            f"- Técnicos: IFR(14)={_f(r.get('ifr_14'), 1)} | MM20={_f_rs(r.get('mm20'))} | MM50={_f_rs(r.get('mm50'))} (dist {_f(r.get('dist_mm50_pct'), 1, '%')}) | MM200={_f_rs(r.get('mm200'))} (dist {_f(r.get('dist_mm200_pct'), 1, '%')}) | Dist.Máx 52s={_f(r.get('dist_max_52s_pct'), 1, '%')} | Razão Vol 5d/60d={_f(r.get('razao_volume'), 2, 'x')}",
-            f"- Notícias (30d): Score={r.get('news_score', 0):+.1f} | Resumo={r.get('news_resumo', '')} | Qtd 7d={r.get('news_qtd_7d', 0)} / 30d={r.get('news_qtd_30d', 0)} | RJ={r.get('news_tem_rj', False)}"
-            + (f" | Top Positiva: '{top_p.get('titulo', '')}' ({top_p.get('fonte', '')}, {top_p.get('data_str', '')})" if top_p else "")
-            + (f" | Top Negativa: '{top_n.get('titulo', '')}' ({top_n.get('fonte', '')}, {top_n.get('data_str', '')})" if top_n else ""),
-            f"- Diagnóstico Módulo Geral: {j_g}",
-            f"- Diagnóstico Módulo Longo Prazo: {j_lp}",
-            f"- Diagnóstico Módulo Curto Prazo: {j_cp}",
-            "",
-        ])
-
-    linhas.extend([
-        "## 5. PEDIDO DE AUDITORIA PARA A IA",
-        "Com base nos dados, sub-scores, fórmulas, pesos e rankings acima:",
-        "1. A pontuação de Score Geral, Longo Prazo e Curto Prazo e o ordenamento dos ativos estão coerentes com os fundamentos e momento técnico?",
-        "2. Há algum viés, distorção por setor (ex.: bancos, elétricas, commodities), dado faltante penalizando injustamente ou regra de veredito que deveria ser calibrada?",
-        "3. Quais melhorias práticas de cálculo/pesos você recomenda?",
-    ])
-    return "\n".join(linhas)
+    linhas: list
+ 4m29.5s
 
 
 def render_grafico_e_tabela_ativo(

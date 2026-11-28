@@ -1196,7 +1196,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 9,
+    _v: int = 10,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1239,7 +1239,7 @@ def buscar_serie_investidor10_chart_com_info(
         "1 D": [1, "1d", "intraday"],
         "7 D": [7, "7d", 5],
         "30 D": [30],
-        "6 M": [180, 182, 183, "6m"],
+        "6 M": [182, 180, 183, "6m"],
         "YTD": [dias, "ytd"],
         "1 A": [365, 366],
         "5 A": [1825, 1826],
@@ -1253,26 +1253,30 @@ def buscar_serie_investidor10_chart_com_info(
     if tid:
         if periodo_label == "7 D":
             cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7",
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}?days=7",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_int}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/5/{adj_str}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}",
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
             ])
         elif periodo_label == "1 D":
             cands_urls.extend([
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/1",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}",
             ])
         else:
             for d_c in dias_cands:
                 d_s = str(d_c)
+                cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real")
+            for d_c in dias_cands[:2]:
+                d_s = str(d_c)
                 cands_urls.extend([
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
                 ])
@@ -1355,7 +1359,7 @@ def buscar_serie_investidor10_chart_com_info(
             span_dias = int((s_out.index[-1] - s_out.index[0]).days)
             dt_ini_s = s_out.index[0].date()
             dt_fim_s = s_out.index[-1].date()
-            min_spans_real = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
+            min_spans = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
             max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
             if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
                 diag_motivo = f"retornou {span_dias}d para {periodo_label}"
@@ -1385,7 +1389,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 9,
+    _v: int = 10,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

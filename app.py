@@ -1023,11 +1023,10 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 5) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 6) -> list[str]:
     rotas: list[str] = []
     pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180})\1""")
     pat_api = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
-    kws = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
     ign_js = ("jquery", "bootstrap", "popper", "chart.js", "apexcharts", "echarts", "highcharts", "sentry", "gtag", "analytics", "vendor")
     filtrados = [
         su for su in script_urls
@@ -1045,10 +1044,10 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 5) -> lis
         return []
 
     with ThreadPoolExecutor(max_workers=6) as ex_js:
-        for paths in ex_js.map(_ler_js, filtrados[:12]):
+        for paths in ex_js.map(_ler_js, filtrados[:10]):
             for path in paths:
                 p_low = path.lower()
-                if any(k in p_low for k in kws):
+                if "/chart" in p_low or "/intraday" in p_low:
                     norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
                     if norm_p not in rotas:
                         rotas.append(norm_p)
@@ -1208,7 +1207,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 7,
+    _v: int = 8,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1231,7 +1230,7 @@ def buscar_serie_investidor10_chart_com_info(
 
     tid = meta.get("tid", "")
     csrf_tok = meta.get("csrf", "")
-    rotas_desc = list(meta.get("rotas", ()))
+    rotas_desc = [r for r in meta.get("rotas", ()) if ("/chart" in r.lower() or "/intraday" in r.lower())]
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
 
     sess = requests.Session()
@@ -1275,7 +1274,37 @@ def buscar_serie_investidor10_chart_com_info(
     eh_intraday_per = periodo_label in ("1 D", "7 D")
 
     cands_urls: list[str] = []
-    for d_c in dias_cands:
+    # 1) Prioridade máxima: rotas oficiais conhecidas do Investidor10
+    if tid:
+        d_prim = str(dias_cands[0])
+        if periodo_label == "7 D":
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}?days=7",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_int}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/5/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+            ])
+        elif periodo_label == "1 D":
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/1",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}",
+            ])
+        else:
+            for d_c in dias_cands:
+                d_s = str(d_c)
+                cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
+                ])
+    # 2) Rotas descobertas dinamicamente no HTML/JS
+    for d_c in dias_cands[:2]:
         d_s = str(d_c)
         for r_tpl in rotas_desc:
             url_mont = r_tpl if r_tpl.startswith("http") else ("https://investidor10.com.br" + (r_tpl if r_tpl.startswith("/") else "/" + r_tpl))
@@ -1296,42 +1325,18 @@ def buscar_serie_investidor10_chart_com_info(
                 tem_intra = "intraday" in url_mont.lower()
                 if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
                     cands_urls.append(url_mont)
-        if tid:
-            if periodo_label == "7 D":
-                cands_urls.extend([
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}?days=7",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}/{adj_str}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
-                ])
-            elif eh_intraday_per:
-                cands_urls.extend([
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
-                ])
-            else:
-                cands_urls.extend([
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
-                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
-                ])
-        if d_c == dias_cands[0]:
-            cands_urls.extend([
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}",
-            ])
+
+    cands_urls.extend([
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias_cands[0]}/{adj_str}/real",
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias_cands[0]}/{adj_str}",
+    ])
 
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
     diag_motivo = "indisponível"
     serie_diaria_fb = pd.Series(dtype=float)
 
-    for url_c in urls_unicas[:10]:
+    for url_c in urls_unicas[:12]:
         try:
             r_c = sess.get(url_c, timeout=2.5)
             if r_c.status_code in (401, 403, 429):
@@ -1359,11 +1364,12 @@ def buscar_serie_investidor10_chart_com_info(
                 return s_out, "Investidor10"
 
             if periodo_label == "7 D":
-                if tem_hora and len(s_out) >= 12:
+                dias_dist_i10 = len({ts.date() for ts in s_out.index})
+                if tem_hora and len(s_out) >= 12 and dias_dist_i10 >= 2:
                     if cot_live and float(cot_live) > 0:
                         s_out.iloc[-1] = float(cot_live)
                     return s_out, "Investidor10"
-                if serie_diaria_fb.empty and len(s_out) >= 3:
+                if serie_diaria_fb.empty and len(s_out) >= 3 and dias_dist_i10 >= 2:
                     serie_diaria_fb = s_out
                 diag_motivo = "API retornou apenas série diária para 7 D"
                 continue
@@ -1401,7 +1407,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 7,
+    _v: int = 8,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

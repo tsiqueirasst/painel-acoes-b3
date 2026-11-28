@@ -1672,14 +1672,19 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         nome = limpar_nome_empresa(info.get("shortName", ""), info.get("longName", ""), ticker)
 
         cot_yf = None
+        fi = None
+        fi_pc = None
         try:
             fi = tk.fast_info
             if fi:
                 cot_yf = fi.get("lastPrice") or fi.get("regularMarketPrice")
+                fi_pc = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
         except Exception:
             pass
         if not cot_yf:
             cot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
+        if not fi_pc:
+            fi_pc = info.get("previousClose") or info.get("regularMarketPreviousClose")
 
         ifr_14 = None
         mm20 = None
@@ -1689,6 +1694,7 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         dist_mm200_pct = None
         dist_max_52s_pct = None
         razao_volume = None
+        var_dia_pct = None
 
         try:
             hist_1y = tk.history(period="1y", interval="1d", auto_adjust=False)
@@ -1698,6 +1704,31 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
                     cot_yf = float(close_s.iloc[-1])
 
                 px_ref = float(cot_yf) if cot_yf else (float(close_s.iloc[-1]) if not close_s.empty else None)
+
+                if not close_s.empty and px_ref and px_ref > 0:
+                    idx_brt = _idx_para_brt_naive(close_s.index)
+                    agora_brt = datetime.now(BRT)
+                    hoje_brt_d = agora_brt.date()
+                    ult_d_h = idx_brt[-1].date()
+                    c_ult = float(close_s.iloc[-1])
+                    c_ant = float(close_s.iloc[-2]) if len(close_s) >= 2 else None
+                    prev_ref = None
+                    if ult_d_h == hoje_brt_d:
+                        prev_ref = c_ant
+                    elif c_ant and abs(px_ref - c_ult) / c_ult <= 0.0005 and (hoje_brt_d.weekday() >= 5 or agora_brt.hour < 10):
+                        prev_ref = c_ant
+                    elif fi_pc and float(fi_pc) > 0:
+                        fi_pc_f = float(fi_pc)
+                        if c_ant and abs(fi_pc_f - c_ant) <= max(0.03, c_ant * 0.005):
+                            prev_ref = c_ant
+                        elif abs(fi_pc_f - c_ult) <= max(0.03, c_ult * 0.005):
+                            prev_ref = c_ult
+                        else:
+                            prev_ref = fi_pc_f
+                    else:
+                        prev_ref = c_ult
+                    if prev_ref and prev_ref > 0:
+                        var_dia_pct = ((px_ref / prev_ref) - 1.0) * 100.0
 
                 if len(close_s) >= 15:
                     delta = close_s.diff().dropna()
@@ -1790,6 +1821,7 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         return ticker, {
             "nome": nome,
             "cotacao_yf": float(cot_yf) if cot_yf else None,
+            "var_dia_pct": float(var_dia_pct) if var_dia_pct is not None else None,
             "lpa_yf": float(lpa) if lpa is not None else None,
             "vpa_yf": float(vpa) if vpa is not None else None,
             "roe_yf": float(roe) if roe is not None else None,
@@ -3566,6 +3598,7 @@ def render_grafico_e_tabela_ativo(
     key_prefix: str = "raiox",
     modo_score_chave: str = "score_geral",
     mostrar_cabecalho: bool = True,
+    expandir_padrao: bool = True,
 ):
     if mostrar_cabecalho:
         c_tit, c_fav = st.columns([4, 1.3], vertical_alignment="center")
@@ -3596,12 +3629,22 @@ def render_grafico_e_tabela_ativo(
     st.markdown(
         "<span class='raiox-blocks-host' style='display:none;'></span>"
         "<style>"
+        "div[data-testid='stElementContainer']:has(.raiox-blocks-host),"
+        "div.element-container:has(.raiox-blocks-host){"
+        "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host),"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host){"
+        "gap:0!important;margin:0!important;padding:0!important;}"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stElementContainer'],"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div.element-container{"
+        "margin:0!important;padding:0!important;}"
         "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'],"
         "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander']{"
         "border:1px solid rgba(59,130,246,0.42)!important;"
         "border-left:4px solid #3b82f6!important;"
-        "border-radius:8px!important;"
-        "margin-bottom:8px!important;"
+        "border-radius:0!important;"
+        "margin-top:-1px!important;"
+        "margin-bottom:0!important;"
         "overflow:hidden;}"
         "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'] details > summary,"
         "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander'] details > summary{"
@@ -3614,7 +3657,7 @@ def render_grafico_e_tabela_ativo(
         unsafe_allow_html=True,
     )
 
-    with st.expander(f"📈 :blue-background[**{ticker}**] — Cotação & Simulador de Rentabilidade · clique para minimizar/maximizar", expanded=True):
+    with st.expander(f"📈 :blue-background[**{ticker}**] — Cotação & Simulador de Rentabilidade · clique para minimizar/maximizar", expanded=expandir_padrao):
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
             st.markdown(f"**📈 COTAÇÃO {ticker}**")
@@ -4291,7 +4334,7 @@ def render_grafico_e_tabela_ativo(
             )
 
     # --- BLOCO 2: HISTÓRICO FUNDAMENTALISTA ---
-    with st.expander(f"📑 :blue-background[**{ticker}**] — Histórico Fundamentalista · clique para minimizar/maximizar", expanded=True):
+    with st.expander(f"📑 :blue-background[**{ticker}**] — Histórico Fundamentalista · clique para minimizar/maximizar", expanded=expandir_padrao):
         with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
             hist_fund, eh_banco, fin_curr, fonte_anual = buscar_historico_fundamentalista(
                 ticker,
@@ -4395,7 +4438,7 @@ def render_grafico_e_tabela_ativo(
         gr_txt_r = f"R$ {fmt_num(graham_r)}" if (graham_r and graham_r > 0) else "—"
         bz_txt_r = f"R$ {fmt_num(bazin_r)}" if (bazin_r and bazin_r > 0) else "—"
 
-        with st.expander(f"📊 :blue-background[**{ticker}**] — Score, Faixa de Preço & Diagnóstico · clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"📊 :blue-background[**{ticker}**] — Score, Faixa de Preço & Diagnóstico · clique para minimizar/maximizar", expanded=expandir_padrao):
             st.markdown(
                 f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
                 f"Cotação: **R$ {fmt_num(cot_r)}** | "
@@ -4455,7 +4498,7 @@ def render_grafico_e_tabela_ativo(
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])
 
-        with st.expander(f"💰 :blue-background[**{ticker}**] — Simulador de Renda Passiva · clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"💰 :blue-background[**{ticker}**] — Simulador de Renda Passiva · clique para minimizar/maximizar", expanded=expandir_padrao):
             sr_in1, sr_in2 = st.columns([1.35, 2.65], vertical_alignment="bottom")
             with sr_in1:
                 meta_mensal = st.number_input(
@@ -4608,7 +4651,7 @@ def render_grafico_e_tabela_ativo(
                         f"(**{fmt_num(pct_meta_rx, 1)}%** da sua meta alcançada nesta empresa!)."
                     )
 
-        with st.expander(f"📅 :blue-background[**{ticker}**] — Sazonalidade de Proventos & 🛡️ Checklist Buy & Hold · clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"📅 :blue-background[**{ticker}**] — Sazonalidade de Proventos & 🛡️ Checklist Buy & Hold · clique para minimizar/maximizar", expanded=expandir_padrao):
             col_saz, col_bh = st.columns([1.05, 1.15], gap="large")
             with col_saz:
                 st.markdown(f"#### 📅 Sazonalidade de Proventos — {ticker}")
@@ -5797,6 +5840,7 @@ def montar_item_completo(a: dict) -> dict:
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,
+        "var_dia_pct": yf_info.get("var_dia_pct"),
         "ifr_14": yf_info.get("ifr_14"),
         "mm20": yf_info.get("mm20"),
         "mm50": yf_info.get("mm50"),
@@ -5978,6 +6022,11 @@ with tab1:
             "position:fixed!important;left:-9999px!important;top:0!important;"
             "width:1px!important;height:1px!important;opacity:0!important;"
             "pointer-events:none!important;overflow:hidden!important;margin:0!important;padding:0!important;}"
+            "div[data-testid='stElementContainer']:has(.raiox-table-host),"
+            "div.element-container:has(.raiox-table-host),"
+            "div[data-testid='stElementContainer']:has(.raiox-current-marker),"
+            "div.element-container:has(.raiox-current-marker){"
+            "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
             "div[data-testid='stVerticalBlock']:has(> div .raiox-table-host),"
             "div[data-testid='stVerticalBlock']:has(> div > div .raiox-table-host){gap:0!important;}"
             ".val-table-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:0;padding:0;}"
@@ -5989,6 +6038,21 @@ with tab1:
             ".val-table tbody tr.raiox-row{cursor:pointer;}"
             ".val-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
             ".val-table tr.raiox-active-row td{background-color:rgba(59,130,246,0.14)!important;border-bottom-color:rgba(59,130,246,0.45)!important;}"
+            ".val-table th.col-sticky-0,.val-table td.col-sticky-0,.val-table th.col-sticky-1,.val-table td.col-sticky-1{"
+            "position:sticky!important;background-clip:padding-box!important;}"
+            ".val-table th.col-sticky-0,.val-table th.col-sticky-1{"
+            "z-index:25!important;background-color:var(--val-sticky-bg,var(--background-color,#0e1117))!important;"
+            "background-image:linear-gradient(rgba(128,128,128,0.18),rgba(128,128,128,0.18))!important;}"
+            ".val-table td.col-sticky-0,.val-table td.col-sticky-1{"
+            "z-index:15!important;background-color:var(--val-sticky-bg,var(--background-color,#0e1117))!important;}"
+            ".val-table tr:hover td.col-sticky-0,.val-table tr:hover td.col-sticky-1{"
+            "background-color:var(--val-sticky-bg,var(--background-color,#0e1117))!important;"
+            "background-image:linear-gradient(rgba(128,128,128,0.08),rgba(128,128,128,0.08))!important;}"
+            ".val-table tr.raiox-active-row td.col-sticky-0,.val-table tr.raiox-active-row td.col-sticky-1{"
+            "background-color:var(--val-sticky-bg,var(--background-color,#0e1117))!important;"
+            "background-image:linear-gradient(rgba(59,130,246,0.14),rgba(59,130,246,0.14))!important;}"
+            ".val-table th.col-sticky-1,.val-table td.col-sticky-1{"
+            "box-shadow:3px 0 8px rgba(0,0,0,0.32)!important;}"
             ".col-resizer{position:absolute;top:0;right:-3px;width:7px;height:100%;cursor:col-resize;z-index:10;}"
             ".col-resizer:hover,.col-resizer.resizing{background:rgba(96,165,250,0.55);}"
             ".comp-chk-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;min-width:18px;min-height:18px;border-radius:4px!important;border:1.5px solid rgba(148,163,184,0.75);background:transparent;cursor:pointer;user-select:none;outline:none!important;transition:background-color 0.12s ease,border-color 0.12s ease;}"
@@ -6246,10 +6310,11 @@ with tab1:
             falt_i10_tab = tuple(r["ticker"] for r in exibir if r["ticker"] not in dados_i10)
             mapa_res_tab = {r["ticker"]: r for r in resultados_tab}
             if falt_i10_tab and len(falt_i10_tab) <= 60:
-                if len(falt_i10_tab) <= 15:
+                if len(falt_i10_tab) <= 30:
                     falt_yf_t = tuple(tk for tk in falt_i10_tab if tk not in dados_yf)
                     if falt_yf_t:
                         dados_yf.update(buscar_yahoo_lote(falt_yf_t))
+                if len(falt_i10_tab) <= 15:
                     falt_nw_t = tuple(tk for tk in falt_i10_tab if tk not in dados_news)
                     if falt_nw_t:
                         dados_news.update(buscar_sentimento_noticias_lote(falt_nw_t))
@@ -6355,15 +6420,36 @@ with tab1:
                         else:
                             news_ic = "📰⚪ 0"
 
+                        var_d = r.get("var_dia_pct")
+                        if var_d is not None:
+                            if var_d > 0.004:
+                                cor_vd, sinal_vd = "#22c55e", "+"
+                            elif var_d < -0.004:
+                                cor_vd, sinal_vd = "#ef4444", ""
+                            else:
+                                cor_vd, sinal_vd = "#94a3b8", ""
+                            var_dia_html = (
+                                f"<div title='Variação no dia em relação ao fechamento anterior' "
+                                f"style='flex-shrink:0; font-size:12.5px; font-weight:700; color:{cor_vd}; white-space:nowrap; text-align:right;'>"
+                                f"{sinal_vd}{fmt_num(var_d, 2)}%</div>"
+                            )
+                        else:
+                            var_dia_html = ""
+
                         linha = (
                             f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
-                            f"<td style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
+                            f"<td class='col-sticky-0' style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
+                            f"<td class='col-sticky-1'>"
+                            f"<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                            f"<div style='min-width:0;'><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</div>"
+                            f"{var_dia_html}"
+                            f"</div>"
+                            f"</td>"
                             f"<td style='text-align:center; line-height:1.35;'>"
                             f"<span style='font-weight:700;' title='Posição no Ranking e Score Ativo (0 a 100)'>{r['pos_ranking']}º · <strong>{fmt_num(score_at, 1)}</strong></span>"
                             f"<br>{badge_v}"
                             f"<br><small style='opacity:0.85; white-space:nowrap;' title='IFR 14 dias (RSI): {ifr_ic} | Notícias 30d: {html.escape(news_res_r)}'>{ifr_ic} | {news_ic}</small>"
                             f"</td>"
-                            f"<td><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
                             f"<td><strong>R$ {fmt_num(cot)}</strong><br><small title='Dividend Yield (12 meses): percentual pago em dividendos/JCP sobre a cotação atual'>DY: {fmt_num(r['dy_12m'])}%</small></td>"
                             f"<td><span title='Preço sobre Lucro: anos para reaver o investimento via lucro'>P/L:</span> {pl_txt}<br><span title='Preço sobre Valor Patrimonial: abaixo de 1,0 indica desconto contábil'>P/VP:</span> {pvp_html}<br><span title='Retorno sobre Patrimônio Líquido: eficiência na geração de lucro'>ROE:</span> {roe_txt}</td>"
                             f"<td><span title='Lucro por Ação (12m)'>LPA:</span> {lpa_txt} | <span title='Valor Patrimonial por Ação'>VPA:</span> {vpa_txt}<br><span title='Dividendo por Ação pago nos últimos 12 meses e média anual de 6 anos'>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}</span><br><span title='Dividendo por Ação projetado'>Proj: {dpap_txt}</span></td>"
@@ -6377,9 +6463,9 @@ with tab1:
 
                     thead_html = (
                         "<thead><tr>"
-                        "<th style='text-align:center;' title='Marque os ativos para comparar lado a lado na aba Comparar Ativos'>⚖️</th>"
+                        "<th class='col-sticky-0' style='text-align:center;' title='Marque os ativos para comparar lado a lado na aba Comparar Ativos'>⚖️</th>"
+                        "<th class='col-sticky-1' title='Código na B3, nome da empresa, setor de atuação e variação diária (%)'>Ticker / Empresa</th>"
                         "<th style='text-align:center;' title='Posição no Ranking, Score Ativo (0 a 100), Veredito do Modelo, IFR 14 dias e Sentimento de Notícias (30d)'>Rank / Score<br><small>Veredito | IFR | News</small></th>"
-                        "<th title='Código na B3, nome da empresa e setor de atuação'>Ticker / Empresa</th>"
                         f"<th title='Cotação atual da ação e DY (Dividend Yield): percentual pago em dividendos nos últimos 12 meses'>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
                         "<th title='P/L: Preço/Lucro | P/VP: Preço/Valor Patrimonial | ROE: Retorno sobre Patrimônio Líquido'>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
                         "<th title='LPA: Lucro por Ação | VPA: Valor Patrimonial por Ação | DPA: Dividendo por Ação (12m, média 6 anos e projetivo)'>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
@@ -6404,8 +6490,7 @@ with tab1:
                             )
                             with st.container():
                                 st.markdown(
-                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>"
-                                    "<div style='margin:6px 0 8px 0; border-top:2px solid rgba(59,130,246,0.45);'></div>",
+                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
                                     unsafe_allow_html=True,
                                 )
                                 item_raiox = mapa_res[ativo_escolhido]
@@ -6416,10 +6501,7 @@ with tab1:
                                     key_prefix="tab1",
                                     modo_score_chave=modo_score_chave,
                                     mostrar_cabecalho=False,
-                                )
-                                st.markdown(
-                                    "<div style='margin:10px 0 10px 0; border-bottom:2px solid rgba(59,130,246,0.45);'></div>",
-                                    unsafe_allow_html=True,
+                                    expandir_padrao=False,
                                 )
 
                             if idx_split + 1 < len(linhas_html):
@@ -6450,7 +6532,23 @@ with tab1:
         (function() {
             const pWin = __USE_PARENT__ ? window.parent : window;
             const pDoc = pWin.document;
-            const STORAGE_KEY = "painel_b3_val_col_widths_v1";
+            const STORAGE_KEY = "painel_b3_val_col_widths_v2";
+
+            function applyStickyBgVars() {
+                const refEl = pDoc.querySelector('[data-testid="stAppViewContainer"]') || pDoc.body;
+                if (!refEl) return;
+                const bg = pWin.getComputedStyle(refEl).backgroundColor;
+                if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") {
+                    pDoc.documentElement.style.setProperty("--val-sticky-bg", bg);
+                }
+            }
+
+            function syncStickyCols(tbl, col0W) {
+                if (!tbl) return;
+                const w0 = Math.max(36, Math.round(col0W || 42));
+                tbl.querySelectorAll(".col-sticky-0").forEach(function(el) { el.style.left = "0px"; });
+                tbl.querySelectorAll(".col-sticky-1").forEach(function(el) { el.style.left = w0 + "px"; });
+            }
 
             function sendBridgeInput(ariaLabel, payload) {
                 const inp = pDoc.querySelector('input[aria-label="' + ariaLabel + '"]');
@@ -6513,6 +6611,9 @@ with tab1:
                 tbl.style.tableLayout = "fixed";
                 tbl.style.width = totW + "px";
                 tbl.style.minWidth = totW + "px";
+                if (widthsArr.length >= 2) {
+                    syncStickyCols(tbl, widthsArr[0]);
+                }
             }
 
             function syncWrapScroll() {
@@ -6546,6 +6647,7 @@ with tab1:
                 const ths = Array.from(topTable.querySelectorAll("thead tr th"));
                 if (!ths.length) return;
 
+                applyStickyBgVars();
                 syncWrapScroll();
 
                 if (topTable.dataset.resizeReady && (!botTable || botTable.dataset.resizeReady)) return;
@@ -6578,7 +6680,7 @@ with tab1:
                     widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
                 } else {
                     topTable.style.tableLayout = "auto";
-                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : 54, Math.round(th.getBoundingClientRect().width)));
+                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : (i === 1 ? 210 : 54), Math.round(th.getBoundingClientRect().width)));
                 }
 
                 totalW = widths.reduce((a, b) => a + b, 0);
@@ -6642,6 +6744,10 @@ with tab1:
                                 if (bCols[idx]) bCols[idx].style.width = newW + "px";
                                 bTbl.style.width = newTotal + "px";
                                 bTbl.style.minWidth = newTotal + "px";
+                            }
+                            if (idx === 0) {
+                                syncStickyCols(topTable, newW);
+                                if (bTbl) syncStickyCols(bTbl, newW);
                             }
                         }
 
@@ -7695,8 +7801,117 @@ _js_chart_measure = """
 
     function formatXDisplay(ax, pt) {
         if (pt.rawLabel !== undefined) return String(pt.rawLabel);
-        if (ax.
- 5m57.3s
+        if (ax.type === "category") {
+            const cats = ax._categories || [];
+            const idx = Math.max(0, Math.min(cats.length - 1, Math.round(pt.cx)));
+            return cats[idx] !== undefined ? String(cats[idx]) : "";
+        }
+        if (ax.type === "date") {
+            const raw = pt.rawX !== undefined ? String(pt.rawX) : String(axisC2D(ax, pt.cx) || "");
+            const m = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})(?:[T\\s](\\d{2}):(\\d{2}))?/);
+            if (m) {
+                const base = m[3] + "/" + m[2] + "/" + m[1];
+                return (m[4] && m[5] && !(m[4] === "00" && m[5] === "00")) ? (base + " " + m[4] + ":" + m[5]) : base;
+            }
+            return raw;
+        }
+        return fmtNumBr(Number(axisC2D(ax, pt.cx)), 2);
+    }
+
+    function pointFromEvent(gd, e) {
+        const dragEl = getDragEl(gd);
+        const rect = dragEl.getBoundingClientRect();
+        const px = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const py = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+        const xa = gd._fullLayout.xaxis;
+        const ya = gd._fullLayout.yaxis;
+
+        let bestPt = null;
+        let bestDist = Infinity;
+        const calcArr = gd.calcdata || [];
+        const dataArr = gd.data || [];
+        const visibleCnt = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly" && t.hoverinfo !== "skip"; }).length;
+        const maxDy = visibleCnt <= 1 ? 36 : 22;
+
+        for (let ti = 0; ti < calcArr.length; ti++) {
+            const tr = dataArr[ti];
+            const pts = calcArr[ti];
+            if (!tr || !pts || !pts.length) continue;
+            if (tr.visible === false || tr.visible === "legendonly" || tr.type === "pie" || tr.hoverinfo === "skip") continue;
+            const rawXs = Array.isArray(tr.x) ? tr.x : null;
+            const rawCd = Array.isArray(tr.customdata) ? tr.customdata : null;
+            const rawTxts = Array.isArray(tr.text) ? tr.text : null;
+
+            for (let i = 0; i < pts.length; i++) {
+                const cpt = pts[i];
+                if (!cpt) continue;
+                const ptCx = cpt.x;
+                const ptCy = Number.isFinite(cpt.close) ? cpt.close : (Number.isFinite(cpt.c) ? cpt.c : cpt.y);
+                if (!Number.isFinite(ptCx) || !Number.isFinite(ptCy)) continue;
+
+                const ptPx = toPxX(xa, ptCx, rect.width);
+                const ptPy = toPxY(ya, ptCy, rect.height);
+                const dx = ptPx - px;
+                const dy = ptPy - py;
+                if (Math.abs(dy) <= maxDy && Math.abs(dx) <= 24) {
+                    const dist = Math.hypot(dx, dy);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        const valYNum = Number(axisC2D(ya, ptCy));
+                        let rawLabel = undefined;
+                        let rawTs = undefined;
+                        if (rawCd && Array.isArray(rawCd[i]) && typeof rawCd[i][0] === "string") {
+                            rawLabel = rawCd[i][0];
+                            if (rawCd[i].length >= 3 && Number.isFinite(Number(rawCd[i][2]))) {
+                                rawTs = Number(rawCd[i][2]);
+                            }
+                        } else if (rawTxts && typeof rawTxts[i] === "string") {
+                            rawLabel = rawTxts[i];
+                        }
+                        bestPt = {
+                            cx: ptCx,
+                            cy: ptCy,
+                            valY: Number.isFinite(valYNum) ? valYNum : ptCy,
+                            rawX: rawXs ? rawXs[i] : undefined,
+                            rawLabel: rawLabel,
+                            rawTs: rawTs,
+                            idx: i,
+                            traceIdx: ti,
+                            snapped: true
+                        };
+                    }
+                }
+            }
+        }
+
+        if (bestPt) return bestPt;
+
+        const cx = toCoordX(xa, px, rect.width);
+        const cy = toCoordY(ya, py, rect.height);
+        const valY = Number(axisC2D(ya, cy));
+        let fbLabel = undefined;
+        let fbTs = undefined;
+        const tr0 = dataArr[0];
+        if (tr0 && Array.isArray(tr0.customdata) && tr0.customdata.length) {
+            const idxF = Math.max(0, Math.min(tr0.customdata.length - 1, Math.round(cx)));
+            const rowCd = tr0.customdata[idxF];
+            if (Array.isArray(rowCd) && typeof rowCd[0] === "string") {
+                fbLabel = rowCd[0];
+                if (rowCd.length >= 3 && Number.isFinite(Number(rowCd[2]))) fbTs = Number(rowCd[2]);
+            }
+        }
+        return {
+            cx: cx,
+            cy: cy,
+            valY: Number.isFinite(valY) ? valY : cy,
+            rawX: undefined,
+            rawLabel: fbLabel,
+            rawTs: fbTs,
+            idx: null,
+            traceIdx: null,
+            snapped: false
+        };
+    }
 
     function svgEl(tag, attrs) {
         const el = pDoc.createElementNS(SVG_NS, tag);
@@ -7808,8 +8023,9 @@ _js_chart_measure = """
         const xLbl1 = formatXDisplay(xa, stM.p1);
         const xLbl2 = formatXDisplay(xa, stM.p2);
         let spanTxt = "";
-        if (xa.type === "date") {
-            const msDiff = Math.abs(stM.p2.cx - stM.p1.cx);
+        const temRawTs = Number.isFinite(stM.p1.rawTs) && Number.isFinite(stM.p2.rawTs);
+        if (xa.type === "date" || temRawTs) {
+            const msDiff = temRawTs ? Math.abs(stM.p2.rawTs - stM.p1.rawTs) : Math.abs(stM.p2.cx - stM.p1.cx);
             const dias = Math.round(msDiff / 86400000);
             const hrs = Math.round(msDiff / 3600000);
             const dur = dias >= 1 ? (dias + "d") : (hrs >= 1 ? (hrs + "h") : (Math.round(msDiff / 60000) + "min"));

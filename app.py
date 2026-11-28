@@ -725,6 +725,27 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
                 val_c = _parse_i10_num(txt_cot)
                 if val_c is not None and val_c > 0:
                     dados["cotacao_i10"] = val_c
+                for el_v in body.find_all(["span", "div", "p", "small"]):
+                    if sp_cot and el_v == sp_cot:
+                        continue
+                    t_el = " ".join(el_v.get_text(" ", strip=True).split())
+                    if "%" not in t_el or len(t_el) > 24:
+                        continue
+                    m_vd = re.search(r"([-+]?\d{1,3}(?:,\d+)?)\s*%", t_el)
+                    if not m_vd:
+                        continue
+                    v_num = parse_br_num(m_vd.group(1))
+                    if v_num is None:
+                        continue
+                    ctx_cls = " ".join(el_v.get("class", [])).lower()
+                    for ch_ic in el_v.find_all(["i", "svg", "span"]):
+                        ctx_cls += " " + " ".join(ch_ic.get("class", [])).lower()
+                    if any(k in t_el for k in ("-", "↓", "▼")) or any(k in ctx_cls for k in ("down", "danger", "red", "neg", "desval")):
+                        dados["var_dia_i10"] = -abs(v_num)
+                        break
+                    if any(k in t_el for k in ("+", "↑", "▲")) or any(k in ctx_cls for k in ("up", "success", "green", "pos", "val")):
+                        dados["var_dia_i10"] = abs(v_num)
+                        break
             elif lbl in ("p/l", "p/vp", "dy", "dividend yield"):
                 sp_v = body.find("span")
                 val_v = _parse_i10_num(sp_v.get_text(" ", strip=True) if sp_v else body.get_text(" ", strip=True))
@@ -841,13 +862,17 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 2) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 3) -> list[str]:
     rotas: list[str] = []
     pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
     kws = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
-    for su in script_urls[:30]:
+    filtrados = [
+        su for su in script_urls
+        if any(k in su.lower() for k in ("app", "main", "chart", "cotac", "acao", "stock", "quote", "ticker", "bundle", "index"))
+    ] or list(script_urls)
+    for su in filtrados[:8]:
         try:
-            r = requests.get(su, headers=HEADERS, timeout=5)
+            r = requests.get(su, headers=HEADERS, timeout=2.5)
             if r.status_code != 200:
                 continue
             for _, path in pat.findall(r.text):
@@ -903,7 +928,7 @@ def buscar_serie_investidor10_chart_com_info(
     tid = ""
     diag_motivo = "indisponível"
     try:
-        resp_pg = sess.get(url_pg, timeout=8)
+        resp_pg = sess.get(url_pg, timeout=4)
         if resp_pg.status_code != 200:
             return pd.Series(dtype=float), f"página HTTP {resp_pg.status_code}"
         if "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
@@ -1028,13 +1053,18 @@ def buscar_serie_investidor10_chart_com_info(
     hoje_brt_str = datetime.now(BRT).strftime("%Y-%m-%d")
     ano_brt_int = datetime.now(BRT).year
 
-    for url_c in urls_unicas[:14]:
+    intraday_404 = False
+    for url_c in urls_unicas[:6]:
+        if intraday_404 and "/intraday/" in url_c:
+            continue
         try:
-            r_c = sess.get(url_c, headers=api_hdrs, timeout=6)
+            r_c = sess.get(url_c, headers=api_hdrs, timeout=2.5)
             if r_c.status_code in (401, 403, 429):
                 diag_motivo = f"HTTP {r_c.status_code}"
                 break
             if r_c.status_code != 200:
+                if r_c.status_code == 404 and "/intraday/" in url_c:
+                    intraday_404 = True
                 diag_motivo = f"HTTP {r_c.status_code}"
                 continue
             js = r_c.json()
@@ -3591,6 +3621,114 @@ def gerar_justificativa_detalhada(r: dict, modo: str = "score_geral") -> str:
     return f"📝 **Diagnóstico Técnico & Fundamentalista:** {texto_fundamentos}\n\n{bloco_news_linhas}"
 
 
+def gerar_relatorio_auditoria_ia(
+    itens: list[dict],
+    filtros_ctx: dict,
+) -> str:
+    def _f(v, casas=2, suf=""):
+        if v is None or pd.isna(v):
+            return "N/D"
+        return f"{fmt_num(float(v), casas)}{suf}"
+
+    def _f_rs(v):
+        if v is None or pd.isna(v) or float(v) <= 0:
+            return "N/D"
+        return f"R$ {fmt_num(float(v))}"
+
+    agora_s = datetime.now(BRT).strftime("%d/%m/%Y %H:%M:%S BRT")
+    linhas: list[str] = [
+        "# AUDITORIA COMPLETA DO MOTOR QUANTITATIVO — PAINEL VALUATION B3",
+        f"Data/Hora da geração: {agora_s}",
+        f"Total de ativos analisados no filtro atual: {len(itens)}",
+        "",
+        "## 1. FILTROS ATIVOS E CONTEXTO",
+        f"- Modo de Análise ativo na interface: {filtros_ctx.get('modo_ativo', 'Geral')}",
+        f"- Listas rápidas: {', '.join(filtros_ctx.get('listas') or []) or 'Nenhuma (Todas)'}",
+        f"- Setores específicos: {', '.join(filtros_ctx.get('setores') or []) or 'Todos'}",
+        f"- Liquidez mínima (2m): {filtros_ctx.get('liq', 'N/D')}",
+        f"- Filtro de vereditos: {', '.join(filtros_ctx.get('vereditos') or []) or 'Todos'}",
+        f"- Busca código/tabela: {filtros_ctx.get('busca') or 'Nenhuma'}",
+        "",
+        "## 2. METODOLOGIA, FÓRMULAS E PESOS DO SCORE",
+        "- Score Geral (0–100) = 0,60 × Score_LP + 0,40 × Score_CP.",
+        "- Score Longo Prazo (LP, 0–100):",
+        "  • Valuation (até 35 pts): Margem de Segurança média dos métodos disponíveis (PT Médio 6a, PT Projetivo, PT Bazin 12m, Graham) [até 20 pts × Fator de Confiança: 1 método=0,60 | 2=0,85 | 3-4=1,00] + Múltiplos P/VP, P/L e EV/EBITDA (ou P/VP e P/L reescalonados para Bancos/Seguradoras) [até 10 pts] + Dividendos (DY 12m e anos de histórico 6a) [até 5 pts].",
+        "  • Rentabilidade (até 30 pts): Não-bancos (ROE 12, ROIC 10, Marg. Líq 5, Marg. EBIT 3); Bancos/Seguradoras (ROE 20, Marg. Líq 10 ou fallback 5 se ROE>=12% e margem ausente).",
+        "  • Saúde Financeira (até 25 pts): Não-bancos (Dív.Brut/Patrim 10, Liq. Corr 7, Cresc. Rec 5a 8); Bancos/Seguradoras (Solvência via ROE 15, Cresc. Rec 5a 10).",
+        "  • Notícias LP (até 10 pts): News Score (-10 a +10) normalizado para 0–10.",
+        "  • Trava Anti-Armadilha (Value Trap): limita Score LP a no máximo 50 pts se Margem Líquida < 0, ROE < 0, Dív/PL > 3,0x (não-bancos) ou menção a RJ/falência nas notícias.",
+        "- Score Curto Prazo (CP, 0–100):",
+        "  • IFR 14d (40 pts; pico entre 30 e 48) + Médias MM20/MM50/MM200 e Dist. Máx 52s (25 pts) + News Score 30d (25 pts) + Razão Volume 5d/60d com trava em distribuição (10 pts).",
+        "- Faixa de Preço do Modelo: Teto com Margem = min(Graham, PT_div_ref × 0,85); Sobrepreço = para Bancos/Seguradoras min(Graham, 1,15×VPA) com piso +15% sobre Teto; demais min(1,25×Graham, DPA/0,04) com piso +20% sobre Teto.",
+        "- Vereditos: Crítico (value trap) -> Indeciso (lucro sólido com news < 0, ou divergência LP/CP >= 20, ou news <= -2,5) -> Esticado -> Excelente (Geral>=72 e LP>=70 e avg_ms>0) -> Bom (LP/Desc. Patr.) -> Regular.",
+        "",
+    ]
+
+    if not itens:
+        linhas.append("Nenhum ativo encontrado no filtro atual.")
+        return "\n".join(linhas)
+
+    rank_geral = sorted(itens, key=lambda x: x.get("score_geral", 0.0), reverse=True)
+    rank_lp = sorted(itens, key=lambda x: x.get("score_lp", 0.0), reverse=True)
+    rank_cp = sorted(itens, key=lambda x: x.get("score_cp", 0.0), reverse=True)
+    pos_g_map = {r["ticker"]: i for i, r in enumerate(rank_geral, 1)}
+    pos_lp_map = {r["ticker"]: i for i, r in enumerate(rank_lp, 1)}
+    pos_cp_map = {r["ticker"]: i for i, r in enumerate(rank_cp, 1)}
+
+    linhas.append("## 3. COMPARATIVO DOS 3 MÓDULOS DE RANKING")
+    linhas.append("### 3.1 Ranking Geral (60% LP + 40% CP)")
+    for i, r in enumerate(rank_geral, 1):
+        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | Geral: {r['score_geral']} (LP: {r['score_lp']} | CP: {r['score_cp']} | News: {r.get('news_score', 0):+.1f}) | {r.get('veredito', '')}")
+    linhas.append("")
+    linhas.append("### 3.2 Ranking Longo Prazo (Fundamentos & Dividendos)")
+    for i, r in enumerate(rank_lp, 1):
+        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | LP: {r['score_lp']} (Geral: {r['score_geral']} | CP: {r['score_cp']}) | {r.get('veredito', '')}")
+    linhas.append("")
+    linhas.append("### 3.3 Ranking Curto Prazo (Timing & Catalisadores)")
+    for i, r in enumerate(rank_cp, 1):
+        linhas.append(f"{i}º {r['ticker']} ({r['nome']}) | CP: {r['score_cp']} (Geral: {r['score_geral']} | LP: {r['score_lp']}) | IFR: {_f(r.get('ifr_14'), 1)} | News: {r.get('news_score', 0):+.1f}")
+    linhas.append("")
+    linhas.append("## 4. ANÁLISE DETALHADA POR ATIVO (TODOS OS MÓDULOS)")
+
+    for r in rank_geral:
+        tk = r["ticker"]
+        det = r.get("detalhes_score") or {}
+        dfp = _dados_faixa_preco(r)
+        j_g = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_geral").split("\n\n")[0])
+        j_lp = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_lp").split("\n\n")[0])
+        j_cp = re.sub(r"<[^>]+>", "", gerar_justificativa_detalhada(r, "score_cp").split("\n\n")[0])
+        top_p = r.get("top_noticia_pos")
+        top_n = r.get("top_noticia_neg")
+        linhas.extend([
+            f"### {tk} — {r.get('nome', tk)} | Setor: {r.get('setor_nome') or 'N/D'} | Banco/Seguradora: {'Sim' if r.get('eh_banco_seg') else 'Não'}",
+            f"- Posições: Geral {pos_g_map[tk]}º | Longo Prazo {pos_lp_map[tk]}º | Curto Prazo {pos_cp_map[tk]}º",
+            f"- Cotação: R$ {fmt_num(float(r.get('cotacao') or 0.0))} | Var. Dia: {_f(r.get('var_dia_pct'), 2, '%')} | Liquidez 2m: R$ {fmt_bi_mi(r.get('liq_2m'))}",
+            f"- Scores: Geral={r['score_geral']}/100 | LP={r['score_lp']}/100 [Val={det.get('pts_val_lp', 0)}/35 (conf={det.get('fator_confianca', 1)}, métodos={det.get('n_metodos', 0)}), Rent={det.get('pts_rent_lp', 0)}/30, Saúde={det.get('pts_saude_lp', 0)}/25, NewsLP={det.get('pts_news_lp', 0)}/10, ValueTrap={r.get('eh_value_trap', False)}] | CP={r['score_cp']}/100 [IFR={det.get('pts_ifr_cp', 0)}/40, Médias={det.get('pts_medias_cp', 0)}/25, NewsCP={det.get('pts_news_cp', 0)}/25, Vol={det.get('pts_vol_cp', 0)}/10]",
+            f"- Veredito Quantitativo: {r.get('veredito', '')}",
+            f"- Motivos do Score: {'; '.join(r.get('motivos') or []) or 'Nenhum'}",
+            f"- Fundamentalistas: P/L={_f(r.get('pl'))} | P/VP={_f(r.get('pvp'))} | ROE={_f(r.get('roe'), 1, '%')} | ROIC={_f(r.get('roic'), 1, '%')} | Marg.Líq={_f(r.get('marg_liq'), 1, '%')} | Marg.EBIT={_f(r.get('marg_ebit'), 1, '%')} | EV/EBITDA={_f(r.get('ev_ebitda'))} | Liq.Corr={_f(r.get('liq_corr'))} | Dív.Brut/PL={_f(r.get('div_brut_patrim'))} | Cresc.Rec.5a={_f(r.get('cresc_rec_5a'), 1, '%')} | LPA={_f_rs(r.get('lpa'))} | VPA={_f_rs(r.get('vpa'))}",
+            f"- Dividendos & Valuation: DY 12m={_f(r.get('dy_12m'), 2, '%')} | DPA 12m={_f_rs(r.get('dpa_12m'))} | DPA Méd 6a={_f_rs(r.get('dpa_med_6a'))} ({r.get('anos_hist', 0)}a, {r.get('anos_divs_consec', 0)} consec.) | DPA Proj={_f_rs(r.get('dpa_proj'))} | PT Médio 6a={_f_rs(r.get('pt_med'))} | PT Proj={_f_rs(r.get('pt_proj'))} | PT Bazin={_f_rs(r.get('pt_bazin'))} | Graham={_f_rs(r.get('graham'))} | MS Média={_f(r.get('avg_ms'), 1, '%')}",
+            f"- Faixa de Preço do Modelo ({dfp['regra_sp_lbl']}): Desconto={dfp['z_desc']} | Neutra={dfp['z_neutro']} | Sobrepreço={dfp['z_sobre']} | Veredito={re.sub(r'[*]+', '', dfp['veredito_px'])}",
+            f"- Técnicos: IFR(14)={_f(r.get('ifr_14'), 1)} | MM20={_f_rs(r.get('mm20'))} | MM50={_f_rs(r.get('mm50'))} (dist {_f(r.get('dist_mm50_pct'), 1, '%')}) | MM200={_f_rs(r.get('mm200'))} (dist {_f(r.get('dist_mm200_pct'), 1, '%')}) | Dist.Máx 52s={_f(r.get('dist_max_52s_pct'), 1, '%')} | Razão Vol 5d/60d={_f(r.get('razao_volume'), 2, 'x')}",
+            f"- Notícias (30d): Score={r.get('news_score', 0):+.1f} | Resumo={r.get('news_resumo', '')} | Qtd 7d={r.get('news_qtd_7d', 0)} / 30d={r.get('news_qtd_30d', 0)} | RJ={r.get('news_tem_rj', False)}"
+            + (f" | Top Positiva: '{top_p.get('titulo', '')}' ({top_p.get('fonte', '')}, {top_p.get('data_str', '')})" if top_p else "")
+            + (f" | Top Negativa: '{top_n.get('titulo', '')}' ({top_n.get('fonte', '')}, {top_n.get('data_str', '')})" if top_n else ""),
+            f"- Diagnóstico Módulo Geral: {j_g}",
+            f"- Diagnóstico Módulo Longo Prazo: {j_lp}",
+            f"- Diagnóstico Módulo Curto Prazo: {j_cp}",
+            "",
+        ])
+
+    linhas.extend([
+        "## 5. PEDIDO DE AUDITORIA PARA A IA",
+        "Com base nos dados, sub-scores, fórmulas, pesos e rankings acima:",
+        "1. A pontuação de Score Geral, Longo Prazo e Curto Prazo e o ordenamento dos ativos estão coerentes com os fundamentos e momento técnico?",
+        "2. Há algum viés, distorção por setor (ex.: bancos, elétricas, commodities), dado faltante penalizando injustamente ou regra de veredito que deveria ser calibrada?",
+        "3. Quais melhorias práticas de cálculo/pesos você recomenda?",
+    ])
+    return "\n".join(linhas)
+
+
 def render_grafico_e_tabela_ativo(
     ticker: str,
     nome: str = "",
@@ -3756,7 +3894,7 @@ def render_grafico_e_tabela_ativo(
                     df_alt = df_alt[(df_alt.index.date >= dt_custom_ini) & (df_alt.index.date <= dt_custom_fim)]
                     serie_alt = df_alt["Close"].dropna()
             else:
-                serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
+                serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live) if usou_i10_graf else pd.Series(dtype=float)
                 if serie_alt.empty:
                     serie_alt = buscar_historico_preco(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
             if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
@@ -5613,6 +5751,7 @@ with st.sidebar:
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    slot_copiar_ia = st.empty()
 
 st.query_params["liq"] = liq_label
 if filtro_listas:
@@ -5840,7 +5979,7 @@ def montar_item_completo(a: dict) -> dict:
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,
-        "var_dia_pct": yf_info.get("var_dia_pct"),
+        "var_dia_pct": i10_info.get("var_dia_i10") if i10_info.get("var_dia_i10") is not None else yf_info.get("var_dia_pct"),
         "ifr_14": yf_info.get("ifr_14"),
         "mm20": yf_info.get("mm20"),
         "mm50": yf_info.get("mm50"),
@@ -5968,6 +6107,86 @@ with tab1:
         if filtro_vereditos:
             ver_prefixos = tuple(" ".join(v.split()[:2]) for v in filtro_vereditos)
             resultados_tab = [r for r in resultados_tab if str(r.get("veredito", "")).startswith(ver_prefixos)]
+
+        relatorio_ia_txt = gerar_relatorio_auditoria_ia(
+            resultados_tab,
+            {
+                "modo_ativo": modo_score_lbl,
+                "listas": filtro_listas,
+                "setores": filtro_setores,
+                "liq": liq_label,
+                "vereditos": filtro_vereditos,
+                "busca": busca_tickers.strip(),
+            },
+        )
+        _payload_ia_js = json.dumps(relatorio_ia_txt, ensure_ascii=False).replace("</", "<\\/")
+        _usa_st_html_ia = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+        _html_bolinha_ia = f"""
+        <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; margin-top:2px;">
+          <button id="btn-copiar-ia-b3" type="button"
+            title="Copiar análise completa dos {len(resultados_tab)} ativos filtrados (Geral, LP e CP) para auditar em IA"
+            style="width:36px; height:36px; border-radius:50%; border:1.5px solid rgba(96,165,250,0.65);
+                   background:linear-gradient(135deg, rgba(59,130,246,0.28), rgba(37,99,235,0.45));
+                   color:#ffffff; font-size:16px; cursor:pointer; display:inline-flex;
+                   align-items:center; justify-content:center; box-shadow:0 2px 8px rgba(0,0,0,0.35);
+                   transition:transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;">
+            🤖
+          </button>
+          <span id="lbl-copiar-ia-b3" style="font-size:11px; color:#4ade80; font-weight:600; min-height:14px; text-align:center;"></span>
+        </div>
+        <script>
+        (function() {{
+          const txt = {_payload_ia_js};
+          const doc = __USE_PARENT__ ? window.parent.document : document;
+          const btn = document.getElementById("btn-copiar-ia-b3") || doc.getElementById("btn-copiar-ia-b3");
+          const lbl = document.getElementById("lbl-copiar-ia-b3") || doc.getElementById("lbl-copiar-ia-b3");
+          if (!btn) return;
+          btn.onclick = async function() {{
+            let ok = false;
+            try {{
+              const nav = (__USE_PARENT__ ? window.parent.navigator : navigator);
+              if (nav && nav.clipboard && nav.clipboard.writeText) {{
+                await nav.clipboard.writeText(txt);
+                ok = true;
+              }}
+            }} catch (e) {{}}
+            if (!ok) {{
+              try {{
+                const ta = doc.createElement("textarea");
+                ta.value = txt;
+                ta.style.position = "fixed";
+                ta.style.left = "-9999px";
+                doc.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                ok = doc.execCommand("copy");
+                doc.body.removeChild(ta);
+              }} catch (e2) {{}}
+            }}
+            if (ok) {{
+              btn.textContent = "✓";
+              btn.style.background = "linear-gradient(135deg, #16a34a, #22c55e)";
+              btn.style.borderColor = "#4ade80";
+              if (lbl) lbl.textContent = "Copiado ({len(resultados_tab)} ativos)!";
+              setTimeout(function() {{
+                btn.textContent = "🤖";
+                btn.style.background = "linear-gradient(135deg, rgba(59,130,246,0.28), rgba(37,99,235,0.45))";
+                btn.style.borderColor = "rgba(96,165,250,0.65)";
+                if (lbl) lbl.textContent = "";
+              }}, 2800);
+            }} else if (lbl) {{
+              lbl.style.color = "#f87171";
+              lbl.textContent = "Erro ao copiar";
+            }}
+          }};
+        }})();
+        </script>
+        """.replace("__USE_PARENT__", "false" if _usa_st_html_ia else "true")
+        with slot_copiar_ia:
+            if _usa_st_html_ia:
+                st.html(_html_bolinha_ia, unsafe_allow_javascript=True)
+            else:
+                components.html(_html_bolinha_ia, height=62)
 
         def _ao_clicar_comparar_tabela():
             raw_c = st.session_state.get("comp_bridge", "").strip().upper()
@@ -6488,7 +6707,8 @@ with tab1:
                                 f"<div class='val-table-wrap val-table-wrap-top'><table class='val-table val-table-top'>{thead_html}<tbody>{''.join(linhas_html[:idx_split + 1])}</tbody></table></div>",
                                 unsafe_allow_html=True,
                             )
-                            with st.container():
+                            _rx_ctx = st.container(key=f"rx_box_{ativo_escolhido}") if "key" in inspect.signature(st.container).parameters else st.container()
+                            with _rx_ctx:
                                 st.markdown(
                                     f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
                                     unsafe_allow_html=True,

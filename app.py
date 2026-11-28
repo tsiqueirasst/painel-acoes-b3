@@ -6434,29 +6434,6 @@ with tab1:
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
-            with st.container(border=True):
-                c_modo_sc, c_filt_ver, c_dic_tab = st.columns([2.0, 1.35, 0.9], vertical_alignment="bottom")
-                with c_modo_sc:
-                    st.radio(
-                        "🎯 Modo de Análise / Score:",
-                        options=list(MODO_SCORE_OPCOES.keys()),
-                        horizontal=True,
-                        key="tab1_modo_score_tab",
-                        on_change=_sync_modo_tab,
-                    )
-                with c_filt_ver:
-                    st.multiselect(
-                        "🏷️ Filtrar por Veredito do Modelo:",
-                        options=VEREDITOS_OPCOES,
-                        placeholder="Todos os vereditos (ex: 🟢 Excelente, 🔵 Bom)",
-                        key="tab1_filtro_ver_tab",
-                        on_change=_sync_ver_tab,
-                    )
-                with c_dic_tab:
-                    if st.button("📖 Dicionário de Termos", key="btn_dic_tab1", use_container_width=True):
-                        modal_dicionario()
-
-            c_busca, c_ord1, c_ord2, c_ord3 = st.columns([1.8, 1.8, 1.4, 1.2], vertical_alignment="bottom")
             opcoes_ordenacao = {
                 "Atratividade (Score Ativo)": "score_ativo",
                 "Score Geral (60% LP + 40% CP)": "score_geral",
@@ -6495,36 +6472,146 @@ with tab1:
                 except Exception:
                     st.session_state["tab1_max_linhas"] = 50
 
-            with c_busca:
-                q_url = st.query_params.get("q", "")
-                if "value" in inspect.signature(st_keyup).parameters:
-                    busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", value=q_url, placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
-                else:
-                    busca_tabela = st_keyup("🔎 Buscar na tabela (ao digitar):", placeholder="Ex: PETR, BBAS, CEMIG", debounce=200, key="busca_live")
-            with c_ord1:
-                col_escolhida = st.selectbox("Ordenar por coluna:", ord_keys, key="tab1_ord_col")
-            with c_ord2:
-                direcao = st.selectbox("Ordem:", dir_opcoes, key="tab1_ord_dir")
-            with c_ord3:
-                max_linhas = st.number_input("Exibir (0 = todos):", min_value=0, max_value=1000, step=10, key="tab1_max_linhas")
+            with st.container(border=True):
+                st.markdown(
+                    "<span class='painel-analise-host' style='display:none;'></span>"
+                    "<style>"
+                    "div[data-testid='stElementContainer']:has(.painel-analise-host),"
+                    "div[data-testid='stElementContainer']:has(.painel-modo-host),"
+                    "div[data-testid='stElementContainer']:has(.painel-link-host){"
+                    "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
+                    "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button{"
+                    "border-radius:8px!important;min-height:40px!important;font-size:13.5px!important;transition:all 0.15s ease!important;}"
+                    "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='primary']{"
+                    "background:rgba(16,185,129,0.16)!important;border:1px solid rgba(16,185,129,0.62)!important;"
+                    "color:#34d399!important;font-weight:600!important;box-shadow:none!important;}"
+                    "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='primary']:hover{"
+                    "background:rgba(16,185,129,0.24)!important;border-color:rgba(16,185,129,0.82)!important;}"
+                    "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='secondary']{"
+                    "background:rgba(128,128,129,0.12)!important;border:1px solid rgba(128,128,129,0.25)!important;"
+                    "color:inherit!important;font-weight:500!important;}"
+                    "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='secondary']:hover{"
+                    "background:rgba(128,128,129,0.20)!important;border-color:rgba(128,128,129,0.42)!important;}"
+                    "div[data-testid='stColumn']:has(.painel-link-host){display:flex;justify-content:flex-end;align-items:center;}"
+                    "div[data-testid='stColumn']:has(.painel-link-host) button{"
+                    "background:transparent!important;border:none!important;box-shadow:none!important;"
+                    "color:#60a5fa!important;padding:2px 6px!important;min-height:0!important;width:auto!important;font-size:13px!important;font-weight:500!important;}"
+                    "div[data-testid='stColumn']:has(.painel-link-host) button:hover{"
+                    "color:#93c5fd!important;text-decoration:underline!important;background:transparent!important;}"
+                    "</style>",
+                    unsafe_allow_html=True,
+                )
 
-            st.query_params["ord"] = col_escolhida
-            st.query_params["dir"] = direcao
-            st.query_params["maxl"] = str(int(max_linhas))
-            if busca_tabela and busca_tabela.strip():
-                st.query_params["q"] = busca_tabela.strip()
-            elif "q" in st.query_params:
-                del st.query_params["q"]
+                c_pa_tit, c_pa_dic = st.columns([3.5, 1.0], vertical_alignment="center")
+                with c_pa_tit:
+                    st.markdown("<div style='font-size:14.5px; font-weight:700; letter-spacing:0.4px;'>PAINEL DE ANÁLISE</div>", unsafe_allow_html=True)
+                with c_pa_dic:
+                    st.markdown("<span class='painel-link-host' style='display:none;'></span>", unsafe_allow_html=True)
+                    if st.button("📖 Dicionário", key="btn_dic_tab1"):
+                        modal_dicionario()
 
-            lista_tab = resultados_tab
-            if busca_tabela and busca_tabela.strip():
-                termo = busca_tabela.strip().upper()
-                lista_tab = [r for r in resultados_tab if termo in r["ticker"] or termo in r["nome"].upper()]
+                st.markdown("<div style='margin:6px 0 10px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin-bottom:6px;'>MODO DE ANÁLISE</div>", unsafe_allow_html=True)
 
-            chave_ord = opcoes_ordenacao[col_escolhida]
-            reverso = direcao.startswith("Decrescente")
-            resultados_ordenados = sort_resultados(lista_tab, chave_ord, reverso)
-            exibir = resultados_ordenados if max_linhas == 0 else resultados_ordenados[:int(max_linhas)]
+                modos_ui = [
+                    ("🏆 Geral", "🏆 Geral (Melhor Compra Equilibrada)"),
+                    ("🏛️ Longo Prazo", "🏛️ Longo Prazo (Fundamentos & Dividendos)"),
+                    ("⚡ Curto Prazo", "⚡ Curto Prazo (Timing & Catalisadores)"),
+                ]
+                cols_modo_ui = st.columns(3, gap="small")
+                for idx_m, (col_m, (lbl_curto_m, lbl_full_m)) in enumerate(zip(cols_modo_ui, modos_ui)):
+                    with col_m:
+                        if idx_m == 0:
+                            st.markdown("<span class='painel-modo-host' style='display:none;'></span>", unsafe_allow_html=True)
+                        eh_modo_sel = (st.session_state["tab1_modo_score_val"] == lbl_full_m)
+                        if st.button(
+                            lbl_curto_m,
+                            key=f"btn_modo_ui_{idx_m}",
+                            type="primary" if eh_modo_sel else "secondary",
+                            use_container_width=True,
+                        ):
+                            if not eh_modo_sel:
+                                st.session_state["tab1_modo_score_val"] = lbl_full_m
+                                st.session_state["tab1_modo_score_tab"] = lbl_full_m
+                                st.session_state["tab1_modo_score_rank"] = lbl_full_m
+                                st.query_params["modo"] = lbl_full_m
+                                st.rerun()
+
+                st.markdown("<div style='margin:12px 0 10px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin-bottom:4px;'>FILTROS</div>", unsafe_allow_html=True)
+
+                c_busca, c_ver, c_ord1, c_ord2, c_ord3 = st.columns([1.35, 1.35, 1.25, 1.05, 0.8], vertical_alignment="bottom")
+                with c_busca:
+                    busca_reset_id = st.session_state.get("tab1_busca_reset", 0)
+                    q_url = "" if busca_reset_id > 0 else st.query_params.get("q", "")
+                    busca_key = "busca_live" if busca_reset_id == 0 else f"busca_live_{busca_reset_id}"
+                    if "value" in inspect.signature(st_keyup).parameters:
+                        busca_tabela = st_keyup("Buscar ativo", value=q_url, placeholder="🔍 PETR, BBAS...", debounce=200, key=busca_key)
+                    else:
+                        busca_tabela = st_keyup("Buscar ativo", placeholder="🔍 PETR, BBAS...", debounce=200, key=busca_key)
+                with c_ver:
+                    st.multiselect(
+                        "Veredito",
+                        options=VEREDITOS_OPCOES,
+                        placeholder="Todos os vereditos",
+                        key="tab1_filtro_ver_tab",
+                        on_change=_sync_ver_tab,
+                    )
+                with c_ord1:
+                    col_escolhida = st.selectbox(
+                        "Ordenar por",
+                        ord_keys,
+                        key="tab1_ord_col",
+                        format_func=lambda x: x.split(" (")[0],
+                    )
+                with c_ord2:
+                    direcao = st.selectbox(
+                        "Ordem",
+                        dir_opcoes,
+                        key="tab1_ord_dir",
+                        format_func=lambda x: x.split(" (")[0],
+                    )
+                with c_ord3:
+                    max_linhas = st.number_input("Exibir", min_value=0, max_value=1000, step=10, key="tab1_max_linhas")
+
+                st.query_params["ord"] = col_escolhida
+                st.query_params["dir"] = direcao
+                st.query_params["maxl"] = str(int(max_linhas))
+                if busca_tabela and busca_tabela.strip():
+                    st.query_params["q"] = busca_tabela.strip()
+                elif "q" in st.query_params:
+                    del st.query_params["q"]
+
+                lista_tab = resultados_tab
+                if busca_tabela and busca_tabela.strip():
+                    termo = busca_tabela.strip().upper()
+                    lista_tab = [r for r in resultados_tab if termo in r["ticker"] or termo in r["nome"].upper()]
+
+                chave_ord = opcoes_ordenacao[col_escolhida]
+                reverso = direcao.startswith("Decrescente")
+                resultados_ordenados = sort_resultados(lista_tab, chave_ord, reverso)
+                exibir = resultados_ordenados if max_linhas == 0 else resultados_ordenados[:int(max_linhas)]
+
+                c_ft_cnt, c_ft_limp = st.columns([3.0, 1.2], vertical_alignment="center")
+                with c_ft_cnt:
+                    st.markdown(f"<div style='font-size:13px; opacity:0.75;'>{len(exibir)} de {len(lista_tab)} ativos</div>", unsafe_allow_html=True)
+                with c_ft_limp:
+                    st.markdown("<span class='painel-link-host' style='display:none;'></span>", unsafe_allow_html=True)
+                    if st.button("Limpar filtros ↺", key="btn_limpar_filtros_tab1"):
+                        st.session_state["tab1_busca_reset"] = st.session_state.get("tab1_busca_reset", 0) + 1
+                        st.session_state["tab1_filtro_ver_tab"] = []
+                        st.session_state["tab1_filtro_ver_rank"] = []
+                        st.session_state["tab1_filtro_veredito_val"] = []
+                        st.session_state["tab1_ord_col"] = ord_keys[0]
+                        st.session_state["tab1_ord_dir"] = dir_opcoes[0]
+                        st.session_state["tab1_max_linhas"] = 50
+                        st.query_params["ord"] = ord_keys[0]
+                        st.query_params["dir"] = dir_opcoes[0]
+                        st.query_params["maxl"] = "50"
+                        for qp_clr in ("q", "ver"):
+                            if qp_clr in st.query_params:
+                                del st.query_params[qp_clr]
+                        st.rerun()
 
             falt_i10_tab = tuple(r["ticker"] for r in exibir if r["ticker"] not in dados_i10)
             mapa_res_tab = {r["ticker"]: r for r in resultados_tab}
@@ -6552,7 +6639,6 @@ with tab1:
                         exibir_upd.append(r_ex)
                 exibir = exibir_upd
 
-            st.caption(f"Mostrando **{len(exibir)}** de **{len(lista_tab)}** ativos.")
 
             if not exibir:
                 st.warning("Nenhum ativo corresponde à busca digitada na tabela.")

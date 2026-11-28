@@ -3512,89 +3512,7 @@ def render_grafico_e_tabela_ativo(
             toggle_favorito(ticker)
             st.rerun(scope="app")
 
-    if base_ativo and "veredito" in base_ativo:
-        pos_r = base_ativo.get("pos_ranking", "-")
-        cot_r = float(base_ativo.get("cotacao") or 0.0)
-        score_at_r = base_ativo.get("score_ativo", base_ativo.get(modo_score_chave, base_ativo.get("score_geral", 0.0)))
-        score_lp_r = base_ativo.get("score_lp", 0.0)
-        score_cp_r = base_ativo.get("score_cp", 0.0)
-        news_sc_r = float(base_ativo.get("news_score") or 0.0)
-        news_res_r = base_ativo.get("news_resumo", "⚪ Neutro")
-        veredito_r = base_ativo.get("veredito", "🟡 Regular (Neutro)")
-        ifr_r = base_ativo.get("ifr_14")
-        dist_200_r = base_ativo.get("dist_mm200_pct")
-        dist_52_r = base_ativo.get("dist_max_52s_pct")
-        just_r = gerar_justificativa_detalhada(base_ativo, modo_score_chave)
-        ifr_txt_r = fmt_num(ifr_r, 1) if ifr_r is not None else "—"
-        d200_txt_r = f"{dist_200_r:+.1f}%" if dist_200_r is not None else "—"
-        d52_txt_r = f"{dist_52_r:+.1f}%" if dist_52_r is not None else "—"
-
-        pl_r = base_ativo.get("pl")
-        pvp_r = base_ativo.get("pvp")
-        roe_r = base_ativo.get("roe")
-        dy_r = base_ativo.get("dy_12m")
-        graham_r = base_ativo.get("graham")
-        bazin_r = base_ativo.get("pt_bazin")
-
-        pl_txt_r = fmt_num(pl_r) if pl_r is not None else "—"
-        pvp_txt_r = fmt_num(pvp_r) if pvp_r is not None else "—"
-        roe_txt_r = f"{fmt_num(roe_r, 1)}%" if roe_r is not None else "—"
-        dy_txt_r = f"{fmt_num(dy_r, 1)}%" if dy_r is not None else "—"
-        gr_txt_r = f"R$ {fmt_num(graham_r)}" if (graham_r and graham_r > 0) else "—"
-        bz_txt_r = f"R$ {fmt_num(bazin_r)}" if (bazin_r and bazin_r > 0) else "—"
-
-        with st.container(border=True):
-            st.markdown(
-                f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
-                f"Cotação: **R$ {fmt_num(cot_r)}** | "
-                f"Score Ativo: **{score_at_r}/100** "
-                f"(LP: **{score_lp_r}** | CP: **{score_cp_r}** | News: **{news_sc_r:+.1f}**) | {veredito_r}"
-            )
-            st.markdown(
-                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; align-items:stretch; margin:8px 0 10px 0;'>"
-                f"<div title='Score de Longo Prazo (0 a 100): avalia Valuation com trava de confiança, Rentabilidade, Saúde Financeira e Notícias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
-                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>🏛️ Longo Prazo (LP) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_lp_r}/100</div>"
-                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Fundamentos &amp; Valuation</div></div>"
-                f"<div title='Score de Curto Prazo (0 a 100): avalia ponto técnico (IFR), Médias Móveis, Volume e Notícias recentes.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
-                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>⚡ Curto Prazo (CP) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_cp_r}/100</div>"
-                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Timing &amp; Catalisadores</div></div>"
-                f"<div title='News Score (-10 a +10): sentimento das manchetes dos últimos 30 dias com peso dobrado nos últimos 7 dias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
-                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📰 Notícias (30d) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{news_sc_r:+.1f}</div>"
-                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>{html.escape(news_res_r)}</div></div>"
-                f"<div title='IFR 14 dias (RSI): mede força compradora/vendedora (0 a 100). Entre 30 e 48 indica bom ponto de entrada; acima de 70 indica sobrecompra.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
-                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📊 IFR (14d) ⓘ</div>"
-                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{ifr_txt_r}</div>"
-                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>"
-                f"<span title='Distância da Média Móvel de 200 dias: indica tendência principal de longo prazo.'>MM200: {d200_txt_r}</span> | "
-                f"<span title='Distância da Máxima de 52 semanas: quanto o preço atual está abaixo do topo de 1 ano.'>52s: {d52_txt_r}</span>"
-                f"</div></div>"
-                "</div>"
-                "<div style='display:flex; flex-wrap:wrap; gap:14px; font-size:13px; padding:6px 10px; background:rgba(128,128,128,0.07); border-radius:6px; margin-bottom:8px;'>"
-                f"<span title='Preço sobre Lucro: quantos anos o lucro atual levaria para pagar o investimento.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/L:</strong> {pl_txt_r}</span>"
-                f"<span title='Preço sobre Valor Patrimonial: compara preço de tela com o patrimônio contábil. Abaixo de 1,0 indica desconto.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/VP:</strong> {pvp_txt_r}</span>"
-                f"<span title='Retorno sobre Patrimônio Líquido: eficiência da empresa em gerar lucro com capital próprio.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>ROE:</strong> {roe_txt_r}</span>"
-                f"<span title='Dividend Yield (12m): percentual pago em dividendos e JCP sobre a cotação atual.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>DY 12m:</strong> {dy_txt_r}</span>"
-                f"<span title='Preço-Teto Bazin (12m): DPA de 12 meses dividido por 6%, referência para renda passiva.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Bazin:</strong> {bz_txt_r}</span>"
-                f"<span title='Preço Justo de Benjamin Graham: valor intrínseco estimado por √(22,5 × LPA × VPA).' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Graham:</strong> {gr_txt_r}</span>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(fmt_faixa_preco_html(base_ativo), unsafe_allow_html=True)
-            partes_just_rx = just_r.split("\n\n", 1)
-            with st.container(border=True):
-                st.markdown(f"<div style='padding:2px 2px 4px 2px;'></div>", unsafe_allow_html=True)
-                st.markdown(partes_just_rx[0])
-                if len(partes_just_rx) > 1 and partes_just_rx[1].strip():
-                    st.markdown(
-                        "<div style='margin:10px 0 8px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
-                        unsafe_allow_html=True,
-                    )
-                    st.markdown(partes_just_rx[1], unsafe_allow_html=True)
-        st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-
+    serie = pd.Series(dtype=float)
     opcoes_per_i10 = ["1 D", "7 D", "30 D", "6 M", "YTD", "1 A", "5 A", "10 A", "15 A"]
     k_candles = f"{key_prefix}_candles_i10_{ticker}"
     k_marcos = f"{key_prefix}_marcos_i10_{ticker}"
@@ -3609,7 +3527,7 @@ def render_grafico_e_tabela_ativo(
     if k_provs not in st.session_state:
         st.session_state[k_provs] = False
 
-    with st.container(border=True):
+    with st.expander(f"📈 Cotação {ticker} & Simulador de Rentabilidade — clique para minimizar/maximizar", expanded=True):
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
             st.markdown(f"**📈 COTAÇÃO {ticker}**")
@@ -4045,207 +3963,364 @@ def render_grafico_e_tabela_ativo(
             st.caption(f"💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover. · {fonte_graf_lbl}")
 
         serie_selic_bcb, _ = buscar_historico_selic_bcb()
-        with st.container(border=True):
-            s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
-            with s1:
-                valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
-            with s2:
-                janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
+        st.markdown("<div style='margin:10px 0 12px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
+        s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
+        with s1:
+            valor_inv = st.number_input("Se você tivesse investido (R$):", min_value=10.0, value=1000.0, step=100.0, key=f"{key_prefix}_val_{ticker}")
+        with s2:
+            janela_sim = st.selectbox("Há:", ["1 mês", "6 meses", "1 ano", "5 anos", "10 anos", "15 anos"], index=2, key=f"{key_prefix}_jan_{ticker}")
 
-            mapa_jan_per = {
-                "1 mês": "30 D", "6 meses": "6 M", "1 ano": "1 A",
-                "5 anos": "5 A", "10 anos": "10 A", "15 anos": "15 A",
-            }
-            serie_sim = buscar_serie_investidor10_chart(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
-            if serie_sim.empty:
-                serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
-            if serie_sim.empty:
-                serie_max_fb = buscar_serie_max_ajustada(ticker)
-                if not serie_max_fb.empty:
-                    deltas = {
-                        "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
-                        "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
-                        "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
-                    }
-                    ref_fb = max(serie_max_fb.index.max().normalize(), pd.Timestamp(datetime.now(BRT).date()))
-                    serie_sim = serie_max_fb[serie_max_fb.index.normalize() >= (ref_fb - deltas[janela_sim])]
+        mapa_jan_per = {
+            "1 mês": "30 D", "6 meses": "6 M", "1 ano": "1 A",
+            "5 anos": "5 A", "10 anos": "10 A", "15 anos": "15 A",
+        }
+        serie_sim = buscar_serie_investidor10_chart(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+        if serie_sim.empty:
+            serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+        if serie_sim.empty:
+            serie_max_fb = buscar_serie_max_ajustada(ticker)
+            if not serie_max_fb.empty:
+                deltas = {
+                    "1 mês": pd.DateOffset(months=1), "6 meses": pd.DateOffset(months=6),
+                    "1 ano": pd.DateOffset(years=1), "5 anos": pd.DateOffset(years=5),
+                    "10 anos": pd.DateOffset(years=10), "15 anos": pd.DateOffset(years=15),
+                }
+                ref_fb = max(serie_max_fb.index.max().normalize(), pd.Timestamp(datetime.now(BRT).date()))
+                serie_sim = serie_max_fb[serie_max_fb.index.normalize() >= (ref_fb - deltas[janela_sim])]
 
-            if not serie_sim.empty:
-                dt_base_ts = serie_sim.index[0].normalize()
-                dt_fim_ts = serie_sim.index[-1].normalize()
-                dias_corridos_sim = max(1, int((dt_fim_ts - dt_base_ts).days))
-                data_efetiva = dt_base_ts.strftime("%d/%m/%Y")
-                data_final_str = dt_fim_ts.strftime("%d/%m/%Y")
+        if not serie_sim.empty:
+            dt_base_ts = serie_sim.index[0].normalize()
+            dt_fim_ts = serie_sim.index[-1].normalize()
+            dias_corridos_sim = max(1, int((dt_fim_ts - dt_base_ts).days))
+            data_efetiva = dt_base_ts.strftime("%d/%m/%Y")
+            data_final_str = dt_fim_ts.strftime("%d/%m/%Y")
 
-                p_base = float(serie_sim.iloc[0])
-                p_hoje = float(serie_sim.iloc[-1])
-                valor_acao_bruto = valor_inv * (p_hoje / p_base) if p_base > 0 else valor_inv
-                ganho_acao = valor_acao_bruto - valor_inv
-                if ganho_acao > 0.0 and valor_acao_bruto > 20_000.0:
-                    ir_acao = ganho_acao * 0.15
-                    valor_acao_liq = valor_acao_bruto - ir_acao
-                    nota_ir_acao = f"IR (15% s/ ganho): -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês) · Reinvestindo dividendos"
-                elif ganho_acao > 0.0:
-                    ir_acao = 0.0
-                    valor_acao_liq = valor_acao_bruto
-                    nota_ir_acao = "IR: Isento (venda ≤ R$ 20k/mês) · Reinvestindo dividendos"
+            p_base = float(serie_sim.iloc[0])
+            p_hoje = float(serie_sim.iloc[-1])
+            valor_acao_bruto = valor_inv * (p_hoje / p_base) if p_base > 0 else valor_inv
+            ganho_acao = valor_acao_bruto - valor_inv
+            if ganho_acao > 0.0 and valor_acao_bruto > 20_000.0:
+                ir_acao = ganho_acao * 0.15
+                valor_acao_liq = valor_acao_bruto - ir_acao
+                nota_ir_acao = f"IR (15% s/ ganho): -R$ {fmt_num(ir_acao)} (venda &gt; R$ 20k/mês) · Reinvestindo dividendos"
+            elif ganho_acao > 0.0:
+                ir_acao = 0.0
+                valor_acao_liq = valor_acao_bruto
+                nota_ir_acao = "IR: Isento (venda ≤ R$ 20k/mês) · Reinvestindo dividendos"
+            else:
+                ir_acao = 0.0
+                valor_acao_liq = valor_acao_bruto
+                nota_ir_acao = "IR: Isento (sem lucro tributável) · Reinvestindo dividendos"
+
+            ret_acao_pct = ((valor_acao_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+            ret_acao_bruto_pct = ((valor_acao_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+            s_acao_liq = f"{'+' if ret_acao_pct >= 0 else ''}{fmt_num(ret_acao_pct, 2)}%"
+            s_acao_bruto = f"{'+' if ret_acao_bruto_pct >= 0 else ''}{fmt_num(ret_acao_bruto_pct, 2)}%"
+            cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
+
+            per_sim_key = mapa_jan_per[janela_sim]
+            serie_sim_simples = buscar_serie_investidor10_chart(ticker, per_sim_key, False, cot_live=cot_ref_live)
+            if serie_sim_simples.empty:
+                serie_sim_simples = buscar_historico_preco(ticker, per_sim_key, False, cot_live=cot_ref_live)
+            if not serie_sim_simples.empty:
+                sub_ss = serie_sim_simples[serie_sim_simples.index.normalize() >= dt_base_ts]
+                if not sub_ss.empty:
+                    serie_sim_simples = sub_ss
+
+            divs_sim_s = buscar_dividendos_ativo(ticker)
+            divs_win_sim = (
+                divs_sim_s[(divs_sim_s.index.normalize() > dt_base_ts) & (divs_sim_s.index.normalize() <= dt_fim_ts)]
+                if not divs_sim_s.empty else pd.Series(dtype=float)
+            )
+
+            bloco_sem_reinv_html = ""
+            if not serie_sim_simples.empty and float(serie_sim_simples.iloc[0]) > 0:
+                p_base_s = float(serie_sim_simples.iloc[0])
+                p_hoje_s = float(serie_sim_simples.iloc[-1])
+                qtd_acoes_sim = valor_inv / p_base_s
+                valor_so_acao = qtd_acoes_sim * p_hoje_s
+                ret_so_acao_pct = ((valor_so_acao / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                divs_caixa_sim = qtd_acoes_sim * float(divs_win_sim.sum()) if not divs_win_sim.empty else 0.0
+                valor_sem_reinv_bruto = valor_so_acao + divs_caixa_sim
+                ganho_so_acao = valor_so_acao - valor_inv
+                if ganho_so_acao > 0.0 and valor_so_acao > 20_000.0:
+                    valor_sem_reinv_liq = valor_sem_reinv_bruto - (ganho_so_acao * 0.15)
                 else:
-                    ir_acao = 0.0
-                    valor_acao_liq = valor_acao_bruto
-                    nota_ir_acao = "IR: Isento (sem lucro tributável) · Reinvestindo dividendos"
-
-                ret_acao_pct = ((valor_acao_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                ret_acao_bruto_pct = ((valor_acao_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                s_acao_liq = f"{'+' if ret_acao_pct >= 0 else ''}{fmt_num(ret_acao_pct, 2)}%"
-                s_acao_bruto = f"{'+' if ret_acao_bruto_pct >= 0 else ''}{fmt_num(ret_acao_bruto_pct, 2)}%"
-                cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
-
-                per_sim_key = mapa_jan_per[janela_sim]
-                serie_sim_simples = buscar_serie_investidor10_chart(ticker, per_sim_key, False, cot_live=cot_ref_live)
-                if serie_sim_simples.empty:
-                    serie_sim_simples = buscar_historico_preco(ticker, per_sim_key, False, cot_live=cot_ref_live)
-                if not serie_sim_simples.empty:
-                    sub_ss = serie_sim_simples[serie_sim_simples.index.normalize() >= dt_base_ts]
-                    if not sub_ss.empty:
-                        serie_sim_simples = sub_ss
-
-                divs_sim_s = buscar_dividendos_ativo(ticker)
-                divs_win_sim = (
-                    divs_sim_s[(divs_sim_s.index.normalize() > dt_base_ts) & (divs_sim_s.index.normalize() <= dt_fim_ts)]
-                    if not divs_sim_s.empty else pd.Series(dtype=float)
+                    valor_sem_reinv_liq = valor_sem_reinv_bruto
+                ret_sem_reinv_pct = ((valor_sem_reinv_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                s_so_acao = f"{'+' if ret_so_acao_pct >= 0 else ''}{fmt_num(ret_so_acao_pct, 2)}%"
+                s_sem_reinv = f"{'+' if ret_sem_reinv_pct >= 0 else ''}{fmt_num(ret_sem_reinv_pct, 2)}%"
+                cor_sem_reinv = "#22c55e" if valor_sem_reinv_liq >= valor_inv else "#ef4444"
+                bloco_sem_reinv_html = (
+                    "<div style='font-size:12px; opacity:0.92; margin-top:4px; padding-top:4px; border-top:1px dashed rgba(128,128,128,0.28); line-height:1.4;'>"
+                    f"Sem reinvestir div.: <strong style='color:{cor_sem_reinv};'>R$ {fmt_num(valor_sem_reinv_liq)} ({s_sem_reinv})</strong><br>"
+                    f"<span style='font-size:11px; opacity:0.84;'>Só ação: <strong>R$ {fmt_num(valor_so_acao)}</strong> ({s_so_acao}) + Divs em caixa: <strong>R$ {fmt_num(divs_caixa_sim)}</strong></span>"
+                    "</div>"
                 )
 
-                bloco_sem_reinv_html = ""
-                if not serie_sim_simples.empty and float(serie_sim_simples.iloc[0]) > 0:
-                    p_base_s = float(serie_sim_simples.iloc[0])
-                    p_hoje_s = float(serie_sim_simples.iloc[-1])
-                    qtd_acoes_sim = valor_inv / p_base_s
-                    valor_so_acao = qtd_acoes_sim * p_hoje_s
-                    ret_so_acao_pct = ((valor_so_acao / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                    divs_caixa_sim = qtd_acoes_sim * float(divs_win_sim.sum()) if not divs_win_sim.empty else 0.0
-                    valor_sem_reinv_bruto = valor_so_acao + divs_caixa_sim
-                    ganho_so_acao = valor_so_acao - valor_inv
-                    if ganho_so_acao > 0.0 and valor_so_acao > 20_000.0:
-                        valor_sem_reinv_liq = valor_sem_reinv_bruto - (ganho_so_acao * 0.15)
-                    else:
-                        valor_sem_reinv_liq = valor_sem_reinv_bruto
-                    ret_sem_reinv_pct = ((valor_sem_reinv_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                    s_so_acao = f"{'+' if ret_so_acao_pct >= 0 else ''}{fmt_num(ret_so_acao_pct, 2)}%"
-                    s_sem_reinv = f"{'+' if ret_sem_reinv_pct >= 0 else ''}{fmt_num(ret_sem_reinv_pct, 2)}%"
-                    cor_sem_reinv = "#22c55e" if valor_sem_reinv_liq >= valor_inv else "#ef4444"
-                    bloco_sem_reinv_html = (
-                        "<div style='font-size:12px; opacity:0.92; margin-top:4px; padding-top:4px; border-top:1px dashed rgba(128,128,128,0.28); line-height:1.4;'>"
-                        f"Sem reinvestir div.: <strong style='color:{cor_sem_reinv};'>R$ {fmt_num(valor_sem_reinv_liq)} ({s_sem_reinv})</strong><br>"
-                        f"<span style='font-size:11px; opacity:0.84;'>Só ação: <strong>R$ {fmt_num(valor_so_acao)}</strong> ({s_so_acao}) + Divs em caixa: <strong>R$ {fmt_num(divs_caixa_sim)}</strong></span>"
-                        "</div>"
-                    )
+            valor_selic_bruto = calcular_selic_calculadora_cidadao(data_efetiva, data_final_str, valor_inv)
+            if valor_selic_bruto is None and not serie_selic_bcb.empty:
+                # Convenção oficial da Calculadora do Cidadão: data inicial inclusive, data final exclusive
+                sub_selic = serie_selic_bcb[(serie_selic_bcb.index >= dt_base_ts) & (serie_selic_bcb.index < dt_fim_ts)]
+                fator_selic = float((1.0 + (sub_selic / 100.0)).prod()) if not sub_selic.empty else 1.0
+                valor_selic_bruto = valor_inv * fator_selic
 
-                valor_selic_bruto = calcular_selic_calculadora_cidadao(data_efetiva, data_final_str, valor_inv)
-                if valor_selic_bruto is None and not serie_selic_bcb.empty:
-                    # Convenção oficial da Calculadora do Cidadão: data inicial inclusive, data final exclusive
-                    sub_selic = serie_selic_bcb[(serie_selic_bcb.index >= dt_base_ts) & (serie_selic_bcb.index < dt_fim_ts)]
-                    fator_selic = float((1.0 + (sub_selic / 100.0)).prod()) if not sub_selic.empty else 1.0
-                    valor_selic_bruto = valor_inv * fator_selic
+            if valor_selic_bruto is not None:
+                ganho_selic_bruto = max(0.0, valor_selic_bruto - valor_inv)
+                iof_selic, ir_selic, aliq_iof_selic, aliq_ir_selic, imp_selic = _calc_impostos_renda_fixa(ganho_selic_bruto, dias_corridos_sim)
+                excedente_b3 = max(0.0, ((valor_inv + valor_selic_bruto) / 2.0) - 10_000.0)
+                custodia_b3 = excedente_b3 * (((1.0 + 0.002) ** (dias_corridos_sim / 365.0)) - 1.0) if excedente_b3 > 0.0 else 0.0
+                valor_selic_liq = max(0.0, valor_selic_bruto - imp_selic - custodia_b3)
+                ret_selic_pct = ((valor_selic_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                ret_selic_bruto_pct = ((valor_selic_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
+                s_selic_liq = f"{'+' if ret_selic_pct >= 0 else ''}{fmt_num(ret_selic_pct, 2)}%"
+                s_selic_bruto = f"{'+' if ret_selic_bruto_pct >= 0 else ''}{fmt_num(ret_selic_bruto_pct, 2)}%"
 
-                if valor_selic_bruto is not None:
-                    ganho_selic_bruto = max(0.0, valor_selic_bruto - valor_inv)
-                    iof_selic, ir_selic, aliq_iof_selic, aliq_ir_selic, imp_selic = _calc_impostos_renda_fixa(ganho_selic_bruto, dias_corridos_sim)
-                    excedente_b3 = max(0.0, ((valor_inv + valor_selic_bruto) / 2.0) - 10_000.0)
-                    custodia_b3 = excedente_b3 * (((1.0 + 0.002) ** (dias_corridos_sim / 365.0)) - 1.0) if excedente_b3 > 0.0 else 0.0
-                    valor_selic_liq = max(0.0, valor_selic_bruto - imp_selic - custodia_b3)
-                    ret_selic_pct = ((valor_selic_liq / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                    ret_selic_bruto_pct = ((valor_selic_bruto / valor_inv) - 1.0) * 100.0 if valor_inv > 0 else 0.0
-                    s_selic_liq = f"{'+' if ret_selic_pct >= 0 else ''}{fmt_num(ret_selic_pct, 2)}%"
-                    s_selic_bruto = f"{'+' if ret_selic_bruto_pct >= 0 else ''}{fmt_num(ret_selic_bruto_pct, 2)}%"
-
-                    partes_enc = []
-                    if iof_selic > 0.0:
-                        partes_enc.append(f"IOF ({fmt_num(aliq_iof_selic, 0)}%): -R$ {fmt_num(iof_selic)}")
-                    partes_enc.append(f"IR ({fmt_num(aliq_ir_selic, 1)}%): -R$ {fmt_num(ir_selic)}")
-                    if custodia_b3 > 0.0:
-                        partes_enc.append(f"Custódia B3: -R$ {fmt_num(custodia_b3)}")
-                    else:
-                        partes_enc.append("Custódia B3: Isento (≤ R$ 10k)")
-                    txt_imp_selic = " · ".join(partes_enc)
-
-                    card_selic_html = (
-                        "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
-                        "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                        f"🏛️ No Tesouro Selic ({data_efetiva} → {data_final_str})"
-                        "</div>"
-                        "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
-                        f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_selic_liq)}</strong>"
-                        f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({s_selic_liq} líq.)</span>"
-                        "</div>"
-                        "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
-                        f"Calc. Cidadão (Bruto): R$ {fmt_num(valor_selic_bruto)} ({s_selic_bruto})"
-                        "</div>"
-                        f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_selic}</div>"
-                        "</div>"
-                    )
-                    diff_sim = valor_acao_liq - valor_selic_liq
-                    diff_pp = ret_acao_pct - ret_selic_pct
-                    s_diff_pp = f"{'+' if diff_pp >= 0 else ''}{fmt_num(diff_pp, 2)} p.p."
-                    if diff_sim >= 0.0:
-                        resumo_sim_html = (
-                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
-                            f"border-left:3px solid #22c55e; font-size:12.5px;'>"
-                            f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({s_diff_pp}) a mais que o Tesouro Selic (Calculadora do Cidadão) "
-                            f"(já descontando impostos e custódia nos dois casos)."
-                            f"</div>"
-                        )
-                    else:
-                        resumo_sim_html = (
-                            f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
-                            f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
-                            f"🏛️ O <strong>Tesouro Selic (Calculadora do Cidadão)</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({fmt_num(abs(diff_pp), 2)} p.p.) a mais que {ticker} no período "
-                            f"(já descontando impostos e custódia nos dois casos)."
-                            f"</div>"
-                        )
+                partes_enc = []
+                if iof_selic > 0.0:
+                    partes_enc.append(f"IOF ({fmt_num(aliq_iof_selic, 0)}%): -R$ {fmt_num(iof_selic)}")
+                partes_enc.append(f"IR ({fmt_num(aliq_ir_selic, 1)}%): -R$ {fmt_num(ir_selic)}")
+                if custodia_b3 > 0.0:
+                    partes_enc.append(f"Custódia B3: -R$ {fmt_num(custodia_b3)}")
                 else:
-                    card_selic_html = (
-                        "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
-                        "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
-                        "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏛️ No Tesouro Selic</div>"
-                        "<div style='font-size:13px; opacity:0.75;'>Indisponível no momento</div>"
-                        "<div style='font-size:11px; opacity:0.7;'>API do Banco Central temporariamente indisponível.</div>"
-                        "</div>"
-                    )
-                    resumo_sim_html = ""
+                    partes_enc.append("Custódia B3: Isento (≤ R$ 10k)")
+                txt_imp_selic = " · ".join(partes_enc)
 
-                st.markdown(
-                    "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; align-items:stretch; margin-top:6px;'>"
-                    "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                card_selic_html = (
+                    "<div style='background:rgba(245,158,11,0.10); border:1px solid rgba(245,158,11,0.35); border-radius:8px; padding:12px 14px; "
                     "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
                     "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
-                    f"📈 Em {ticker} ({data_efetiva} → {data_final_str})"
+                    f"🏛️ No Tesouro Selic ({data_efetiva} → {data_final_str})"
                     "</div>"
                     "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
-                    f"<strong style='color:{cor_sim}; font-size:21px;'>R$ {fmt_num(valor_acao_liq)}</strong>"
-                    f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({s_acao_liq} líq.)</span>"
+                    f"<strong style='color:#fbbf24; font-size:21px;'>R$ {fmt_num(valor_selic_liq)}</strong>"
+                    f"<span style='font-size:13px; font-weight:600; color:#fbbf24;'>({s_selic_liq} líq.)</span>"
                     "</div>"
                     "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
-                    f"Bruto (reinvestindo div.): R$ {fmt_num(valor_acao_bruto)} ({s_acao_bruto})"
+                    f"Calc. Cidadão (Bruto): R$ {fmt_num(valor_selic_bruto)} ({s_selic_bruto})"
                     "</div>"
-                    f"{bloco_sem_reinv_html}"
-                    f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35; margin-top:4px;'>{nota_ir_acao}</div>"
+                    f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35;'>{txt_imp_selic}</div>"
                     "</div>"
-                    f"{card_selic_html}"
+                )
+                diff_sim = valor_acao_liq - valor_selic_liq
+                diff_pp = ret_acao_pct - ret_selic_pct
+                s_diff_pp = f"{'+' if diff_pp >= 0 else ''}{fmt_num(diff_pp, 2)} p.p."
+                if diff_sim >= 0.0:
+                    resumo_sim_html = (
+                        f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(34,197,94,0.12); "
+                        f"border-left:3px solid #22c55e; font-size:12.5px;'>"
+                        f"🏆 <strong>{ticker}</strong> entregou <strong>R$ {fmt_num(diff_sim)}</strong> ({s_diff_pp}) a mais que o Tesouro Selic (Calculadora do Cidadão) "
+                        f"(já descontando impostos e custódia nos dois casos)."
+                        f"</div>"
+                    )
+                else:
+                    resumo_sim_html = (
+                        f"<div style='margin-top:8px; padding:6px 10px; border-radius:6px; background:rgba(245,158,11,0.12); "
+                        f"border-left:3px solid #f59e0b; font-size:12.5px;'>"
+                        f"🏛️ O <strong>Tesouro Selic (Calculadora do Cidadão)</strong> entregou <strong>R$ {fmt_num(abs(diff_sim))}</strong> ({fmt_num(abs(diff_pp), 2)} p.p.) a mais que {ticker} no período "
+                        f"(já descontando impostos e custódia nos dois casos)."
+                        f"</div>"
+                    )
+            else:
+                card_selic_html = (
+                    "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                    "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
+                    "<div style='font-size:12px; font-weight:600; opacity:0.9;'>🏛️ No Tesouro Selic</div>"
+                    "<div style='font-size:13px; opacity:0.75;'>Indisponível no momento</div>"
+                    "<div style='font-size:11px; opacity:0.7;'>API do Banco Central temporariamente indisponível.</div>"
                     "</div>"
-                    f"{resumo_sim_html}",
-                    unsafe_allow_html=True,
+                )
+                resumo_sim_html = ""
+
+            st.markdown(
+                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; align-items:stretch; margin-top:6px;'>"
+                "<div style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.28); border-radius:8px; padding:12px 14px; "
+                "display:flex; flex-direction:column; justify-content:space-between; align-items:center; text-align:center; min-height:126px;'>"
+                "<div style='font-size:12px; font-weight:600; opacity:0.9; min-height:20px; display:flex; align-items:center; justify-content:center;'>"
+                f"📈 Em {ticker} ({data_efetiva} → {data_final_str})"
+                "</div>"
+                "<div style='min-height:34px; display:flex; align-items:baseline; justify-content:center; gap:8px; flex-wrap:wrap; margin:4px 0;'>"
+                f"<strong style='color:{cor_sim}; font-size:21px;'>R$ {fmt_num(valor_acao_liq)}</strong>"
+                f"<span style='font-size:13px; font-weight:600; color:{cor_sim};'>({s_acao_liq} líq.)</span>"
+                "</div>"
+                "<div style='font-size:12px; font-weight:600; opacity:0.92; margin-bottom:3px;'>"
+                f"Bruto (reinvestindo div.): R$ {fmt_num(valor_acao_bruto)} ({s_acao_bruto})"
+                "</div>"
+                f"{bloco_sem_reinv_html}"
+                f"<div style='font-size:11px; opacity:0.80; min-height:24px; display:flex; align-items:center; justify-content:center; line-height:1.35; margin-top:4px;'>{nota_ir_acao}</div>"
+                "</div>"
+                f"{card_selic_html}"
+                "</div>"
+                f"{resumo_sim_html}",
+                unsafe_allow_html=True,
+            )
+
+    # --- BLOCO 2: HISTÓRICO FUNDAMENTALISTA ---
+    with st.expander(f"📑 Histórico Fundamentalista — {ticker} — clique para minimizar/maximizar", expanded=True):
+        with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
+            hist_fund, eh_banco, fin_curr, fonte_anual = buscar_historico_fundamentalista(
+                ticker,
+                cot_live=base_ativo.get("cotacao") if base_ativo else None,
+                pl_live=base_ativo.get("pl") if base_ativo else None,
+                pvp_live=base_ativo.get("pvp") if base_ativo else None,
+                vpa_live=base_ativo.get("vpa") if base_ativo else None,
+            )
+        if not hist_fund:
+            st.info("Histórico anual detalhado indisponível para este ativo.")
+        else:
+            rows_h = []
+            media_info_txt = ""
+            for h in hist_fund:
+                pl_s = fmt_num(h["pl"]) if h["pl"] is not None else "—"
+                pvp_s = fmt_num(h["pvp"]) if h["pvp"] is not None else "—"
+                vpa_s = fmt_num(h["vpa"]) if h["vpa"] is not None else "—"
+                ml_s = f"{fmt_num(h['marg_liq'])}%" if h["marg_liq"] is not None else "—"
+                peb_s = fmt_num(h["pebitda"]) if h["pebitda"] is not None else "—"
+                if h.get("is_atual"):
+                    estilo_row = "background-color:rgba(96,165,250,0.14); font-weight:700;"
+                elif h.get("is_media"):
+                    estilo_row = "background-color:rgba(250,204,21,0.12); font-weight:700; border-top:1px dashed rgba(250,204,21,0.45);"
+                    media_info_txt = h.get("media_info", "")
+                else:
+                    estilo_row = ""
+                rows_h.append(
+                    f"<tr style='{estilo_row}'>"
+                    f"<td style='font-weight:700;'>{html.escape(h['ano'])}</td>"
+                    f"<td>{pl_s}</td><td>{pvp_s}</td><td>{vpa_s}</td>"
+                    f"<td>{fmt_bi_mi(h['div_liq'])}</td><td>{ml_s}</td>"
+                    f"<td>{fmt_bi_mi(h['ebitda'])}</td><td>{peb_s}</td>"
+                    f"<td>{fmt_bi_mi(h['val_merc'])}</td><td>{fmt_bi_mi(h['lliq'])}</td>"
+                    f"<td>{fmt_bi_mi(h['lbr'])}</td><td>{fmt_bi_mi(h['rec'])}</td>"
+                    "</tr>"
                 )
 
-    # --- SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
+            css_h = (
+                "<style>"
+                ".hist-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:12px 0;}"
+                ".hist-table{width:100%;border-collapse:collapse;font-size:13px;text-align:center;}"
+                ".hist-table th{background-color:rgba(128,128,128,0.18);padding:10px 8px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;white-space:nowrap;}"
+                ".hist-table td{padding:9px 8px;border-bottom:1px solid rgba(128,128,128,0.2);white-space:nowrap;}"
+                ".hist-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
+                "</style>"
+            )
+            html_h = (
+                f"{css_h}<div class='hist-wrap'><table class='hist-table'><thead><tr>"
+                "<th title='Ano do exercício fiscal, ÚLT. 12M (acumulado 12 meses), MÉDIA histórica e ATUAL'>Ano</th>"
+                "<th title='Preço sobre Lucro: quantos anos o lucro do período levaria para pagar o valor de mercado'>P/L</th>"
+                "<th title='Preço sobre Valor Patrimonial: valor de mercado dividido pelo patrimônio líquido'>P/VP</th>"
+                "<th title='Valor Patrimonial por Ação: patrimônio líquido dividido pelo número de ações'>VPA</th>"
+                "<th title='Dívida Líquida: empréstimos e financiamentos menos caixa e aplicações financeiras'>Dívida líquida</th>"
+                "<th title='Margem Líquida: percentual da receita líquida que vira lucro líquido'>Margem líquida</th>"
+                "<th title='EBITDA: geração de caixa operacional antes de juros, impostos, depreciação e amortização'>EBITDA</th>"
+                "<th title='Preço sobre EBITDA: valor de mercado dividido pela geração de caixa operacional'>P/EBITDA</th>"
+                "<th title='Valor de Mercado: cotação multiplicada pelo total de ações'>Valor de mercado</th>"
+                "<th title='Lucro Líquido atribuído aos controladores no período'>Lucro Líq.</th>"
+                "<th title='Lucro Bruto: receita líquida menos o custo dos bens ou serviços vendidos'>Lucro Br.</th>"
+                "<th title='Receita Líquida: faturamento total descontando impostos sobre vendas e devoluções'>Receita Líq.</th>"
+                f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
+            )
+            st.markdown(html_h, unsafe_allow_html=True)
+            if fonte_anual == "CVM":
+                nota_src = "Dados anuais oficiais da CVM (DFP/ITR) em R$, com VPA e Valor de mercado históricos ajustados por desdobramentos."
+            else:
+                nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
+                nota_src = f"VPA histórico ajustado por desdobramentos.{nota_fx}"
+            nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`)." if eh_banco else ""
+            st.caption(f"Nota: {nota_src}{media_info_txt}{nota_b}")
+
+    # --- BLOCO 3: SCORE, FAIXA DE PREÇO & DIAGNÓSTICO ---
+    if base_ativo and "veredito" in base_ativo:
+        pos_r = base_ativo.get("pos_ranking", "-")
+        cot_r = float(base_ativo.get("cotacao") or 0.0)
+        score_at_r = base_ativo.get("score_ativo", base_ativo.get(modo_score_chave, base_ativo.get("score_geral", 0.0)))
+        score_lp_r = base_ativo.get("score_lp", 0.0)
+        score_cp_r = base_ativo.get("score_cp", 0.0)
+        news_sc_r = float(base_ativo.get("news_score") or 0.0)
+        news_res_r = base_ativo.get("news_resumo", "⚪ Neutro")
+        veredito_r = base_ativo.get("veredito", "🟡 Regular (Neutro)")
+        ifr_r = base_ativo.get("ifr_14")
+        dist_200_r = base_ativo.get("dist_mm200_pct")
+        dist_52_r = base_ativo.get("dist_max_52s_pct")
+        just_r = gerar_justificativa_detalhada(base_ativo, modo_score_chave)
+        ifr_txt_r = fmt_num(ifr_r, 1) if ifr_r is not None else "—"
+        d200_txt_r = f"{dist_200_r:+.1f}%" if dist_200_r is not None else "—"
+        d52_txt_r = f"{dist_52_r:+.1f}%" if dist_52_r is not None else "—"
+
+        pl_r = base_ativo.get("pl")
+        pvp_r = base_ativo.get("pvp")
+        roe_r = base_ativo.get("roe")
+        dy_r = base_ativo.get("dy_12m")
+        graham_r = base_ativo.get("graham")
+        bazin_r = base_ativo.get("pt_bazin")
+
+        pl_txt_r = fmt_num(pl_r) if pl_r is not None else "—"
+        pvp_txt_r = fmt_num(pvp_r) if pvp_r is not None else "—"
+        roe_txt_r = f"{fmt_num(roe_r, 1)}%" if roe_r is not None else "—"
+        dy_txt_r = f"{fmt_num(dy_r, 1)}%" if dy_r is not None else "—"
+        gr_txt_r = f"R$ {fmt_num(graham_r)}" if (graham_r and graham_r > 0) else "—"
+        bz_txt_r = f"R$ {fmt_num(bazin_r)}" if (bazin_r and bazin_r > 0) else "—"
+
+        with st.expander(f"📊 Score, Faixa de Preço & Diagnóstico — {ticker} — clique para minimizar/maximizar", expanded=True):
+            st.markdown(
+                f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
+                f"Cotação: **R$ {fmt_num(cot_r)}** | "
+                f"Score Ativo: **{score_at_r}/100** "
+                f"(LP: **{score_lp_r}** | CP: **{score_cp_r}** | News: **{news_sc_r:+.1f}**) | {veredito_r}"
+            )
+            st.markdown(
+                "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:8px; align-items:stretch; margin:8px 0 10px 0;'>"
+                f"<div title='Score de Longo Prazo (0 a 100): avalia Valuation com trava de confiança, Rentabilidade, Saúde Financeira e Notícias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>🏛️ Longo Prazo (LP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_lp_r}/100</div>"
+                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Fundamentos &amp; Valuation</div></div>"
+                f"<div title='Score de Curto Prazo (0 a 100): avalia ponto técnico (IFR), Médias Móveis, Volume e Notícias recentes.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>⚡ Curto Prazo (CP) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{score_cp_r}/100</div>"
+                "<div style='font-size:11px; opacity:0.75; line-height:1.3;'>Timing &amp; Catalisadores</div></div>"
+                f"<div title='News Score (-10 a +10): sentimento das manchetes dos últimos 30 dias com peso dobrado nos últimos 7 dias.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📰 Notícias (30d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{news_sc_r:+.1f}</div>"
+                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>{html.escape(news_res_r)}</div></div>"
+                f"<div title='IFR 14 dias (RSI): mede força compradora/vendedora (0 a 100). Entre 30 e 48 indica bom ponto de entrada; acima de 70 indica sobrecompra.' style='background:rgba(128,128,128,0.10); border:1px solid rgba(128,128,128,0.25); border-radius:8px; padding:9px 11px; cursor:help; display:flex; flex-direction:column; justify-content:space-between; min-height:84px;'>"
+                f"<div style='font-size:12px; opacity:0.8; line-height:1.3;'>📊 IFR (14d) ⓘ</div>"
+                f"<div style='font-size:20px; font-weight:700; line-height:1.25; margin:2px 0;'>{ifr_txt_r}</div>"
+                f"<div style='font-size:11px; opacity:0.85; line-height:1.3;'>"
+                f"<span title='Distância da Média Móvel de 200 dias: indica tendência principal de longo prazo.'>MM200: {d200_txt_r}</span> | "
+                f"<span title='Distância da Máxima de 52 semanas: quanto o preço atual está abaixo do topo de 1 ano.'>52s: {d52_txt_r}</span>"
+                f"</div></div>"
+                "</div>"
+                "<div style='display:flex; flex-wrap:wrap; gap:14px; font-size:13px; padding:6px 10px; background:rgba(128,128,128,0.07); border-radius:6px; margin-bottom:8px;'>"
+                f"<span title='Preço sobre Lucro: quantos anos o lucro atual levaria para pagar o investimento.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/L:</strong> {pl_txt_r}</span>"
+                f"<span title='Preço sobre Valor Patrimonial: compara preço de tela com o patrimônio contábil. Abaixo de 1,0 indica desconto.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>P/VP:</strong> {pvp_txt_r}</span>"
+                f"<span title='Retorno sobre Patrimônio Líquido: eficiência da empresa em gerar lucro com capital próprio.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>ROE:</strong> {roe_txt_r}</span>"
+                f"<span title='Dividend Yield (12m): percentual pago em dividendos e JCP sobre a cotação atual.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>DY 12m:</strong> {dy_txt_r}</span>"
+                f"<span title='Preço-Teto Bazin (12m): DPA de 12 meses dividido por 6%, referência para renda passiva.' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Bazin:</strong> {bz_txt_r}</span>"
+                f"<span title='Preço Justo de Benjamin Graham: valor intrínseco estimado por √(22,5 × LPA × VPA).' style='cursor:help; border-bottom:1px dotted rgba(128,128,128,0.6);'><strong>Graham:</strong> {gr_txt_r}</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(fmt_faixa_preco_html(base_ativo), unsafe_allow_html=True)
+            partes_just_rx = just_r.split("\n\n", 1)
+            st.markdown(
+                "<div style='margin:10px 0 8px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(partes_just_rx[0])
+            if len(partes_just_rx) > 1 and partes_just_rx[1].strip():
+                st.markdown(
+                    "<div style='margin:10px 0 8px 0; border-top:1px solid rgba(128,128,128,0.20);'></div>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(partes_just_rx[1], unsafe_allow_html=True)
+
+    # --- BLOCO 4 E 5: SIMULADOR DE RENDA PASSIVA, SAZONALIDADE DE DIVIDENDOS & CHECKLIST BUY & HOLD ---
     if base_ativo:
         _, selic_aa_atual = buscar_historico_selic_bcb()
         cot_sim = float(base_ativo.get("cotacao") or 0.0)
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])
 
-        with st.container(border=True):
-            st.markdown(f"#### 💰 Simulador de Renda Passiva — {ticker}")
+        with st.expander(f"💰 Simulador de Renda Passiva — {ticker} — clique para minimizar/maximizar", expanded=True):
             sr_in1, sr_in2 = st.columns([1.35, 2.65], vertical_alignment="bottom")
             with sr_in1:
                 meta_mensal = st.number_input(
@@ -4398,10 +4473,9 @@ def render_grafico_e_tabela_ativo(
                         f"(**{fmt_num(pct_meta_rx, 1)}%** da sua meta alcançada nesta empresa!)."
                     )
 
-        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
-        col_saz, col_bh = st.columns([1.05, 1.15])
-        with col_saz:
-            with st.container(border=True):
+        with st.expander(f"📅 Sazonalidade de Proventos & 🛡️ Checklist Buy & Hold — {ticker} — clique para minimizar/maximizar", expanded=True):
+            col_saz, col_bh = st.columns([1.05, 1.15], gap="large")
+            with col_saz:
                 st.markdown(f"#### 📅 Sazonalidade de Proventos — {ticker}")
                 meses_nomes = ["JAN", "FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
                 meses_pag = set(base_ativo.get("meses_dividendos") or [])
@@ -4428,8 +4502,7 @@ def render_grafico_e_tabela_ativo(
                 else:
                     st.caption("Meses em que a empresa historicamente costuma pagar proventos (sem registros recentes no Yahoo Finance).")
 
-        with col_bh:
-            with st.container(border=True):
+            with col_bh:
                 st.markdown(f"#### 🛡️ Checklist Buy & Hold — {ticker}")
                 eh_bco_bh = bool(base_ativo.get("eh_banco_seg", False))
                 roe_bh = base_ativo.get("roe")
@@ -4487,78 +4560,6 @@ def render_grafico_e_tabela_ativo(
                         f"<div style='font-size:13px; margin:4px 0;'>{ic_c} <strong>{tit_c}</strong> <span style='opacity:0.78;'>({html.escape(det_c)})</span></div>"
                     )
                 st.markdown("".join(linhas_bh_html), unsafe_allow_html=True)
-
-    st.markdown(f"#### 📑 Histórico Fundamentalista — {ticker}")
-    with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
-        hist_fund, eh_banco, fin_curr, fonte_anual = buscar_historico_fundamentalista(
-            ticker,
-            cot_live=base_ativo.get("cotacao") if base_ativo else None,
-            pl_live=base_ativo.get("pl") if base_ativo else None,
-            pvp_live=base_ativo.get("pvp") if base_ativo else None,
-            vpa_live=base_ativo.get("vpa") if base_ativo else None,
-        )
-    if not hist_fund:
-        st.info("Histórico anual detalhado indisponível para este ativo.")
-    else:
-        rows_h = []
-        media_info_txt = ""
-        for h in hist_fund:
-            pl_s = fmt_num(h["pl"]) if h["pl"] is not None else "—"
-            pvp_s = fmt_num(h["pvp"]) if h["pvp"] is not None else "—"
-            vpa_s = fmt_num(h["vpa"]) if h["vpa"] is not None else "—"
-            ml_s = f"{fmt_num(h['marg_liq'])}%" if h["marg_liq"] is not None else "—"
-            peb_s = fmt_num(h["pebitda"]) if h["pebitda"] is not None else "—"
-            if h.get("is_atual"):
-                estilo_row = "background-color:rgba(96,165,250,0.14); font-weight:700;"
-            elif h.get("is_media"):
-                estilo_row = "background-color:rgba(250,204,21,0.12); font-weight:700; border-top:1px dashed rgba(250,204,21,0.45);"
-                media_info_txt = h.get("media_info", "")
-            else:
-                estilo_row = ""
-            rows_h.append(
-                f"<tr style='{estilo_row}'>"
-                f"<td style='font-weight:700;'>{html.escape(h['ano'])}</td>"
-                f"<td>{pl_s}</td><td>{pvp_s}</td><td>{vpa_s}</td>"
-                f"<td>{fmt_bi_mi(h['div_liq'])}</td><td>{ml_s}</td>"
-                f"<td>{fmt_bi_mi(h['ebitda'])}</td><td>{peb_s}</td>"
-                f"<td>{fmt_bi_mi(h['val_merc'])}</td><td>{fmt_bi_mi(h['lliq'])}</td>"
-                f"<td>{fmt_bi_mi(h['lbr'])}</td><td>{fmt_bi_mi(h['rec'])}</td>"
-                "</tr>"
-            )
-
-        css_h = (
-            "<style>"
-            ".hist-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:12px 0;}"
-            ".hist-table{width:100%;border-collapse:collapse;font-size:13px;text-align:center;}"
-            ".hist-table th{background-color:rgba(128,128,128,0.18);padding:10px 8px;border-bottom:2px solid rgba(128,128,128,0.35);font-weight:600;white-space:nowrap;}"
-            ".hist-table td{padding:9px 8px;border-bottom:1px solid rgba(128,128,128,0.2);white-space:nowrap;}"
-            ".hist-table tr:hover td{background-color:rgba(128,128,128,0.08);}"
-            "</style>"
-        )
-        html_h = (
-            f"{css_h}<div class='hist-wrap'><table class='hist-table'><thead><tr>"
-            "<th title='Ano do exercício fiscal, ÚLT. 12M (acumulado 12 meses), MÉDIA histórica e ATUAL'>Ano</th>"
-            "<th title='Preço sobre Lucro: quantos anos o lucro do período levaria para pagar o valor de mercado'>P/L</th>"
-            "<th title='Preço sobre Valor Patrimonial: valor de mercado dividido pelo patrimônio líquido'>P/VP</th>"
-            "<th title='Valor Patrimonial por Ação: patrimônio líquido dividido pelo número de ações'>VPA</th>"
-            "<th title='Dívida Líquida: empréstimos e financiamentos menos caixa e aplicações financeiras'>Dívida líquida</th>"
-            "<th title='Margem Líquida: percentual da receita líquida que vira lucro líquido'>Margem líquida</th>"
-            "<th title='EBITDA: geração de caixa operacional antes de juros, impostos, depreciação e amortização'>EBITDA</th>"
-            "<th title='Preço sobre EBITDA: valor de mercado dividido pela geração de caixa operacional'>P/EBITDA</th>"
-            "<th title='Valor de Mercado: cotação multiplicada pelo total de ações'>Valor de mercado</th>"
-            "<th title='Lucro Líquido atribuído aos controladores no período'>Lucro Líq.</th>"
-            "<th title='Lucro Bruto: receita líquida menos o custo dos bens ou serviços vendidos'>Lucro Br.</th>"
-            "<th title='Receita Líquida: faturamento total descontando impostos sobre vendas e devoluções'>Receita Líq.</th>"
-            f"</tr></thead><tbody>{''.join(rows_h)}</tbody></table></div>"
-        )
-        st.markdown(html_h, unsafe_allow_html=True)
-        if fonte_anual == "CVM":
-            nota_src = "Dados anuais oficiais da CVM (DFP/ITR) em R$, com VPA e Valor de mercado históricos ajustados por desdobramentos."
-        else:
-            nota_fx = f" Balanço anual reportado em {fin_curr} convertido para R$ pelo câmbio histórico." if fin_curr != "BRL" else ""
-            nota_src = f"VPA histórico ajustado por desdobramentos.{nota_fx}"
-        nota_b = " Para bancos/seguradoras, Dívida Líquida e EBITDA não se aplicam (`—`)." if eh_banco else ""
-        st.caption(f"Nota: {nota_src}{media_info_txt}{nota_b}")
 
 
 def calc_ms(preco_calc: float | None, cotacao: float) -> float | None:
@@ -6266,7 +6267,11 @@ with tab1:
                                 f"<div class='val-table-wrap val-table-wrap-top'><table class='val-table val-table-top'>{thead_html}<tbody>{''.join(linhas_html[:idx_split + 1])}</tbody></table></div>",
                                 unsafe_allow_html=True,
                             )
-                            with st.container(border=True):
+                            with st.container():
+                                st.markdown(
+                                    "<div style='margin:8px 0 10px 0; border-top:2px solid rgba(59,130,246,0.45);'></div>",
+                                    unsafe_allow_html=True,
+                                )
                                 c_rx1, c_rx2 = st.columns([3.8, 1], vertical_alignment="bottom")
                                 with c_rx1:
                                     st.selectbox(
@@ -6290,6 +6295,10 @@ with tab1:
                                     base_ativo=item_raiox,
                                     key_prefix="tab1",
                                     modo_score_chave=modo_score_chave,
+                                )
+                                st.markdown(
+                                    "<div style='margin:10px 0 10px 0; border-bottom:2px solid rgba(59,130,246,0.45);'></div>",
+                                    unsafe_allow_html=True,
                                 )
 
                             if idx_split + 1 < len(linhas_html):

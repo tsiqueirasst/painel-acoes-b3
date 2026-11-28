@@ -1196,7 +1196,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 10,
+    _v: int = 11,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1239,7 +1239,7 @@ def buscar_serie_investidor10_chart_com_info(
         "1 D": [1, "1d", "intraday"],
         "7 D": [7, "7d", 5],
         "30 D": [30],
-        "6 M": [182, 180, 183, "6m"],
+        "6 M": [182, 183, 184, 185, 180, 181, 186, "6m"],
         "YTD": [dias, "ytd"],
         "1 A": [365, 366],
         "5 A": [1825, 1826],
@@ -1367,9 +1367,13 @@ def buscar_serie_investidor10_chart_com_info(
             if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
                 diag_motivo = f"retornou {span_dias}d para {periodo_label}"
                 continue
-            if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
-                diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
-                continue
+            if periodo_label == "YTD":
+                if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                    diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                    continue
+                s_ytd_ano = s_out[s_out.index.year == dt_fim_s.year]
+                if len(s_ytd_ano) >= 3:
+                    s_out = s_ytd_ano
             if cot_live and float(cot_live) > 0:
                 s_out.iloc[-1] = float(cot_live)
             return s_out, "Investidor10"
@@ -1389,7 +1393,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 10,
+    _v: int = 11,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

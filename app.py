@@ -5526,8 +5526,12 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         armadilha_motivos.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
     if roe is not None and roe < 0:
         armadilha_motivos.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
-    if (not eh_banco_seg) and div_liq_ebitda is not None and div_liq_ebitda > 4.5:
-        armadilha_motivos.append(f"Dív.Líq/EBITDA crítica ({fmt_num(div_liq_ebitda)}x > 4,5x)")
+    if (not eh_banco_seg) and div_liq_ebitda is not None:
+        if eh_utilities:
+            if div_liq_ebitda > 5.5 or (div_liq_ebitda > 4.5 and roe is not None and roe < 10.0):
+                armadilha_motivos.append(f"Dív.Líq/EBITDA crítica ({fmt_num(div_liq_ebitda)}x)")
+        elif div_liq_ebitda > 4.5:
+            armadilha_motivos.append(f"Dív.Líq/EBITDA crítica ({fmt_num(div_liq_ebitda)}x > 4,5x)")
     elif (not eh_banco_seg) and (not eh_utilities) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
         armadilha_motivos.append(f"Dív/Patrim elevada ({fmt_num(div_brut_patrim)}x > 3,0x)")
     if news_tem_rj:
@@ -7826,7 +7830,7 @@ with tab1:
                         return;
                     }
 
-                    if (e.target && e.target.closest && e.target.closest("[data-testid='stExpander'], .raiox-blocks-host")) return;
+                    if (e.target && e.target.closest && e.target.closest("a, button, input, select, textarea, .raiox-blocks-host, .raiox-indent-host")) return;
                     const rowRx = e.target && e.target.closest ? e.target.closest("table.val-table tbody tr[data-raiox-ticker]") : null;
                     if (rowRx) {
                         const selTxt = pWin.getSelection ? pWin.getSelection().toString() : "";

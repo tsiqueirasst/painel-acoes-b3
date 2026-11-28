@@ -1148,14 +1148,15 @@ def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
     for pt in lista_pts:
         dt_raw, vl_raw, hr_raw = None, None, None
         if isinstance(pt, dict):
-            dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("time") or pt.get("x")
+            for k_dt in ("created_at", "datetime", "date_time", "date", "data", "timestamp", "dt", "time", "x", "label"):
+                if pt.get(k_dt) is not None:
+                    dt_raw = pt.get(k_dt)
+                    break
             hr_raw = pt.get("hour") or pt.get("hora") or (pt.get("time") if dt_raw != pt.get("time") else None)
-            vl_raw = (
-                pt.get("price") if pt.get("price") is not None
-                else (pt.get("value") if pt.get("value") is not None
-                else (pt.get("close") if pt.get("close") is not None
-                else (pt.get("cotacao") if pt.get("cotacao") is not None else pt.get("y"))))
-            )
+            for k_vl in ("price", "quotation", "value", "close", "cotacao", "valor", "preco", "last", "adj_price", "adjusted_price", "y"):
+                if pt.get(k_vl) is not None:
+                    vl_raw = pt.get(k_vl)
+                    break
         elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
             dt_raw, vl_raw = pt[0], pt[1]
 
@@ -1201,7 +1202,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 14,
+    _v: int = 15,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1405,7 +1406,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 14,
+    _v: int = 15,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

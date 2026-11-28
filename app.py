@@ -1,3 +1,5 @@
+import csv
+import gc
 import hashlib
 import hmac
 import html
@@ -5,11 +7,15 @@ import inspect
 import io
 import json
 import math
+import os
 import re
 import secrets
+import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
 import zipfile
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -34,6 +40,85 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 }
+
+
+_CACHE_MISS = object()
+
+
+class _BoundedTTLCache:
+    def __init__(self, maxsize: int, ttl: float):
+        self.maxsize = max(1, int(maxsize))
+        self.ttl = float(ttl)
+        self._data: OrderedDict[object, tuple[float, object]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, key):
+        now = time.monotonic()
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                return _CACHE_MISS
+            exp, val = item
+            if now >= exp:
+                self._data.pop(key, None)
+                return _CACHE_MISS
+            self._data.move_to_end(key)
+            return val
+
+    def set(self, key, val):
+        now = time.monotonic()
+        exp = now + self.ttl
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+            self._data[key] = (exp, val)
+            while len(self._data) > self.maxsize:
+                self._data.popitem(last=False)
+            while self._data:
+                oldest_k = next(iter(self._data))
+                if now >= self._data[oldest_k][0]:
+                    self._data.popitem(last=False)
+                else:
+                    break
+
+    def clear(self):
+        with self._lock:
+            self._data.clear()
+
+
+_CACHE_YF = _BoundedTTLCache(maxsize=250, ttl=300)
+_CACHE_I10 = _BoundedTTLCache(maxsize=250, ttl=900)
+_CACHE_NEWS = _BoundedTTLCache(maxsize=250, ttl=1800)
+_CACHE_FUND_DET = _BoundedTTLCache(maxsize=120, ttl=3600)
+_CACHE_DIVS_CART = _BoundedTTLCache(maxsize=60, ttl=1800)
+_CACHE_DIVS_AT = _BoundedTTLCache(maxsize=80, ttl=1800)
+_CACHE_CAMBIO = _BoundedTTLCache(maxsize=8, ttl=86400)
+_CACHE_SETORES_ID = _BoundedTTLCache(maxsize=60, ttl=86400)
+_CACHE_I10_CHART = _BoundedTTLCache(maxsize=50, ttl=300)
+_CACHE_OHLCV = _BoundedTTLCache(maxsize=35, ttl=180)
+_CACHE_HIST_FUND = _BoundedTTLCache(maxsize=25, ttl=900)
+_CACHE_SELIC = _BoundedTTLCache(maxsize=2, ttl=43200)
+
+_TODAS_CACHES_MEMORIA = (
+    _CACHE_YF,
+    _CACHE_I10,
+    _CACHE_NEWS,
+    _CACHE_FUND_DET,
+    _CACHE_DIVS_CART,
+    _CACHE_DIVS_AT,
+    _CACHE_CAMBIO,
+    _CACHE_SETORES_ID,
+    _CACHE_I10_CHART,
+    _CACHE_OHLCV,
+    _CACHE_HIST_FUND,
+    _CACHE_SELIC,
+)
+
+
+def _limpar_caches_memoria():
+    for c_mem in _TODAS_CACHES_MEMORIA:
+        c_mem.clear()
+    gc.collect()
 
 BESST_SETORES = {
     "Intermediários Financeiros",
@@ -691,8 +776,9 @@ def analisar_sentimento_noticias(itens: list[dict], agora_ts: float | None = Non
         "top_noticia_pos": top_pos,
     }
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 3) -> dict[str, list[dict]]:
+    if not tickers_tuple:
+        return {}
     agora_ts = time.time()
 
     def _one(ticker: str):
@@ -700,9 +786,9 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 3) -> dict[st
             try:
                 url = "https://news.google.com/rss/search"
                 params = {"q": q_str, "hl": "pt-BR", "gl": "BR", "ceid": "BR:pt-419"}
-                resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
-                resp.raise_for_status()
-                root = ET.fromstring(resp.content)
+                with requests.get(url, params=params, headers=HEADERS, timeout=10) as resp:
+                    resp.raise_for_status()
+                    root = ET.fromstring(resp.content)
                 itens = []
                 for item in root.findall("./channel/item"):
                     titulo = (item.findtext("title") or "").strip()
@@ -734,6 +820,7 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 3) -> dict[st
                         "saldo_manchete": pts_s,
                         "ts": dt_obj.timestamp() if dt_obj else 0.0,
                     })
+                root.clear()
                 if itens:
                     itens.sort(key=lambda x: x["ts"], reverse=True)
                     return ticker, itens[:12]
@@ -741,12 +828,25 @@ def buscar_noticias_lote(tickers_tuple: tuple[str, ...], _v: int = 3) -> dict[st
                 continue
         return ticker, []
 
-    out = {}
-    if not tickers_tuple:
-        return out
-    with ThreadPoolExecutor(max_workers=12) as ex:
-        for t, res in ex.map(_one, tickers_tuple):
-            out[t] = res
+    out: dict[str, list[dict]] = {}
+    faltantes: list[str] = []
+    vistos: set[str] = set()
+    for tk in tickers_tuple:
+        if tk in vistos:
+            continue
+        vistos.add(tk)
+        cached = _CACHE_NEWS.get(tk)
+        if cached is not _CACHE_MISS:
+            out[tk] = cached
+        else:
+            faltantes.append(tk)
+
+    if faltantes:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for t, res in ex.map(_one, faltantes):
+                _CACHE_NEWS.set(t, res)
+                out[t] = res
+        gc.collect()
     return out
 
 def buscar_sentimento_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
@@ -761,52 +861,68 @@ def buscar_sentimento_noticias_lote(tickers_tuple: tuple[str, ...]) -> dict[str,
 
 
 # --- DADOS B3 (FUNDAMENTUS, CVM & YAHOO) ---
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def carregar_setores_fundamentus() -> dict[str, str]:
     url = "https://www.fundamentus.com.br/buscaavancada.php"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
-    select = soup.find("select", {"name": "setor"})
-    setores = {}
-    if select:
-        for opt in select.find_all("option"):
-            val = (opt.get("value") or "").strip()
-            nome = " ".join(opt.text.split())
-            if val and nome:
-                setores[nome] = val
-    return setores
+    soup = None
+    try:
+        with requests.get(url, headers=HEADERS, timeout=15) as resp:
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
+        select = soup.find("select", {"name": "setor"})
+        setores = {}
+        if select:
+            for opt in select.find_all("option"):
+                val = (opt.get("value") or "").strip()
+                nome = " ".join(opt.text.split())
+                if val and nome:
+                    setores[nome] = val
+        return setores
+    finally:
+        if soup is not None:
+            soup.decompose()
 
 
 def _ler_tabela_fundamentus(url: str, session: requests.Session | None = None) -> list[dict]:
     cliente = session or requests
-    resp = cliente.get(url, headers=HEADERS, timeout=20)
-    resp.raise_for_status()
-    if not resp.encoding or resp.encoding.lower() in ("ascii", "utf-8"):
-        resp.encoding = "ISO-8859-1"
-    soup = BeautifulSoup(resp.text, "lxml")
-    tabela = soup.find("table", {"id": "resultado"})
-    if not tabela:
-        return []
-    cabecalho = [th.get_text(strip=True) for th in tabela.find("thead").find_all("th")]
-    registros = []
-    tbody = tabela.find("tbody")
-    if not tbody:
-        return []
-    for tr in tbody.find_all("tr"):
-        celulas = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(celulas) == len(cabecalho):
-            registros.append(dict(zip(cabecalho, celulas)))
-    return registros
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def buscar_detalhes_fundamentus(ticker: str) -> dict:
+    soup = None
     try:
-        url = f"https://www.fundamentus.com.br/detalhes.php?papel={ticker}"
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        with cliente.get(url, headers=HEADERS, timeout=20) as resp:
+            resp.raise_for_status()
+            if not resp.encoding or resp.encoding.lower() in ("ascii", "utf-8"):
+                resp.encoding = "ISO-8859-1"
+            soup = BeautifulSoup(resp.text, "lxml")
+        tabela = soup.find("table", {"id": "resultado"})
+        if not tabela:
+            return []
+        cabecalho = [th.get_text(strip=True) for th in tabela.find("thead").find_all("th")]
+        registros = []
+        tbody = tabela.find("tbody")
+        if not tbody:
+            return []
+        for tr in tbody.find_all("tr"):
+            celulas = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(celulas) == len(cabecalho):
+                registros.append(dict(zip(cabecalho, celulas)))
+        return registros
+    finally:
+        if soup is not None:
+            soup.decompose()
+
+
+def buscar_detalhes_fundamentus(ticker: str) -> dict:
+    tk_up = str(ticker or "").strip().upper()
+    if not tk_up:
+        return {}
+    cached = _CACHE_FUND_DET.get(tk_up)
+    if cached is not _CACHE_MISS:
+        return cached
+    soup = None
+    try:
+        url = f"https://www.fundamentus.com.br/detalhes.php?papel={tk_up}"
+        with requests.get(url, headers=HEADERS, timeout=15) as resp:
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
         dados = {}
         for tr in soup.find_all("tr"):
             tds = tr.find_all("td")
@@ -821,9 +937,13 @@ def buscar_detalhes_fundamentus(ticker: str) -> dict:
                     i += 2
                 else:
                     i += 1
+        _CACHE_FUND_DET.set(tk_up, dados)
         return dados
     except Exception:
         return {}
+    finally:
+        if soup is not None:
+            soup.decompose()
 
 
 def _parse_i10_num(val: str | None) -> float | None:
@@ -840,6 +960,7 @@ def _parse_i10_num(val: str | None) -> float | None:
 
 
 def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
+    soup = None
     try:
         url = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
         i10_headers = {
@@ -848,13 +969,15 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": "https://investidor10.com.br/",
         }
-        resp = requests.get(url, headers=i10_headers, timeout=10)
-        if resp.status_code != 200 or f"/{ticker.lower()}" not in resp.url.lower():
-            return ticker, {}
-        if "cf-browser-verification" in resp.text or "Just a moment" in resp.text[:1500]:
+        with requests.get(url, headers=i10_headers, timeout=10) as resp:
+            if resp.status_code != 200 or f"/{ticker.lower()}" not in resp.url.lower():
+                return ticker, {}
+            html_txt = resp.text
+        if "cf-browser-verification" in html_txt or "Just a moment" in html_txt[:1500]:
             return ticker, {}
 
-        soup = BeautifulSoup(resp.text, "lxml")
+        soup = BeautifulSoup(html_txt, "lxml")
+        del html_txt
         dados: dict[str, float] = {}
 
         for card in soup.find_all("div", class_=re.compile(r"\b_card\b")):
@@ -982,47 +1105,76 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
         return ticker, dados
     except Exception:
         return ticker, {}
+    finally:
+        if soup is not None:
+            soup.decompose()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 def buscar_investidor10_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, dict]:
     if not tickers_tuple:
         return {}
     out: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        for tk, dados in ex.map(_fetch_investidor10, tickers_tuple):
-            out[tk] = dados
+    faltantes: list[str] = []
+    vistos: set[str] = set()
+    for tk in tickers_tuple:
+        if tk in vistos:
+            continue
+        vistos.add(tk)
+        cached = _CACHE_I10.get(tk)
+        if cached is not _CACHE_MISS:
+            out[tk] = cached
+        else:
+            faltantes.append(tk)
+
+    if faltantes:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for tk, dados in ex.map(_fetch_investidor10, faltantes):
+                _CACHE_I10.set(tk, dados)
+                out[tk] = dados
+        gc.collect()
     return out
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
 def buscar_cambio_brl(moeda: str) -> pd.Series:
     if not moeda or moeda.upper() == "BRL":
         return pd.Series(dtype=float)
+    m_up = moeda.upper()
+    cached = _CACHE_CAMBIO.get(m_up)
+    if cached is not _CACHE_MISS:
+        return cached
     try:
-        tk_fx = yf.Ticker(f"{moeda.upper()}BRL=X")
+        tk_fx = yf.Ticker(f"{m_up}BRL=X")
         df_fx = tk_fx.history(period="max", interval="1d")
         if df_fx is not None and not df_fx.empty:
             df_fx.index = pd.to_datetime(df_fx.index).tz_localize(None)
-            return df_fx["Close"].dropna()
+            s_fx = df_fx["Close"].dropna()
+            _CACHE_CAMBIO.set(m_up, s_fx)
+            return s_fx
     except Exception:
         pass
     return pd.Series(dtype=float)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def buscar_dividendos_ativo(ticker: str) -> pd.Series:
+    tk_up = str(ticker or "").strip().upper()
+    cached = _CACHE_DIVS_AT.get(tk_up)
+    if cached is not _CACHE_MISS:
+        return cached
     try:
-        divs = yf.Ticker(f"{ticker}.SA").dividends
+        divs = yf.Ticker(f"{tk_up}.SA").dividends
         if divs is not None and not divs.empty:
             divs.index = _idx_para_brt_naive(divs.index)
-            return divs[divs > 0].sort_index()
+            s_div = divs[divs > 0].sort_index()
+            _CACHE_DIVS_AT.set(tk_up, s_div)
+            return s_div
     except Exception:
         pass
-    return pd.Series(dtype=float)
+    empty_s = pd.Series(dtype=float)
+    _CACHE_DIVS_AT.set(tk_up, empty_s)
+    return empty_s
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=30)
 def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 7) -> list[str]:
     rotas: list[str] = []
     pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?(?:cotacoes|quotations)/[^'"`\s]{3,180})\1""")
@@ -1036,14 +1188,14 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 7) -> lis
 
     def _ler_js(su: str):
         try:
-            r = requests.get(su, headers=HEADERS, timeout=2.5)
-            if r.status_code == 200:
-                return [p for _, p in (pat.findall(r.text) + pat_api.findall(r.text))]
+            with requests.get(su, headers=HEADERS, timeout=2.5) as r:
+                if r.status_code == 200:
+                    return [p for _, p in (pat.findall(r.text) + pat_api.findall(r.text))]
         except Exception:
             pass
         return []
 
-    with ThreadPoolExecutor(max_workers=6) as ex_js:
+    with ThreadPoolExecutor(max_workers=4) as ex_js:
         for paths in ex_js.map(_ler_js, filtrados[:14]):
             for path in paths:
                 p_low = path.lower()
@@ -1054,25 +1206,26 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 7) -> lis
     return rotas
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=50)
 def _obter_meta_chart_i10(ticker: str, _v: int = 5) -> dict:
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
-    sess = requests.Session()
-    sess.headers.update({
-        **HEADERS,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-        "Referer": "https://investidor10.com.br/",
-    })
     i10_cookie = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
-    if i10_cookie:
-        sess.headers["Cookie"] = i10_cookie
-
     try:
-        resp_pg = sess.get(url_pg, timeout=5)
-        if resp_pg.status_code != 200:
-            return {"erro": f"página HTTP {resp_pg.status_code}"}
-        if "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
+        with requests.Session() as sess:
+            sess.headers.update({
+                **HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+                "Referer": "https://investidor10.com.br/",
+            })
+            if i10_cookie:
+                sess.headers["Cookie"] = i10_cookie
+
+            with sess.get(url_pg, timeout=5) as resp_pg:
+                if resp_pg.status_code != 200:
+                    return {"erro": f"página HTTP {resp_pg.status_code}"}
+                pg_txt = resp_pg.text
+        if "cf-browser-verification" in pg_txt or "Just a moment" in pg_txt[:1500]:
             return {"erro": "bloqueio Cloudflare"}
 
         tid = ""
@@ -1085,19 +1238,20 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 5) -> dict:
             r'["\']?company[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
             r'data-id\s*=\s*["\']?(\d{1,7})',
         ):
-            m_id = re.search(pat_tid, resp_pg.text, re.IGNORECASE)
+            m_id = re.search(pat_tid, pg_txt, re.IGNORECASE)
             if m_id:
                 tid = m_id.group(1)
                 break
 
         rotas_desc: list[str] = []
-        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?(?:cotacoes|quotations)/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?(?:cotacoes|quotations)/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", pg_txt):
             if any(k in path.lower() for k in ("/chart", "/intraday", "/quotations")):
                 norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith(("/cotacoes/", "/quotations/")) else path)
                 if norm_p not in rotas_desc:
                     rotas_desc.append(norm_p)
 
-        srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
+        srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', pg_txt, re.IGNORECASE)
+        del pg_txt
         local_srcs = []
         for s in srcs:
             s_low = s.lower()
@@ -1196,20 +1350,22 @@ def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
     return s_out[~s_out.index.duplicated(keep="last")]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def buscar_serie_investidor10_chart_com_info(
+def _buscar_serie_investidor10_chart_base(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
-    cot_live: float | None = None,
     _v: int = 19,
 ) -> tuple[pd.Series, str]:
-    """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
+    """Busca e cacheia a série do gráfico do Investidor10 sem depender de cot_live."""
+    cache_key = (ticker.upper(), periodo_label, bool(ajustada), _v)
+    cached = _CACHE_I10_CHART.get(cache_key)
+    if cached is not _CACHE_MISS:
+        return cached
+
     # --- CAMINHO RÁPIDO: rotas oficiais descobertas via DevTools (sem descoberta de rotas/JS) ---
     tk_up_fp = ticker.upper()
     tk_lo_fp = ticker.lower()
     hoje_fp = datetime.now(BRT).date()
-    cot_fp = float(cot_live) if (cot_live and float(cot_live) > 0) else None
     dias_map_fp = {"30 D": 30, "6 M": 182, "1 A": 365, "5 A": 1825, "10 A": 3650, "15 A": 5475}
     adj_fp = "true" if ajustada else "false"
     base_fp = "https://investidor10.com.br/api"
@@ -1229,52 +1385,52 @@ def buscar_serie_investidor10_chart_com_info(
         urls_fp = []
 
     if urls_fp:
-        sess_fp = requests.Session()
-        sess_fp.headers.update({
-            **HEADERS,
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-            "Referer": f"https://investidor10.com.br/acoes/{tk_lo_fp}/",
-            "X-Requested-With": "XMLHttpRequest",
-        })
         cookie_fp = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
-        if cookie_fp:
-            sess_fp.headers["Cookie"] = cookie_fp
         eh_intra_fp = periodo_label in ("1 D", "7 D")
-        for url_fp in urls_fp:
-            try:
-                r_fp = sess_fp.get(url_fp, timeout=6.0)
-                if r_fp.status_code != 200:
-                    continue
-                if (r_fp.text or "").lstrip()[:15].lower().startswith(("<!doctype", "<html")):
-                    continue
-                s_fp = _parse_i10_chart_json(r_fp.json(), eh_intraday_per=eh_intra_fp)
-                if s_fp.empty:
-                    continue
-                tem_hora_fp = any((ts.hour != 0 or ts.minute != 0) for ts in s_fp.index)
-                if periodo_label == "1 D":
-                    if not tem_hora_fp:
+        with requests.Session() as sess_fp:
+            sess_fp.headers.update({
+                **HEADERS,
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+                "Referer": f"https://investidor10.com.br/acoes/{tk_lo_fp}/",
+                "X-Requested-With": "XMLHttpRequest",
+            })
+            if cookie_fp:
+                sess_fp.headers["Cookie"] = cookie_fp
+            for url_fp in urls_fp:
+                try:
+                    with sess_fp.get(url_fp, timeout=6.0) as r_fp:
+                        if r_fp.status_code != 200:
+                            continue
+                        if (r_fp.text or "").lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+                            continue
+                        js_fp = r_fp.json()
+                    s_fp = _parse_i10_chart_json(js_fp, eh_intraday_per=eh_intra_fp)
+                    if s_fp.empty:
                         continue
-                    s_fp = s_fp[s_fp.index.date == s_fp.index.date[-1]]
-                    if len(s_fp) < 5:
+                    tem_hora_fp = any((ts.hour != 0 or ts.minute != 0) for ts in s_fp.index)
+                    if periodo_label == "1 D":
+                        if not tem_hora_fp:
+                            continue
+                        s_fp = s_fp[s_fp.index.date == s_fp.index.date[-1]]
+                        if len(s_fp) < 5:
+                            continue
+                    elif periodo_label == "7 D":
+                        if not tem_hora_fp or len(s_fp) < 12 or len({ts.date() for ts in s_fp.index}) < 2:
+                            continue
+                    elif periodo_label == "YTD":
+                        ano_fim_fp = s_fp.index[-1].year
+                        s_ytd_fp = s_fp[s_fp.index >= pd.Timestamp(year=ano_fim_fp, month=1, day=1)]
+                        if len(s_ytd_fp) < 3:
+                            continue
+                        s_fp = s_ytd_fp
+                    elif len(s_fp) < 3:
                         continue
-                elif periodo_label == "7 D":
-                    if not tem_hora_fp or len(s_fp) < 12 or len({ts.date() for ts in s_fp.index}) < 2:
-                        continue
-                elif periodo_label == "YTD":
-                    ano_fim_fp = s_fp.index[-1].year
-                    s_ytd_fp = s_fp[s_fp.index >= pd.Timestamp(year=ano_fim_fp, month=1, day=1)]
-                    if len(s_ytd_fp) < 3:
-                        continue
-                    s_fp = s_ytd_fp
-                elif len(s_fp) < 3:
+                    res_fp = (s_fp, "Investidor10 · " + url_fp.replace("https://investidor10.com.br/api/", ""))
+                    _CACHE_I10_CHART.set(cache_key, res_fp)
+                    return res_fp
+                except Exception:
                     continue
-                s_fp = s_fp.copy()
-                if cot_fp:
-                    s_fp.iloc[-1] = cot_fp
-                return s_fp, "Investidor10 · " + url_fp.replace("https://investidor10.com.br/api/", "")
-            except Exception:
-                continue
     # --- FIM DO CAMINHO RÁPIDO (se falhar, segue o fluxo legado abaixo) ---
     mapa_dias = {
         "1 D": 1,
@@ -1288,11 +1444,15 @@ def buscar_serie_investidor10_chart_com_info(
         "15 A": 5475,
     }
     if periodo_label not in mapa_dias:
-        return pd.Series(dtype=float), "período não suportado"
+        res_err = (pd.Series(dtype=float), "período não suportado")
+        _CACHE_I10_CHART.set(cache_key, res_err)
+        return res_err
 
     meta = _obter_meta_chart_i10(ticker)
     if meta.get("erro"):
-        return pd.Series(dtype=float), meta["erro"]
+        res_err = (pd.Series(dtype=float), meta["erro"])
+        _CACHE_I10_CHART.set(cache_key, res_err)
+        return res_err
 
     tid = meta.get("tid", "")
     rotas_desc = [r for r in meta.get("rotas", ()) if ("/chart" in r.lower() or "/intraday" in r.lower() or "/quotations" in r.lower())]
@@ -1397,77 +1557,100 @@ def buscar_serie_investidor10_chart_com_info(
     diag_motivo = "indisponível"
     serie_diaria_fb = pd.Series(dtype=float)
 
-    for url_c in urls_unicas[:10]:
-        try:
-            r_c = sess.get(url_c, timeout=6.0)
-            if r_c.status_code in (401, 403, 429):
-                diag_motivo = f"HTTP {r_c.status_code}"
-                break
-            if r_c.status_code != 200:
-                diag_motivo = f"HTTP {r_c.status_code}"
-                continue
-            txt_head = (r_c.text or "").lstrip()[:80].lower()
-            if txt_head.startswith(("<!doctype", "<html")):
-                diag_motivo = "HTML/Cloudflare na API"
-                continue
-            js = r_c.json()
-            s_out = _parse_i10_chart_json(js, eh_intraday_per=eh_intraday_per)
-            if s_out.empty:
-                diag_motivo = "lista vazia na API"
-                continue
-
-            tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
-            if periodo_label == "1 D":
-                if not tem_hora or len(s_out) < 5:
-                    diag_motivo = "API retornou apenas série diária para 1 D"
+    try:
+        for url_c in urls_unicas[:10]:
+            try:
+                with sess.get(url_c, timeout=6.0) as r_c:
+                    if r_c.status_code in (401, 403, 429):
+                        diag_motivo = f"HTTP {r_c.status_code}"
+                        break
+                    if r_c.status_code != 200:
+                        diag_motivo = f"HTTP {r_c.status_code}"
+                        continue
+                    txt_head = (r_c.text or "").lstrip()[:80].lower()
+                    if txt_head.startswith(("<!doctype", "<html")):
+                        diag_motivo = "HTML/Cloudflare na API"
+                        continue
+                    js = r_c.json()
+                s_out = _parse_i10_chart_json(js, eh_intraday_per=eh_intraday_per)
+                if s_out.empty:
+                    diag_motivo = "lista vazia na API"
                     continue
-                s_out = s_out[s_out.index.date == s_out.index.date[-1]]
-                if len(s_out) < 5:
-                    diag_motivo = "menos de 5 pontos intradiários para 1 D"
-                    continue
-                if cot_live and float(cot_live) > 0:
-                    s_out.iloc[-1] = float(cot_live)
-                return s_out, "Investidor10"
 
-            if periodo_label == "7 D":
-                dias_dist_i10 = len({ts.date() for ts in s_out.index})
-                if tem_hora and len(s_out) >= 12 and dias_dist_i10 >= 2:
-                    if cot_live and float(cot_live) > 0:
-                        s_out.iloc[-1] = float(cot_live)
-                    return s_out, "Investidor10"
-                if serie_diaria_fb.empty and len(s_out) >= 3 and dias_dist_i10 >= 2:
-                    serie_diaria_fb = s_out
-                diag_motivo = "API retornou apenas série diária para 7 D"
-                continue
+                tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
+                if periodo_label == "1 D":
+                    if not tem_hora or len(s_out) < 5:
+                        diag_motivo = "API retornou apenas série diária para 1 D"
+                        continue
+                    s_out = s_out[s_out.index.date == s_out.index.date[-1]]
+                    if len(s_out) < 5:
+                        diag_motivo = "menos de 5 pontos intradiários para 1 D"
+                        continue
+                    res_ok = (s_out, "Investidor10")
+                    _CACHE_I10_CHART.set(cache_key, res_ok)
+                    return res_ok
 
-            span_dias = int((s_out.index[-1] - s_out.index[0]).days)
-            dt_ini_s = s_out.index[0].date()
-            dt_fim_s = s_out.index[-1].date()
-            min_spans = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
-            max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
-            if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
-                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                continue
-            if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
-                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                continue
-            if periodo_label == "YTD":
-                if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
-                    diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                if periodo_label == "7 D":
+                    dias_dist_i10 = len({ts.date() for ts in s_out.index})
+                    if tem_hora and len(s_out) >= 12 and dias_dist_i10 >= 2:
+                        res_ok = (s_out, "Investidor10")
+                        _CACHE_I10_CHART.set(cache_key, res_ok)
+                        return res_ok
+                    if serie_diaria_fb.empty and len(s_out) >= 3 and dias_dist_i10 >= 2:
+                        serie_diaria_fb = s_out
+                    diag_motivo = "API retornou apenas série diária para 7 D"
                     continue
-            if cot_live and float(cot_live) > 0:
-                s_out.iloc[-1] = float(cot_live)
-            return s_out, "Investidor10"
-        except Exception as exc:
-            diag_motivo = f"{type(exc).__name__}: {str(exc)[:35]}"
-            continue
+
+                span_dias = int((s_out.index[-1] - s_out.index[0]).days)
+                dt_ini_s = s_out.index[0].date()
+                dt_fim_s = s_out.index[-1].date()
+                min_spans = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
+                max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
+                if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
+                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                    continue
+                if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
+                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                    continue
+                if periodo_label == "YTD":
+                    if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                        diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                        continue
+                res_ok = (s_out, "Investidor10")
+                _CACHE_I10_CHART.set(cache_key, res_ok)
+                return res_ok
+            except Exception as exc:
+                diag_motivo = f"{type(exc).__name__}: {str(exc)[:35]}"
+                continue
+    finally:
+        sess.close()
 
     if periodo_label == "7 D" and not serie_diaria_fb.empty:
-        if cot_live and float(cot_live) > 0:
-            serie_diaria_fb.iloc[-1] = float(cot_live)
-        return serie_diaria_fb, "Investidor10 (diária 7 D)"
+        res_fb = (serie_diaria_fb, "Investidor10 (diária 7 D)")
+        _CACHE_I10_CHART.set(cache_key, res_fb)
+        return res_fb
 
-    return pd.Series(dtype=float), diag_motivo
+    res_empty = (pd.Series(dtype=float), diag_motivo)
+    _CACHE_I10_CHART.set(cache_key, res_empty)
+    return res_empty
+
+
+def buscar_serie_investidor10_chart_com_info(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+    _v: int = 19,
+) -> tuple[pd.Series, str]:
+    """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
+    s_base, diag = _buscar_serie_investidor10_chart_base(ticker, periodo_label, ajustada, _v=_v)
+    if s_base.empty:
+        return s_base, diag
+    s_out = s_base.copy()
+    if cot_live and float(cot_live) > 0:
+        s_out.iloc[-1] = float(cot_live)
+    return s_out, diag
+
 
 def buscar_serie_investidor10_chart(
     ticker: str,
@@ -1479,7 +1662,7 @@ def buscar_serie_investidor10_chart(
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False, max_entries=50)
 def buscar_prev_close_investidor10(
     ticker: str,
     data_ref_iso: str,
@@ -1554,41 +1737,106 @@ def _calc_ticks_y_i10(y_min: float, y_max: float) -> list[float]:
 
 
 # --- MOTOR CVM DADOS ABERTOS (DFP + ITR) ---
-@st.cache_data(ttl=86400, show_spinner=False)
+_CVM_DRE_CODES = {"3.01", "3.03", "3.05", "3.11", "3.11.01", "3.13"}
+_CVM_BPA_CODES = {"1.01.01", "1.01.02"}
+_CVM_BPP_CODES = {"2.01.04", "2.02.01", "2.03", "2.03.09", "2.07", "2.07.01", "2.07.02"}
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
+def _carregar_cad_cia_aberta_cvm() -> tuple[dict[str, str], dict[str, str]]:
+    """Baixa cad_cia_aberta.csv uma única vez e retorna (mapa_cd_cvm_para_cnpj, mapa_cnpj_para_nome)."""
+    mapa_cod: dict[str, str] = {}
+    mapa_cnpj_nome: dict[str, str] = {}
+    try:
+        with requests.get(
+            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv",
+            headers=HEADERS,
+            timeout=20,
+        ) as resp_cad:
+            if resp_cad.status_code != 200:
+                return mapa_cod, mapa_cnpj_nome
+            txt_cad = resp_cad.content.decode("latin-1", errors="replace")
+        reader = csv.DictReader(io.StringIO(txt_cad, newline=""), delimiter=";")
+        for row in reader:
+            cnpj_c = str(row.get("CNPJ_CIA") or "").strip()
+            if not cnpj_c:
+                continue
+            cd_c = str(row.get("CD_CVM") or "").strip().lstrip("0")
+            if cd_c:
+                mapa_cod[cd_c] = cnpj_c
+            soc = formatar_nome_empresa_completo(str(row.get("DENOM_SOCIAL") or ""))
+            com = formatar_nome_empresa_completo(str(row.get("DENOM_COMERC") or ""))
+            if soc and com:
+                soc_n = _norm_txt(soc)
+                com_n = _norm_txt(com)
+                if com_n in soc_n or len(com) <= 3:
+                    nome_f = soc
+                elif soc_n in com_n:
+                    nome_f = com
+                else:
+                    nome_f = f"{soc} ({com})" if len(soc) <= 38 else com
+            else:
+                nome_f = soc or com
+            if nome_f:
+                mapa_cnpj_nome[cnpj_c] = nome_f
+        del txt_cad
+    except Exception:
+        pass
+    gc.collect()
+    return mapa_cod, mapa_cnpj_nome
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def carregar_mapa_cvm_tickers() -> tuple[dict[str, str], dict[str, str]]:
     """Retorna (mapa_ticker_para_cnpj, mapa_cd_cvm_para_cnpj)."""
     ano_atual = datetime.now(BRT).year
     mapa_tk: dict[str, str] = {}
-    mapa_cod: dict[str, str] = {}
     pat_tk = re.compile(r"^[A-Z]{4}\d{1,2}$")
 
     for ano in (ano_atual, ano_atual - 1, ano_atual - 2):
+        tmp_fca = None
         try:
             url = f"https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FCA/DADOS/fca_cia_aberta_{ano}.zip"
-            resp = requests.get(url, headers=HEADERS, timeout=25)
-            if resp.status_code != 200:
-                continue
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            with requests.get(url, headers=HEADERS, timeout=25, stream=True) as resp:
+                if resp.status_code != 200:
+                    continue
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+                    tmp_fca = tf.name
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            tf.write(chunk)
+            with zipfile.ZipFile(tmp_fca) as zf:
                 alvos = [n for n in zf.namelist() if "valor_mobiliario" in n.lower() and n.lower().endswith(".csv")]
                 if not alvos:
                     continue
-                with zf.open(alvos[0]) as f:
-                    df = pd.read_csv(f, sep=";", encoding="latin-1", dtype=str)
-                col_map = {c.lower(): c for c in df.columns}
-                c_tk = col_map.get("codigo_negociacao")
-                c_cnpj = col_map.get("cnpj_companhia")
-                c_fim = col_map.get("data_fim_negociacao")
-                c_ref = col_map.get("data_referencia")
-                if not c_tk or not c_cnpj:
-                    continue
-                if c_ref:
-                    df = df.sort_values(c_ref, ascending=True)
-                for _, row in df.iterrows():
-                    tk_val = str(row.get(c_tk) or "").strip().upper()
-                    cnpj_val = str(row.get(c_cnpj) or "").strip()
-                    if not pat_tk.match(tk_val) or not cnpj_val:
+                with zf.open(alvos[0]) as f_raw:
+                    txt_f = io.TextIOWrapper(f_raw, encoding="latin-1", errors="replace", newline="")
+                    reader = csv.reader(txt_f, delimiter=";")
+                    try:
+                        header = next(reader)
+                    except StopIteration:
                         continue
-                    fim_val = str(row.get(c_fim) or "").strip() if c_fim else ""
+                    col_map = {c.strip().lower(): i for i, c in enumerate(header)}
+                    i_tk = col_map.get("codigo_negociacao", -1)
+                    i_cnpj = col_map.get("cnpj_companhia", -1)
+                    i_fim = col_map.get("data_fim_negociacao", -1)
+                    i_ref = col_map.get("data_referencia", -1)
+                    if i_tk < 0 or i_cnpj < 0:
+                        continue
+                    linhas_fca: list[tuple[str, int, str, str, str]] = []
+                    for idx_r, row in enumerate(reader):
+                        if not row:
+                            continue
+                        tk_val = row[i_tk].strip().upper() if i_tk < len(row) else ""
+                        cnpj_val = row[i_cnpj].strip() if i_cnpj < len(row) else ""
+                        if not pat_tk.match(tk_val) or not cnpj_val:
+                            continue
+                        fim_val = row[i_fim].strip() if (i_fim >= 0 and i_fim < len(row)) else ""
+                        ref_val = row[i_ref].strip() if (i_ref >= 0 and i_ref < len(row)) else ""
+                        linhas_fca.append((ref_val, idx_r, tk_val, cnpj_val, fim_val))
+                if i_ref >= 0:
+                    linhas_fca.sort(key=lambda x: (x[0], x[1]))
+                for _, _, tk_val, cnpj_val, fim_val in linhas_fca:
                     if fim_val and fim_val < f"{ano - 1}-01-01" and tk_val in mapa_tk:
                         continue
                     mapa_tk[tk_val] = cnpj_val
@@ -1596,166 +1844,155 @@ def carregar_mapa_cvm_tickers() -> tuple[dict[str, str], dict[str, str]]:
                 break
         except Exception:
             continue
+        finally:
+            if tmp_fca and os.path.exists(tmp_fca):
+                try:
+                    os.unlink(tmp_fca)
+                except OSError:
+                    pass
 
-    try:
-        resp_cad = requests.get(
-            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv",
-            headers=HEADERS,
-            timeout=20,
-        )
-        if resp_cad.status_code == 200:
-            df_cad = pd.read_csv(
-                io.BytesIO(resp_cad.content),
-                sep=";",
-                encoding="latin-1",
-                dtype=str,
-                usecols=lambda c: c in {"CNPJ_CIA", "CD_CVM", "SIT"},
-            )
-            for _, row in df_cad.iterrows():
-                cnpj_c = str(row.get("CNPJ_CIA") or "").strip()
-                cd_c = str(row.get("CD_CVM") or "").strip().lstrip("0")
-                if cnpj_c and cd_c:
-                    mapa_cod[cd_c] = cnpj_c
-    except Exception:
-        pass
-
+    mapa_cod, _ = _carregar_cad_cia_aberta_cvm()
     return mapa_tk, mapa_cod
 
-@st.cache_data(ttl=86400, show_spinner=False)
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def carregar_nomes_cvm_tickers() -> dict[str, str]:
     """Retorna mapa {ticker: Nome Completo Formatado} direto da base cadastral da CVM."""
     mapa_tk, _ = carregar_mapa_cvm_tickers()
     if not mapa_tk:
         return {}
-    mapa_cnpj_nome: dict[str, str] = {}
-    try:
-        resp_cad = requests.get(
-            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv",
-            headers=HEADERS,
-            timeout=20,
-        )
-        if resp_cad.status_code == 200:
-            df_cad = pd.read_csv(
-                io.BytesIO(resp_cad.content),
-                sep=";",
-                encoding="latin-1",
-                dtype=str,
-                usecols=lambda c: c in {"CNPJ_CIA", "DENOM_SOCIAL", "DENOM_COMERC"},
-            )
-            for _, row in df_cad.iterrows():
-                cnpj_c = str(row.get("CNPJ_CIA") or "").strip()
-                if not cnpj_c:
-                    continue
-                soc = formatar_nome_empresa_completo(str(row.get("DENOM_SOCIAL") or ""))
-                com = formatar_nome_empresa_completo(str(row.get("DENOM_COMERC") or ""))
-                if soc and com:
-                    soc_n = _norm_txt(soc)
-                    com_n = _norm_txt(com)
-                    if com_n in soc_n or len(com) <= 3:
-                        nome_f = soc
-                    elif soc_n in com_n:
-                        nome_f = com
-                    else:
-                        nome_f = f"{soc} ({com})" if len(soc) <= 38 else com
-                else:
-                    nome_f = soc or com
-                if nome_f:
-                    mapa_cnpj_nome[cnpj_c] = nome_f
-    except Exception:
+    _, mapa_cnpj_nome = _carregar_cad_cia_aberta_cvm()
+    if not mapa_cnpj_nome:
         return {}
-
     return {tk: mapa_cnpj_nome[cnpj] for tk, cnpj in mapa_tk.items() if cnpj in mapa_cnpj_nome}
 
 
-def _ler_df_cvm_zip(zf: zipfile.ZipFile, padrao_nome: str, tipo_doc: str) -> pd.DataFrame:
-    alvos = [n for n in zf.namelist() if padrao_nome in n and n.lower().endswith(".csv")]
-    if not alvos:
-        return pd.DataFrame()
-    nome_csv = alvos[0]
-
-    with zf.open(nome_csv) as f_head:
-        cols_disp = list(pd.read_csv(f_head, sep=";", encoding="latin-1", nrows=0).columns)
-
-    desejadas = ["CNPJ_CIA", "VERSAO", "DT_REFER", "DT_INI_EXERC", "DT_FIM_EXERC", "ORDEM_EXERC", "CD_CONTA", "DS_CONTA", "VL_CONTA", "ESCALA_MOEDA"]
-    usecols = [c for c in desejadas if c in cols_disp]
-    dtype_map = {c: str for c in usecols if c not in ("VERSAO", "VL_CONTA")}
-
-    partes = []
-    with zf.open(nome_csv) as f:
-        for chunk in pd.read_csv(f, sep=";", encoding="latin-1", usecols=usecols, dtype=dtype_map, chunksize=100_000):
-            if "ORDEM_EXERC" in chunk.columns:
-                chunk = chunk[chunk["ORDEM_EXERC"] == "ÚLTIMO"]
-            if chunk.empty:
-                continue
-
-            cd = chunk["CD_CONTA"].fillna("").str.strip()
-            ds = chunk["DS_CONTA"].fillna("").str.lower()
-
-            if tipo_doc == "DRE":
-                mask = cd.isin({"3.01", "3.03", "3.05", "3.11", "3.11.01", "3.13"}) | (
-                    (cd.str.len() <= 7) & cd.str.startswith("3.") & ds.str.contains("lucro|preju|resultado líq|resultado liq", regex=True)
-                )
-            elif tipo_doc == "BPA":
-                mask = cd.isin({"1.01.01", "1.01.02"})
-            elif tipo_doc == "BPP":
-                mask = cd.isin({"2.01.04", "2.02.01", "2.03", "2.03.09", "2.07", "2.07.01", "2.07.02"}) | (
-                    (cd.str.len() <= 7) & cd.str.startswith("2.") & ds.str.contains("patrimônio l|patrimonio l", regex=True)
-                )
-            elif tipo_doc == "DFC_MI":
-                mask = cd.str.startswith("6.01") & ds.str.contains("deprecia|amortiza|exaust", regex=True)
-            else:
-                mask = pd.Series(False, index=chunk.index)
-
-            sub = chunk[mask].copy()
-            if sub.empty:
-                continue
-            sub["CD_CONTA"] = cd[mask]
-            sub["DS_CONTA"] = sub["DS_CONTA"].fillna("").str.strip()
-            sub["CNPJ_CIA"] = sub["CNPJ_CIA"].fillna("").str.strip()
-            sub["VL_CONTA"] = pd.to_numeric(sub["VL_CONTA"], errors="coerce")
-            sub = sub.dropna(subset=["VL_CONTA"])
-            if "ESCALA_MOEDA" in sub.columns:
-                mult = sub["ESCALA_MOEDA"].fillna("").str.upper().map(lambda x: 1000.0 if x == "MIL" else 1.0)
-                sub["VL_CONTA"] = sub["VL_CONTA"] * mult
-            else:
-                sub["VL_CONTA"] = sub["VL_CONTA"] * 1000.0
-            if "VERSAO" in sub.columns:
-                sub["VERSAO"] = pd.to_numeric(sub["VERSAO"], errors="coerce").fillna(1)
-            else:
-                sub["VERSAO"] = 1
-            partes.append(sub)
-
-    if not partes:
-        return pd.DataFrame()
-    return pd.concat(partes, ignore_index=True)
-
-
-def _consolidar_registros_cvm(df_con: pd.DataFrame, df_ind: pd.DataFrame, eh_fluxo: bool = False) -> dict[tuple[str, str], dict]:
-    """Agrupa registros por (CNPJ_CIA, DT_REFER) mantendo consolidado > individual e última versão."""
+def _ler_e_consolidar_cvm_zip(
+    zf: zipfile.ZipFile,
+    padrao_ind: str,
+    padrao_con: str,
+    tipo_doc: str,
+    eh_fluxo: bool = False,
+) -> dict[tuple[str, str], dict]:
+    """Lê e consolida CSVs da CVM em streaming linha a linha (baixo uso de RAM)."""
     out: dict[tuple[str, str], dict] = {}
-    for prioridade, df in ((1, df_ind), (2, df_con)):
-        if df is None or df.empty:
+    nomes_zip = zf.namelist()
+    for prioridade, padrao_nome in ((1, padrao_ind), (2, padrao_con)):
+        alvos = [n for n in nomes_zip if padrao_nome in n and n.lower().endswith(".csv")]
+        if not alvos:
             continue
-        if eh_fluxo and "DT_INI_EXERC" in df.columns and "DT_FIM_EXERC" in df.columns:
-            dt_ini = pd.to_datetime(df["DT_INI_EXERC"], errors="coerce")
-            dt_fim = pd.to_datetime(df["DT_FIM_EXERC"], errors="coerce")
-            df = df.assign(_span=(dt_fim - dt_ini).dt.days.fillna(0))
-            df = df.sort_values(["VERSAO", "_span"], ascending=[True, True])
-        else:
-            df = df.sort_values("VERSAO", ascending=True)
-
-        # Para cada (CNPJ, DT_REFER, CD_CONTA) a última linha (maior VERSAO e maior _span YTD) vence
-        df = df.drop_duplicates(subset=["CNPJ_CIA", "DT_REFER", "CD_CONTA"], keep="last")
-
-        for row in df.itertuples(index=False):
-            key = (row.CNPJ_CIA, row.DT_REFER)
-            if key not in out:
-                out[key] = {"_prio": prioridade, "contas": {}}
-            elif prioridade < out[key]["_prio"]:
+        best_ranks: dict[tuple[str, str], dict[str, tuple[float, int]]] = {}
+        with zf.open(alvos[0]) as f_raw:
+            txt_f = io.TextIOWrapper(f_raw, encoding="latin-1", errors="replace", newline="")
+            reader = csv.reader(txt_f, delimiter=";")
+            try:
+                header = next(reader)
+            except StopIteration:
                 continue
-            elif prioridade > out[key]["_prio"]:
-                out[key] = {"_prio": prioridade, "contas": {}}
-            out[key]["contas"][row.CD_CONTA] = (row.DS_CONTA, float(row.VL_CONTA))
+            col_idx = {c.strip(): i for i, c in enumerate(header)}
+            i_cnpj = col_idx.get("CNPJ_CIA", -1)
+            i_ver = col_idx.get("VERSAO", -1)
+            i_ref = col_idx.get("DT_REFER", -1)
+            i_ini = col_idx.get("DT_INI_EXERC", -1)
+            i_fim = col_idx.get("DT_FIM_EXERC", -1)
+            i_ord = col_idx.get("ORDEM_EXERC", -1)
+            i_cd = col_idx.get("CD_CONTA", -1)
+            i_ds = col_idx.get("DS_CONTA", -1)
+            i_vl = col_idx.get("VL_CONTA", -1)
+            i_esc = col_idx.get("ESCALA_MOEDA", -1)
+            if i_cnpj < 0 or i_ref < 0 or i_cd < 0 or i_ds < 0 or i_vl < 0:
+                continue
+            tem_span = eh_fluxo and i_ini >= 0 and i_fim >= 0
+            for row in reader:
+                if not row:
+                    continue
+                if i_ord >= 0 and (i_ord >= len(row) or row[i_ord] != "ÚLTIMO"):
+                    continue
+                cd = row[i_cd].strip() if i_cd < len(row) else ""
+                ds_raw = row[i_ds].strip() if i_ds < len(row) else ""
+                ds_low = ds_raw.lower()
+                if tipo_doc == "DRE":
+                    ok = (cd in _CVM_DRE_CODES) or (
+                        len(cd) <= 7
+                        and cd.startswith("3.")
+                        and ("lucro" in ds_low or "preju" in ds_low or "resultado líq" in ds_low or "resultado liq" in ds_low)
+                    )
+                elif tipo_doc == "BPA":
+                    ok = cd in _CVM_BPA_CODES
+                elif tipo_doc == "BPP":
+                    ok = (cd in _CVM_BPP_CODES) or (
+                        len(cd) <= 7
+                        and cd.startswith("2.")
+                        and ("patrimônio l" in ds_low or "patrimonio l" in ds_low)
+                    )
+                elif tipo_doc == "DFC_MI":
+                    ok = cd.startswith("6.01") and ("deprecia" in ds_low or "amortiza" in ds_low or "exaust" in ds_low)
+                else:
+                    ok = False
+                if not ok:
+                    continue
+
+                vl_s = row[i_vl].strip() if i_vl < len(row) else ""
+                if not vl_s:
+                    continue
+                try:
+                    vl = float(vl_s)
+                except ValueError:
+                    continue
+                if not math.isfinite(vl):
+                    continue
+                if i_esc >= 0:
+                    esc_s = row[i_esc].strip().upper() if i_esc < len(row) else ""
+                    if esc_s == "MIL":
+                        vl *= 1000.0
+                else:
+                    vl *= 1000.0
+
+                versao = 1.0
+                if i_ver >= 0 and i_ver < len(row):
+                    vs = row[i_ver].strip()
+                    if vs:
+                        try:
+                            vf = float(vs)
+                            if math.isfinite(vf):
+                                versao = vf
+                        except ValueError:
+                            pass
+
+                span = 0
+                if tem_span:
+                    s_ini = row[i_ini].strip() if i_ini < len(row) else ""
+                    s_fim = row[i_fim].strip() if i_fim < len(row) else ""
+                    if len(s_ini) >= 10 and len(s_fim) >= 10:
+                        try:
+                            d_ini = date(int(s_ini[:4]), int(s_ini[5:7]), int(s_ini[8:10]))
+                            d_fim = date(int(s_fim[:4]), int(s_fim[5:7]), int(s_fim[8:10]))
+                            span = (d_fim - d_ini).days
+                        except Exception:
+                            span = 0
+
+                cnpj = row[i_cnpj].strip() if i_cnpj < len(row) else ""
+                dt_ref = row[i_ref].strip() if i_ref < len(row) else ""
+                key = (cnpj, dt_ref)
+                entry = out.get(key)
+                if entry is None:
+                    entry = {"_prio": prioridade, "contas": {}}
+                    out[key] = entry
+                    best_ranks[key] = {}
+                elif prioridade < entry["_prio"]:
+                    continue
+                elif prioridade > entry["_prio"]:
+                    entry = {"_prio": prioridade, "contas": {}}
+                    out[key] = entry
+                    best_ranks[key] = {}
+
+                ranks_k = best_ranks.setdefault(key, {})
+                rank_cur = (versao, span)
+                prev_rank = ranks_k.get(cd)
+                if prev_rank is None or rank_cur >= prev_rank:
+                    ranks_k[cd] = rank_cur
+                    entry["contas"][cd] = (ds_raw, vl)
+        best_ranks.clear()
     return out
 
 
@@ -1855,37 +2092,28 @@ def _extrair_metricas_periodo(dre_c: dict, bpa_c: dict, bpp_c: dict, dfc_c: dict
     }
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=10)
 def carregar_cvm_doc_ano(tipo: str, ano: int) -> dict[tuple[str, str], dict]:
-    """Baixa e resume DFP ou ITR de um ano da CVM por (CNPJ_CIA, DT_REFER)."""
+    """Baixa (em disco) e resume DFP ou ITR de um ano da CVM por (CNPJ_CIA, DT_REFER)."""
     base = "DFP" if tipo == "DFP" else "ITR"
     url = f"https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{base}/DADOS/{tipo.lower()}_cia_aberta_{ano}.zip"
+    tmp_path = None
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=45)
-        if resp.status_code != 200:
-            return {}
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        with requests.get(url, headers=HEADERS, timeout=45, stream=True) as resp:
+            if resp.status_code != 200:
+                return {}
+            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
+                tmp_path = tf.name
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        tf.write(chunk)
+
+        with zipfile.ZipFile(tmp_path) as zf:
             pref = f"{tipo.lower()}_cia_aberta"
-            dre_m = _consolidar_registros_cvm(
-                _ler_df_cvm_zip(zf, f"{pref}_DRE_con", "DRE"),
-                _ler_df_cvm_zip(zf, f"{pref}_DRE_ind", "DRE"),
-                eh_fluxo=True,
-            )
-            bpa_m = _consolidar_registros_cvm(
-                _ler_df_cvm_zip(zf, f"{pref}_BPA_con", "BPA"),
-                _ler_df_cvm_zip(zf, f"{pref}_BPA_ind", "BPA"),
-                eh_fluxo=False,
-            )
-            bpp_m = _consolidar_registros_cvm(
-                _ler_df_cvm_zip(zf, f"{pref}_BPP_con", "BPP"),
-                _ler_df_cvm_zip(zf, f"{pref}_BPP_ind", "BPP"),
-                eh_fluxo=False,
-            )
-            dfc_m = _consolidar_registros_cvm(
-                _ler_df_cvm_zip(zf, f"{pref}_DFC_MI_con", "DFC_MI"),
-                _ler_df_cvm_zip(zf, f"{pref}_DFC_MI_ind", "DFC_MI"),
-                eh_fluxo=True,
-            )
+            dre_m = _ler_e_consolidar_cvm_zip(zf, f"{pref}_DRE_ind", f"{pref}_DRE_con", "DRE", eh_fluxo=True)
+            bpa_m = _ler_e_consolidar_cvm_zip(zf, f"{pref}_BPA_ind", f"{pref}_BPA_con", "BPA", eh_fluxo=False)
+            bpp_m = _ler_e_consolidar_cvm_zip(zf, f"{pref}_BPP_ind", f"{pref}_BPP_con", "BPP", eh_fluxo=False)
+            dfc_m = _ler_e_consolidar_cvm_zip(zf, f"{pref}_DFC_MI_ind", f"{pref}_DFC_MI_con", "DFC_MI", eh_fluxo=True)
 
         chaves = set(dre_m.keys()) | set(bpp_m.keys())
         resumo: dict[tuple[str, str], dict] = {}
@@ -1898,14 +2126,25 @@ def carregar_cvm_doc_ano(tipo: str, ano: int) -> dict[tuple[str, str], dict]:
             )
             if met is not None:
                 resumo[k] = met
+        dre_m.clear()
+        bpa_m.clear()
+        bpp_m.clear()
+        dfc_m.clear()
+        gc.collect()
         return resumo
     except Exception:
         return {}
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dict], dict | None]:
-    """Retorna (anuais_por_ano, ttm_cvm) direto da CVM em R$."""
-    mapa_tk, mapa_cod = carregar_mapa_cvm_tickers()
+    """Retorna (anuais_por_ano, ttm_cvm) direto da CVM em R$ (processamento sequencial com baixo uso de RAM)."""
+    mapa_tk, _ = carregar_mapa_cvm_tickers()
     cnpj = mapa_tk.get(ticker)
     if not cnpj:
         return {}, None
@@ -1913,31 +2152,24 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
     ano_atual = datetime.now(BRT).year
     anos_dfp = list(range(ano_atual - 4, ano_atual))
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs_dfp = {a: ex.submit(carregar_cvm_doc_ano, "DFP", a) for a in anos_dfp}
-        fut_itr_atual = ex.submit(carregar_cvm_doc_ano, "ITR", ano_atual)
-        fut_itr_ant = ex.submit(carregar_cvm_doc_ano, "ITR", ano_atual - 1)
-        dfps_lista = [(a, fut.result()) for a, fut in futs_dfp.items()]
+    anuais: dict[int, dict] = {}
+    for a_dfp in anos_dfp:
+        dados_ano = carregar_cvm_doc_ano("DFP", a_dfp)
+        for (c_cnpj, dt_ref), met in dados_ano.items():
+            if c_cnpj == cnpj:
+                yr = int(str(dt_ref)[:4])
+                anuais[yr] = met
 
-        anuais: dict[int, dict] = {}
-        for _, dados_ano in dfps_lista:
-            for (c_cnpj, dt_ref), met in dados_ano.items():
-                if c_cnpj == cnpj:
-                    yr = int(str(dt_ref)[:4])
-                    anuais[yr] = met
+    if not anuais:
+        return {}, None
 
-        if not anuais:
-            return {}, None
-
-        ult_yr = max(anuais.keys())
-        if ult_yr + 1 == ano_atual:
-            itr_curr = fut_itr_atual.result()
-            itr_prev = fut_itr_ant.result()
-        else:
-            fut_curr = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr + 1)
-            fut_prev = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr)
-            itr_curr = fut_curr.result()
-            itr_prev = fut_prev.result()
+    ult_yr = max(anuais.keys())
+    if ult_yr + 1 == ano_atual:
+        itr_curr = carregar_cvm_doc_ano("ITR", ano_atual)
+        itr_prev = carregar_cvm_doc_ano("ITR", ano_atual - 1)
+    else:
+        itr_curr = carregar_cvm_doc_ano("ITR", ult_yr + 1)
+        itr_prev = carregar_cvm_doc_ano("ITR", ult_yr)
 
     # TTM via CVM: DFP(último_ano) + ITR_atual - ITR_mesmo_trimestre_ano_anterior
     ttm_cvm = None
@@ -1978,7 +2210,7 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
     return anuais, ttm_cvm
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False, max_entries=2)
 def _carregar_todos_ativos_b3_cached(_v: int = 3) -> list[dict]:
     linhas = _ler_tabela_fundamentus("https://www.fundamentus.com.br/resultado.php")
     ativos = []
@@ -2023,7 +2255,7 @@ def carregar_todos_ativos_b3() -> list[dict]:
     return _carregar_todos_ativos_b3_cached()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=10)
 def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 4) -> dict[str, str]:
     if not setor_ids:
         return {}
@@ -2042,15 +2274,30 @@ def carregar_tickers_por_setor(setor_ids: tuple[str, ...], _v: int = 4) -> dict[
                     time.sleep(0.25)
         return sid, []
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for sid, papeis in ex.map(_one_setor, setor_ids):
-            nome_setor = id_para_nome.get(sid, f"Setor {sid}")
-            for papel in papeis:
-                mapa_setor[papel] = nome_setor
+    faltantes: list[str] = []
+    por_sid: dict[str, list[str]] = {}
+    for sid in dict.fromkeys(setor_ids):
+        cached = _CACHE_SETORES_ID.get(sid)
+        if cached is not _CACHE_MISS:
+            por_sid[sid] = cached
+        else:
+            faltantes.append(sid)
+
+    if faltantes:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for sid, papeis in ex.map(_one_setor, faltantes):
+                _CACHE_SETORES_ID.set(sid, papeis)
+                por_sid[sid] = papeis
+        gc.collect()
+
+    for sid, papeis in por_sid.items():
+        nome_setor = id_para_nome.get(sid, f"Setor {sid}")
+        for papel in papeis:
+            mapa_setor[papel] = nome_setor
     return mapa_setor
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=2)
 def carregar_mapa_todos_setores(_v: int = 4) -> dict[str, str]:
     setores_dict = carregar_setores_fundamentus()
     return carregar_tickers_por_setor(tuple(setores_dict.values()), _v=_v)
@@ -2300,17 +2547,32 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
     except Exception:
         return ticker, {}
 
-@st.cache_data(ttl=300, show_spinner=False)
 def buscar_yahoo_lote(tickers_tuple: tuple[str, ...], _v: int = 2) -> dict[str, dict]:
     if not tickers_tuple:
         return {}
-    resultados = {}
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        for ticker, dados in executor.map(_fetch_yf, tickers_tuple):
-            resultados[ticker] = dados
+    resultados: dict[str, dict] = {}
+    faltantes: list[str] = []
+    vistos: set[str] = set()
+    for tk in tickers_tuple:
+        if tk in vistos:
+            continue
+        vistos.add(tk)
+        cached = _CACHE_YF.get(tk)
+        if cached is not _CACHE_MISS:
+            resultados[tk] = cached
+        else:
+            faltantes.append(tk)
+
+    if faltantes:
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            for ticker, dados in executor.map(_fetch_yf, faltantes):
+                _CACHE_YF.set(ticker, dados)
+                resultados[ticker] = dados
+        gc.collect()
     return resultados
 
-@st.cache_data(ttl=600, show_spinner=False)
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=2)
 def buscar_ret_ibov_30d() -> float | None:
     try:
         h = yf.Ticker("^BVSP").history(period="3mo", interval="1d", auto_adjust=False)
@@ -2323,7 +2585,7 @@ def buscar_ret_ibov_30d() -> float | None:
     return None
 
 
-@st.cache_data(ttl=43200, show_spinner=False)
+@st.cache_data(ttl=43200, show_spinner=False, max_entries=2)
 def buscar_yield_exigido_bazin() -> float:
     """Retorna Yield exigido para Bazin Dinâmico entre 6,0% e 7,5% (NTN-B 10a + 1,0%)."""
     try:
@@ -2336,14 +2598,39 @@ def buscar_yield_exigido_bazin() -> float:
     return 0.065
 
 
-@st.cache_data(ttl=180, show_spinner=False)
-def buscar_ohlcv_preco(
+def _recortar_ohlcv_periodo(df: pd.DataFrame, periodo_label: str) -> pd.DataFrame:
+    ult_d_ref = df.index.normalize().max()
+    hoje_brt_ts = pd.Timestamp(datetime.now(BRT).date())
+    ref_corte = max(ult_d_ref, hoje_brt_ts)
+    offsets_per = {
+        "30 D": pd.DateOffset(days=30),
+        "6 M": pd.DateOffset(days=182),
+        "1 A": pd.DateOffset(days=365),
+        "5 A": pd.DateOffset(days=1825),
+        "10 A": pd.DateOffset(days=3650),
+        "15 A": pd.DateOffset(days=5475),
+    }
+    if periodo_label == "YTD":
+        return df[df.index.normalize() >= pd.Timestamp(year=ref_corte.year, month=1, day=1)]
+    if periodo_label in offsets_per:
+        dt_corte = ref_corte - offsets_per[periodo_label]
+        sub_corte = df[df.index.normalize() >= dt_corte]
+        if not sub_corte.empty:
+            return sub_corte
+    return df
+
+
+def _buscar_ohlcv_preco_base(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
-    cot_live: float | None = None,
     _v: int = 4,
 ) -> pd.DataFrame:
+    cache_key = (ticker.upper(), periodo_label, bool(ajustada), _v)
+    cached = _CACHE_OHLCV.get(cache_key)
+    if cached is not _CACHE_MISS:
+        return cached
+
     tk = yf.Ticker(f"{ticker}.SA")
     eh_intraday = periodo_label in ("1 D", "7 D")
 
@@ -2364,11 +2651,14 @@ def buscar_ohlcv_preco(
             df.index = _idx_para_brt_naive(df.index)
 
     if df is None or df.empty or "Close" not in df.columns:
-        return pd.DataFrame()
+        empty_df = pd.DataFrame()
+        _CACHE_OHLCV.set(cache_key, empty_df)
+        return empty_df
 
     cols_ok = [c for c in ("Open", "High", "Low", "Close", "Volume") if c in df.columns]
     df = df[cols_ok].dropna(subset=["Close"]).copy()
     if df.empty:
+        _CACHE_OHLCV.set(cache_key, df)
         return df
 
     # Sincroniza pregões recentes caso o endpoint diário (1d) do Yahoo esteja 1+ dia atrasado
@@ -2392,9 +2682,29 @@ def buscar_ohlcv_preco(
                         df.loc[d_n] = {k: nova_linha[k] for k in df.columns}
         except Exception:
             pass
+        df = _recortar_ohlcv_periodo(df.sort_index(), periodo_label)
 
-        if cot_live and float(cot_live) > 0.0:
-            cot_f = float(cot_live)
+    df = df.sort_index()
+    _CACHE_OHLCV.set(cache_key, df)
+    return df
+
+
+def buscar_ohlcv_preco(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+    _v: int = 4,
+) -> pd.DataFrame:
+    df_base = _buscar_ohlcv_preco_base(ticker, periodo_label, ajustada, _v=_v)
+    if df_base is None or df_base.empty:
+        return pd.DataFrame()
+    df = df_base.copy()
+    eh_intraday = periodo_label in ("1 D", "7 D")
+
+    if cot_live and float(cot_live) > 0.0:
+        cot_f = float(cot_live)
+        if not eh_intraday:
             ult_data_df = df.index.normalize().max()
             dt_fund_ts = None
             try:
@@ -2408,6 +2718,7 @@ def buscar_ohlcv_preco(
             if dt_fund_ts is not None and pd.notna(dt_fund_ts) and dt_fund_ts > ult_data_df:
                 nova_l = {"Open": cot_f, "High": cot_f, "Low": cot_f, "Close": cot_f, "Volume": 0.0}
                 df.loc[dt_fund_ts] = {k: nova_l[k] for k in df.columns}
+                df = _recortar_ohlcv_periodo(df.sort_index(), periodo_label)
             elif abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
                 idx_ult = df.index[-1]
                 df.loc[idx_ult, "Close"] = cot_f
@@ -2415,37 +2726,17 @@ def buscar_ohlcv_preco(
                     df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
                 if "Low" in df.columns:
                     df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
-
-        df = df.sort_index()
-        ult_d_ref = df.index.normalize().max()
-        hoje_brt_ts = pd.Timestamp(datetime.now(BRT).date())
-        ref_corte = max(ult_d_ref, hoje_brt_ts)
-        offsets_per = {
-            "30 D": pd.DateOffset(days=30),
-            "6 M": pd.DateOffset(days=182),
-            "1 A": pd.DateOffset(days=365),
-            "5 A": pd.DateOffset(days=1825),
-            "10 A": pd.DateOffset(days=3650),
-            "15 A": pd.DateOffset(days=5475),
-        }
-        if periodo_label == "YTD":
-            df = df[df.index.normalize() >= pd.Timestamp(year=ref_corte.year, month=1, day=1)]
-        elif periodo_label in offsets_per:
-            dt_corte = ref_corte - offsets_per[periodo_label]
-            sub_corte = df[df.index.normalize() >= dt_corte]
-            if not sub_corte.empty:
-                df = sub_corte
-    elif cot_live and float(cot_live) > 0.0:
-        cot_f = float(cot_live)
-        if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
-            idx_ult = df.index[-1]
-            df.loc[idx_ult, "Close"] = cot_f
-            if "High" in df.columns:
-                df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
-            if "Low" in df.columns:
-                df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
+        else:
+            if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
+                idx_ult = df.index[-1]
+                df.loc[idx_ult, "Close"] = cot_f
+                if "High" in df.columns:
+                    df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
+                if "Low" in df.columns:
+                    df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
 
     return df.sort_index()
+
 
 def buscar_historico_preco(
     ticker: str,
@@ -2458,7 +2749,8 @@ def buscar_historico_preco(
         return pd.Series(dtype=float)
     return df["Close"].dropna()
 
-@st.cache_data(ttl=300, show_spinner=False)
+
+@st.cache_data(ttl=300, show_spinner=False, max_entries=60)
 def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None, ajustada: bool = False, _v: int = 2) -> float | None:
     try:
         tk = yf.Ticker(f"{ticker}.SA")
@@ -2482,7 +2774,7 @@ def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None, ajustada:
     return None
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=25)
 def buscar_serie_max_ajustada(ticker: str) -> pd.Series:
     tk = yf.Ticker(f"{ticker}.SA")
     df = tk.history(period="max", interval="1d", auto_adjust=True)
@@ -2528,10 +2820,14 @@ def _calc_impostos_renda_fixa(ganho_bruto: float, dias_corridos: int) -> tuple[f
     return iof_val, ir_val, aliq_iof_pct, aliq_ir_pct, (iof_val + ir_val)
 
 
-@st.cache_data(ttl=43200, show_spinner=False)
 def buscar_historico_selic_bcb() -> tuple[pd.Series, float | None]:
     """Retorna (serie_selic_diaria_pct, selic_anual_atual_pct) via API SGS do Banco Central."""
     hoje_brt = datetime.now(BRT).date()
+    cache_k = hoje_brt.isoformat()
+    cached = _CACHE_SELIC.get(cache_k)
+    if cached is not _CACHE_MISS:
+        return cached
+
     janelas = [
         (hoje_brt - timedelta(days=365 * 16 + 30), hoje_brt - timedelta(days=365 * 8 + 1)),
         (hoje_brt - timedelta(days=365 * 8), hoje_brt),
@@ -2545,11 +2841,11 @@ def buscar_historico_selic_bcb() -> tuple[pd.Series, float | None]:
                     f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod_serie}/dados"
                     f"?formato=json&dataInicial={d_ini.strftime('%d/%m/%Y')}&dataFinal={d_fim.strftime('%d/%m/%Y')}"
                 )
-                resp = requests.get(url, headers=HEADERS, timeout=12)
-                if resp.status_code == 200:
-                    js = resp.json()
-                    if isinstance(js, list):
-                        regs.extend(js)
+                with requests.get(url, headers=HEADERS, timeout=12) as resp:
+                    if resp.status_code == 200:
+                        js = resp.json()
+                        if isinstance(js, list):
+                            regs.extend(js)
             except Exception:
                 continue
         if not regs:
@@ -2575,14 +2871,14 @@ def buscar_historico_selic_bcb() -> tuple[pd.Series, float | None]:
                 f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{cod_aa}/dados"
                 f"?formato=json&dataInicial={(hoje_brt - timedelta(days=30)).strftime('%d/%m/%Y')}&dataFinal={hoje_brt.strftime('%d/%m/%Y')}"
             )
-            resp_aa = requests.get(url_aa, headers=HEADERS, timeout=8)
-            if resp_aa.status_code == 200:
-                arr_aa = resp_aa.json()
-                if isinstance(arr_aa, list) and arr_aa:
-                    v_aa = float(arr_aa[-1]["valor"])
-                    if v_aa > 0:
-                        selic_aa = v_aa
-                        break
+            with requests.get(url_aa, headers=HEADERS, timeout=8) as resp_aa:
+                if resp_aa.status_code == 200:
+                    arr_aa = resp_aa.json()
+                    if isinstance(arr_aa, list) and arr_aa:
+                        v_aa = float(arr_aa[-1]["valor"])
+                        if v_aa > 0:
+                            selic_aa = v_aa
+                            break
         except Exception:
             continue
 
@@ -2591,12 +2887,15 @@ def buscar_historico_selic_bcb() -> tuple[pd.Series, float | None]:
         if r_ult > 0:
             selic_aa = ((1.0 + r_ult) ** 252.0 - 1.0) * 100.0
 
-    return serie, selic_aa
+    res = (serie, selic_aa)
+    _CACHE_SELIC.set(cache_k, res)
+    return res
 
 
-@st.cache_data(ttl=43200, show_spinner=False)
+@st.cache_data(ttl=43200, show_spinner=False, max_entries=60)
 def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: float) -> float | None:
     """Consulta exatamente a Calculadora do Cidadão do BCB (Correção pela Taxa Selic)."""
+    soup = None
     try:
         url = "https://www3.bcb.gov.br/CALCIDADAO/publico/corrigirPelaSelic.do?method=corrigirPelaSelic"
         payload = {
@@ -2605,7 +2904,7 @@ def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: 
             "dataFinal": dt_fim_str,
             "valorCorrecao": f"{valor:.2f}".replace(".", ","),
         }
-        resp = requests.post(
+        with requests.post(
             url,
             data=payload,
             headers={
@@ -2613,10 +2912,10 @@ def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: 
                 "Referer": "https://www3.bcb.gov.br/CALCIDADAO/publico/exibirFormCorrecaoValores.do?method=exibirFormCorrecaoValores&aba=4",
             },
             timeout=2.5,
-        )
-        if resp.status_code != 200:
-            return None
-        soup = BeautifulSoup(resp.text, "lxml")
+        ) as resp:
+            if resp.status_code != 200:
+                return None
+            soup = BeautifulSoup(resp.text, "lxml")
         txt = " ".join(soup.get_text(" ", strip=True).split())
         m = re.search(r"Valor corrigido na data final\s*:?\s*R\$\s*([\d.]+,\d{2})", txt, flags=re.IGNORECASE)
         if m:
@@ -2628,6 +2927,9 @@ def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: 
                 return valor * fator
     except Exception:
         pass
+    finally:
+        if soup is not None:
+            soup.decompose()
     return None
 
 
@@ -2667,7 +2969,7 @@ def _idx_para_brt_naive(idx) -> pd.DatetimeIndex:
     return dt_idx
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False, max_entries=10)
 def buscar_dados_ibov_google(periodo: str) -> dict:
     tk = yf.Ticker("^BVSP")
     prev_close = None
@@ -3038,8 +3340,10 @@ def render_widget_ibov_google():
         )
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def buscar_divs_e_precos_carteira(tickers_tuple: tuple[str, ...]) -> dict[str, dict]:
+    if not tickers_tuple:
+        return {}
+
     def _one(t: str):
         try:
             tk = yf.Ticker(f"{t}.SA")
@@ -3056,10 +3360,25 @@ def buscar_divs_e_precos_carteira(tickers_tuple: tuple[str, ...]) -> dict[str, d
         except Exception:
             return t, {"px": pd.Series(dtype=float), "divs": pd.Series(dtype=float)}
 
-    out = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for t, res in ex.map(_one, tickers_tuple):
-            out[t] = res
+    out: dict[str, dict] = {}
+    faltantes: list[str] = []
+    vistos: set[str] = set()
+    for t in tickers_tuple:
+        if t in vistos:
+            continue
+        vistos.add(t)
+        cached = _CACHE_DIVS_CART.get(t)
+        if cached is not _CACHE_MISS:
+            out[t] = cached
+        else:
+            faltantes.append(t)
+
+    if faltantes:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for t, res in ex.map(_one, faltantes):
+                _CACHE_DIVS_CART.set(t, res)
+                out[t] = res
+        gc.collect()
     return out
 
 
@@ -3076,17 +3395,15 @@ def _pick_row(df: pd.DataFrame, candidatos: list[str], col) -> float | None:
     return None
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def buscar_historico_fundamentalista(
-    ticker: str,
-    cot_live: float | None = None,
-    pl_live: float | None = None,
-    pvp_live: float | None = None,
-    vpa_live: float | None = None,
-) -> tuple[list[dict], bool, str, str]:
-    tk = yf.Ticker(f"{ticker}.SA")
+def _buscar_historico_fundamentalista_base(ticker: str) -> tuple[list[dict], bool, str, str, dict]:
+    tk_up = str(ticker or "").strip().upper()
+    cached = _CACHE_HIST_FUND.get(tk_up)
+    if cached is not _CACHE_MISS:
+        return cached
+
+    tk = yf.Ticker(f"{tk_up}.SA")
     with ThreadPoolExecutor(max_workers=3) as ex_hf:
-        fut_det = ex_hf.submit(buscar_detalhes_fundamentus, ticker)
+        fut_det = ex_hf.submit(buscar_detalhes_fundamentus, tk_up)
         fut_px = ex_hf.submit(lambda: tk.history(period="7y", interval="1d", auto_adjust=False))
         fut_info = ex_hf.submit(lambda: tk.info or {})
         det_fund = fut_det.result()
@@ -3123,7 +3440,7 @@ def buscar_historico_fundamentalista(
             cot_yf_live = fi_h.get("lastPrice") or fi_h.get("regularMarketPrice")
     except Exception:
         pass
-    cot_atual = cot_live or cot_yf_live or info.get("currentPrice") or info.get("regularMarketPrice") or cot_fund
+    cot_atual = cot_yf_live or info.get("currentPrice") or info.get("regularMarketPrice") or cot_fund
     if not cot_atual and not hist_px.empty:
         cot_atual = float(hist_px["Close"].iloc[-1])
 
@@ -3312,13 +3629,7 @@ def buscar_historico_fundamentalista(
         "val_merc": val_merc_12, "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": False,
     })
 
-    # 3) Linha ATUAL (recalculada pela cotação vigente)
-    cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
-    val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
-    pl_atual = pl_live if pl_live is not None else ((val_merc_atual / lliq_12) if (val_merc_atual and lliq_12 and lliq_12 != 0) else pl_12)
     patr_atual = parse_br_num(det_fund.get("Patrim. Líq")) or ((vpa_12 * acoes_info) if (vpa_12 and acoes_info) else None)
-    pvp_atual = pvp_live if pvp_live is not None else ((val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else pvp_12)
-    pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
 
     # 2.5) Linha MÉDIA (anos inteiros + meses inéditos do ano atual, sem repetir meses do ano anterior em ÚLT. 12M)
     linhas_anuais = [x for x in linhas if x["ano"] != "ÚLT. 12M"]
@@ -3407,14 +3718,66 @@ def buscar_historico_fundamentalista(
             "media_info": media_info,
         })
 
+    meta_base = {
+        "cot_base_fb": cot_atual,
+        "acoes_info": acoes_info,
+        "patr_atual": patr_atual,
+        "vpa_12": vpa_12,
+        "val_merc_12": val_merc_12,
+        "pl_12": pl_12,
+        "pvp_12": pvp_12,
+        "pebitda_12": pebitda_12,
+        "div_liq_12": div_liq_12,
+        "marg_12": marg_12,
+        "ebitda_12": ebitda_12,
+        "lliq_12": lliq_12,
+        "lbr_12": lbr_12,
+        "rec_12": rec_12,
+    }
+    res_base = (linhas, eh_banco_seg, fin_curr, fonte_anual, meta_base)
+    _CACHE_HIST_FUND.set(tk_up, res_base)
+    del hist_px, info, tk
+    gc.collect()
+    return res_base
+
+
+def buscar_historico_fundamentalista(
+    ticker: str,
+    cot_live: float | None = None,
+    pl_live: float | None = None,
+    pvp_live: float | None = None,
+    vpa_live: float | None = None,
+) -> tuple[list[dict], bool, str, str]:
+    linhas_base, eh_banco_seg, fin_curr, fonte_anual, m = _buscar_historico_fundamentalista_base(ticker)
+    linhas = [dict(x) for x in linhas_base]
+    if not linhas:
+        return linhas, eh_banco_seg, fin_curr, fonte_anual
+
+    cot_atual = cot_live or m["cot_base_fb"]
+    acoes_info = m["acoes_info"]
+    val_merc_12 = m["val_merc_12"]
+    lliq_12 = m["lliq_12"]
+    patr_atual = m["patr_atual"]
+    ebitda_12 = m["ebitda_12"]
+    vpa_12 = m["vpa_12"]
+    pl_12 = m["pl_12"]
+    pvp_12 = m["pvp_12"]
+    pebitda_12 = m["pebitda_12"]
+
+    cot_txt = f" (R$ {fmt_num(cot_atual)})" if cot_atual else ""
+    val_merc_atual = ((cot_atual * acoes_info) if (cot_atual and acoes_info) else val_merc_12)
+    pl_atual = pl_live if pl_live is not None else ((val_merc_atual / lliq_12) if (val_merc_atual and lliq_12 and lliq_12 != 0) else pl_12)
+    pvp_atual = pvp_live if pvp_live is not None else ((val_merc_atual / patr_atual) if (val_merc_atual and patr_atual and patr_atual != 0) else pvp_12)
+    pebitda_atual = (val_merc_atual / ebitda_12) if (not eh_banco_seg and val_merc_atual and ebitda_12 and ebitda_12 != 0) else pebitda_12
+
     linhas.append({
         "ano": f"ATUAL{cot_txt}",
         "pl": pl_atual,
         "pvp": pvp_atual,
         "vpa": vpa_live if vpa_live is not None else vpa_12,
-        "div_liq": div_liq_12, "marg_liq": marg_12, "ebitda": ebitda_12,
+        "div_liq": m["div_liq_12"], "marg_liq": m["marg_12"], "ebitda": ebitda_12,
         "pebitda": pebitda_atual, "val_merc": val_merc_atual,
-        "lliq": lliq_12, "lbr": lbr_12, "rec": rec_12, "is_atual": True,
+        "lliq": lliq_12, "lbr": m["lbr_12"], "rec": m["rec_12"], "is_atual": True,
     })
 
     return linhas, eh_banco_seg, fin_curr, fonte_anual
@@ -6470,6 +6833,7 @@ with st.sidebar:
 
     if st.button("🔄 Atualizar Dados", type="primary", use_container_width=True):
         st.cache_data.clear()
+        _limpar_caches_memoria()
         st.rerun()
     slot_copiar_ia = st.empty()
 

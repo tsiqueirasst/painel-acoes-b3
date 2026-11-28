@@ -1202,7 +1202,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 18,
+    _v: int = 19,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     # --- CAMINHO RÁPIDO: rotas oficiais descobertas via DevTools (sem descoberta de rotas/JS) ---
@@ -1218,10 +1218,10 @@ def buscar_serie_investidor10_chart_com_info(
     elif periodo_label == "7 D":
         urls_fp = [f"{base_fp}/quotations/seven-days/{tk_up_fp}/"]
     elif periodo_label == "YTD":
-        dias_ytd_fp = max(1, (hoje_fp - date(hoje_fp.year, 1, 1)).days)
+        dias_ytd_fp = max(1, (hoje_fp - date(hoje_fp.year - 1, 12, 20)).days)
         urls_fp = [
-            f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/ytd/{adj_fp}/real",
             f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/{dias_ytd_fp}/{adj_fp}/real",
+            f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/ytd/{adj_fp}/real",
         ]
     elif periodo_label in dias_map_fp:
         urls_fp = [f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/{dias_map_fp[periodo_label]}/{adj_fp}/real"]
@@ -1263,9 +1263,7 @@ def buscar_serie_investidor10_chart_com_info(
                         continue
                 elif periodo_label == "YTD":
                     ano_fim_fp = s_fp.index[-1].year
-                    if s_fp.index[0] < pd.Timestamp(year=ano_fim_fp - 1, month=12, day=20):
-                        continue
-                    s_ytd_fp = s_fp if "/ytd/" in url_fp else s_fp[s_fp.index >= pd.Timestamp(year=ano_fim_fp, month=1, day=1)]
+                    s_ytd_fp = s_fp[s_fp.index >= pd.Timestamp(year=ano_fim_fp, month=1, day=1)]
                     if len(s_ytd_fp) < 3:
                         continue
                     s_fp = s_ytd_fp

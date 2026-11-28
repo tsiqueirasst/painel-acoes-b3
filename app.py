@@ -973,8 +973,8 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
             if val_num is not None:
                 dados[chave_dst] = val_num
 
-        for img_el in soup.find_all("img"):
-            src_i = (img_el.get("src") or img_el.get("data-src") or "").strip()
+        for img_el in soup.find_all("img", src=True):
+            src_i = (img_el.get("src") or "").strip()
             if "/storage/companies/" in src_i or "/companies/" in src_i:
                 dados["logo_i10"] = ("https://investidor10.com.br" + src_i) if src_i.startswith("/") else src_i
                 break
@@ -1117,21 +1117,6 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 5) -> dict:
         return {"erro": "erro de conexão"}
 
 
-def _extrair_prev_close_i10_json(js) -> float | None:
-    if not isinstance(js, dict):
-        return None
-    for k in (
-        "previous_close", "prev_close", "previous", "yesterday",
-        "yesterday_close", "last_close", "close_yesterday", "anterior",
-    ):
-        v = js.get(k)
-        if v is None:
-            continue
-        num = _parse_i10_num(v) if isinstance(v, str) else pd.to_numeric(v, errors="coerce")
-        if pd.notna(num) and float(num) > 0:
-            return float(num)
-    return None
-
 def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
     lista_pts = None
     if isinstance(js, list):
@@ -1195,14 +1180,8 @@ def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
             else:
                 dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
 
-        if isinstance(vl_raw, str):
-            vl_s = vl_raw.strip()
-            if re.match(r"^[-+]?\d+,\d{3}\.\d+$", vl_s):
-                vl_p = pd.to_numeric(vl_s.replace(",", ""), errors="coerce")
-            elif "," in vl_s or "R$" in vl_s:
-                vl_p = _parse_i10_num(vl_s)
-            else:
-                vl_p = pd.to_numeric(vl_s, errors="coerce")
+        if isinstance(vl_raw, str) and ("," in vl_raw or "R$" in vl_raw):
+            vl_p = _parse_i10_num(vl_raw)
         else:
             vl_p = pd.to_numeric(vl_raw, errors="coerce")
         if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
@@ -1211,36 +1190,11 @@ def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
             datas.append(dt_p)
             vals.append(float(vl_p))
 
-    if not datas:
+    if len(datas) < 3:
         return pd.Series(dtype=float)
     s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
-    s_out = s_out[~s_out.index.duplicated(keep="last")]
-    prev_c = _extrair_prev_close_i10_json(js)
-    if prev_c is not None:
-        s_out.attrs["prev_close"] = prev_c
-    return s_out
+    return s_out[~s_out.index.duplicated(keep="last")]
 
-
-def _sincronizar_cot_live_serie(s_out: pd.Series, cot_live: float | None, eh_intraday: bool) -> pd.Series:
-    if s_out.empty or not cot_live or float(cot_live) <= 0.0:
-        return s_out
-    cot_f = float(cot_live)
-    s_res = s_out.copy()
-    if eh_intraday:
-        s_res.iloc[-1] = cot_f
-        return s_res
-    agora_b = datetime.now(BRT)
-    hoje_b = agora_b.date()
-    ult_d_s = s_res.index[-1].date()
-    if ult_d_s < hoje_b and agora_b.weekday() < 5 and agora_b.hour >= 10 and abs(float(s_res.iloc[-1]) - cot_f) > 0.001:
-        prev_attr = s_res.attrs.get("prev_close")
-        s_res.loc[pd.Timestamp(hoje_b)] = cot_f
-        s_res = s_res.sort_index()
-        if prev_attr is not None:
-            s_res.attrs["prev_close"] = prev_attr
-    else:
-        s_res.iloc[-1] = cot_f
-    return s_res
 
 @st.cache_data(ttl=900, show_spinner=False)
 def buscar_serie_investidor10_chart_com_info(
@@ -1248,17 +1202,15 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 16,
+    _v: int = 15,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
-    agora_brt = datetime.now(BRT)
-    dias_ytd = max(1, (agora_brt.date() - date(agora_brt.year, 1, 1)).days)
     mapa_dias = {
         "1 D": 1,
         "7 D": 7,
         "30 D": 30,
-        "6 M": 182,
-        "YTD": dias_ytd,
+        "6 M": 180,
+        "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
         "1 A": 365,
         "5 A": 1825,
         "10 A": 3650,
@@ -1267,14 +1219,18 @@ def buscar_serie_investidor10_chart_com_info(
     if periodo_label not in mapa_dias:
         return pd.Series(dtype=float), "período não suportado"
 
-    tk_up = ticker.upper()
-    tk_low = ticker.lower()
-    url_pg = f"https://investidor10.com.br/acoes/{tk_low}/"
+    meta = _obter_meta_chart_i10(ticker)
+    if meta.get("erro"):
+        return pd.Series(dtype=float), meta["erro"]
+
+    tid = meta.get("tid", "")
+    rotas_desc = [r for r in meta.get("rotas", ()) if ("/chart" in r.lower() or "/intraday" in r.lower() or "/quotations" in r.lower())]
+    url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
 
     sess = requests.Session()
     sess.headers.update({
         **HEADERS,
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "*/*",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
         "Referer": url_pg,
         "X-Requested-With": "XMLHttpRequest",
@@ -1287,11 +1243,11 @@ def buscar_serie_investidor10_chart_com_info(
     adj_str = "true" if ajustada else "false"
     adj_int = "1" if ajustada else "0"
     mapa_cands = {
-        "1 D": [1],
-        "7 D": [7],
+        "1 D": [1, "1d", "intraday"],
+        "7 D": [7, "7d", 5],
         "30 D": [30],
-        "6 M": [182, 180],
-        "YTD": ["ytd", dias_ytd],
+        "6 M": [182, 183, 184, 185, 180, 181, 186, "6m"],
+        "YTD": ["ytd", dias],
         "1 A": [365, 366],
         "5 A": [1825, 1826],
         "10 A": [3650, 3652],
@@ -1299,166 +1255,149 @@ def buscar_serie_investidor10_chart_com_info(
     }
     dias_cands = mapa_cands.get(periodo_label, [dias])
     eh_intraday_per = periodo_label in ("1 D", "7 D")
+    tk_up = ticker.upper()
 
-    urls_diretas: list[str] = []
+    cands_urls: list[str] = []
     if periodo_label == "1 D":
-        urls_diretas.extend([
+        cands_urls.extend([
             f"https://investidor10.com.br/api/quotations/one-day/{tk_up}/",
             f"https://investidor10.com.br/api/quotations/one-day/{tk_up}",
         ])
     elif periodo_label == "7 D":
-        urls_diretas.extend([
+        cands_urls.extend([
             f"https://investidor10.com.br/api/quotations/seven-days/{tk_up}/",
-            f"https://investidor10.com.br/api/quotations/seven-days/{tk_up}",
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tk_low}/7/{adj_str}/real",
-            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tk_low}/7/{adj_int}/real",
+            f"https://investidor10.com.br/api/quotations/seven-day/{tk_up}/",
+            f"https://investidor10.com.br/api/quotations/one-week/{tk_up}/",
+            f"https://investidor10.com.br/api/quotations/week/{tk_up}/",
         ])
-    else:
-        for d_c in dias_cands:
-            d_s = str(d_c)
-            urls_diretas.extend([
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tk_low}/{d_s}/{adj_str}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tk_low}/{d_s}/{adj_str}",
+
+    if tid:
+        if periodo_label == "7 D":
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_int}/real",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/5/{adj_str}/real",
             ])
-
-    diag_motivo = "indisponível"
-    bloqueado_cf = False
-    serie_diaria_fb = pd.Series(dtype=float)
-
-    def _tentar_lista_urls(lista_u: list[str]) -> tuple[pd.Series, str] | None:
-        nonlocal diag_motivo, bloqueado_cf, serie_diaria_fb
-        vistos_u: set[str] = set()
-        for url_c in [u for u in lista_u if not (u in vistos_u or vistos_u.add(u))]:
-            try:
-                r_c = sess.get(url_c, timeout=4.5)
-                if r_c.status_code in (401, 403, 429):
-                    diag_motivo = f"HTTP {r_c.status_code}"
-                    bloqueado_cf = True
-                    return None
-                if r_c.status_code != 200:
-                    diag_motivo = f"HTTP {r_c.status_code}"
-                    continue
-                txt_head = (r_c.text or "").lstrip()[:80].lower()
-                if txt_head.startswith(("<!doctype", "<html")):
-                    diag_motivo = "HTML/Cloudflare na API"
-                    bloqueado_cf = True
-                    continue
-                js = r_c.json()
-                s_out = _parse_i10_chart_json(js, eh_intraday_per=eh_intraday_per)
-                if s_out.empty:
-                    diag_motivo = "lista vazia na API"
-                    continue
-
-                tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
-                if periodo_label == "1 D":
-                    s_out = s_out[s_out.index.date == s_out.index.date[-1]]
-                    if not tem_hora or len(s_out) < 2:
-                        if "one-day" in url_c and len(s_out) == 1 and tem_hora and cot_live and float(cot_live) > 0:
-                            pass
-                        else:
-                            diag_motivo = "API retornou série insuficiente para 1 D"
-                            continue
-                    return _sincronizar_cot_live_serie(s_out, cot_live, eh_intraday=True), "Investidor10"
-
-                if periodo_label == "7 D":
-                    dias_dist_i10 = len({ts.date() for ts in s_out.index})
-                    if "seven-days" in url_c and len(s_out) >= 2:
-                        return _sincronizar_cot_live_serie(s_out, cot_live, eh_intraday=True), "Investidor10"
-                    if tem_hora and len(s_out) >= 4 and dias_dist_i10 >= 2:
-                        return _sincronizar_cot_live_serie(s_out, cot_live, eh_intraday=True), "Investidor10"
-                    if serie_diaria_fb.empty and len(s_out) >= 3 and dias_dist_i10 >= 2:
-                        serie_diaria_fb = s_out
-                    diag_motivo = "API retornou série parcial para 7 D"
-                    continue
-
-                if len(s_out) < 2:
-                    diag_motivo = f"apenas {len(s_out)} ponto(s) para {periodo_label}"
-                    continue
-
-                span_dias = int((s_out.index[-1] - s_out.index[0]).days)
-                dt_ini_s = s_out.index[0].date()
-                dt_fim_s = s_out.index[-1].date()
-                min_spans = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
-                max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
-                if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
-                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                    continue
-                if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
-                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                    continue
-                if periodo_label == "YTD":
-                    if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
-                        diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
-                        continue
-                    s_sem_feriado = s_out[~((s_out.index.month == 1) & (s_out.index.day == 1))]
-                    if len(s_sem_feriado) >= 2:
-                        s_out = s_sem_feriado
-
-                return _sincronizar_cot_live_serie(s_out, cot_live, eh_intraday=False), "Investidor10"
-            except Exception as exc:
-                diag_motivo = f"{type(exc).__name__}: {str(exc)[:35]}"
-                continue
-        return None
-
-    res_direto = _tentar_lista_urls(urls_diretas)
-    if res_direto is not None:
-        return res_direto
-
-    if periodo_label == "7 D" and not serie_diaria_fb.empty:
-        return _sincronizar_cot_live_serie(serie_diaria_fb, cot_live, eh_intraday=False), "Investidor10"
-
-    # Fallback interno do Investidor10 via scraping de tid/rotas caso o endpoint por ticker não tenha respondido
-    if not bloqueado_cf:
-        meta = _obter_meta_chart_i10(ticker)
-        if not meta.get("erro"):
-            tid = meta.get("tid", "")
-            rotas_desc = [r for r in meta.get("rotas", ()) if ("/chart" in r.lower() or "/intraday" in r.lower() or "/quotations" in r.lower())]
-            cands_meta: list[str] = []
-            if tid:
-                if periodo_label == "7 D":
-                    cands_meta.extend([
-                        f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}/real",
-                        f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_int}/real",
-                    ])
-                elif periodo_label == "1 D":
-                    cands_meta.extend([
-                        f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
-                        f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}/real",
-                    ])
-                else:
-                    for d_c in dias_cands:
-                        d_s = str(d_c)
-                        cands_meta.extend([
-                            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
-                            f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
-                        ])
+        elif periodo_label == "1 D":
+            cands_urls.extend([
+                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/1/{adj_str}/real",
+            ])
+        else:
+            for d_c in dias_cands:
+                d_s = str(d_c)
+                cands_urls.append(f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real")
             for d_c in dias_cands[:2]:
                 d_s = str(d_c)
-                for r_tpl in rotas_desc:
-                    url_mont = r_tpl if r_tpl.startswith("http") else ("https://investidor10.com.br" + (r_tpl if r_tpl.startswith("/") else "/" + r_tpl))
-                    url_mont = re.sub(r"\$\{[^}]*(?:id|ticker)[^}]*\}|\{(?:id|ticker_id|acao_id|company_id)\}", tid or tk_low, url_mont, flags=re.IGNORECASE)
-                    url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", d_s, url_mont, flags=re.IGNORECASE)
-                    url_mont = re.sub(r"\$\{[^}]*adj[^}]*\}|\{(?:adjusted|ajustada)\}", adj_str, url_mont, flags=re.IGNORECASE)
-                    url_mont = re.sub(r"\$\{[^}]*(?:curr|moeda)[^}]*\}|\{(?:currency|moeda)\}", "real", url_mont, flags=re.IGNORECASE)
-                    if "/chart/" in url_mont.lower():
-                        url_mont = re.sub(
-                            r"(/chart/[^/]+/)\d+((?:/(?:true|false|1|0))(?:/[^/?#]+)?)?",
-                            lambda m, _ds=d_s: f"{m.group(1)}{_ds}" + (f"/{adj_str}" + ("/real" if m.group(2) and m.group(2).count("/") >= 2 else "") if m.group(2) else ""),
-                            url_mont,
-                            flags=re.IGNORECASE,
-                        )
-                    elif url_mont.rstrip("/").endswith(("/intraday", "/chart")):
-                        url_mont = url_mont.rstrip("/") + (f"/{tid}" if tid else "") + (f"/{d_s}/{adj_str}/real" if "/chart" in url_mont else "")
-                    if "${" not in url_mont and "{" not in url_mont:
-                        tem_intra = "intraday" in url_mont.lower()
-                        if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
-                            cands_meta.append(url_mont)
+                cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
+                ])
 
-            res_meta = _tentar_lista_urls(cands_meta[:8])
-            if res_meta is not None:
-                return res_meta
-            if periodo_label == "7 D" and not serie_diaria_fb.empty:
-                return _sincronizar_cot_live_serie(serie_diaria_fb, cot_live, eh_intraday=False), "Investidor10"
+    for d_c in dias_cands[:2]:
+        d_s = str(d_c)
+        for r_tpl in rotas_desc:
+            url_mont = r_tpl if r_tpl.startswith("http") else ("https://investidor10.com.br" + (r_tpl if r_tpl.startswith("/") else "/" + r_tpl))
+            url_mont = re.sub(r"\$\{[^}]*(?:id|ticker)[^}]*\}|\{(?:id|ticker_id|acao_id|company_id)\}", tid or ticker.upper(), url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*(?:day|dia|period)[^}]*\}|\{(?:days|dias|period)\}", d_s, url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*adj[^}]*\}|\{(?:adjusted|ajustada)\}", adj_str, url_mont, flags=re.IGNORECASE)
+            url_mont = re.sub(r"\$\{[^}]*(?:curr|moeda)[^}]*\}|\{(?:currency|moeda)\}", "real", url_mont, flags=re.IGNORECASE)
+            if "/chart/" in url_mont.lower():
+                url_mont = re.sub(
+                    r"(/chart/[^/]+/)\d+((?:/(?:true|false|1|0))(?:/[^/?#]+)?)?",
+                    lambda m, _ds=d_s: f"{m.group(1)}{_ds}" + (f"/{adj_str}" + ("/real" if m.group(2) and m.group(2).count("/") >= 2 else "") if m.group(2) else ""),
+                    url_mont,
+                    flags=re.IGNORECASE,
+                )
+            elif url_mont.rstrip("/").endswith(("/intraday", "/chart")):
+                url_mont = url_mont.rstrip("/") + (f"/{tid}" if tid else "") + (f"/{d_s}/{adj_str}/real" if "/chart" in url_mont else "")
+            if "${" not in url_mont and "{" not in url_mont:
+                tem_intra = "intraday" in url_mont.lower()
+                if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
+                    cands_urls.append(url_mont)
+
+    cands_urls.extend([
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias_cands[0]}/{adj_str}/real",
+        f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{dias_cands[0]}/{adj_str}",
+    ])
+
+    vistos_u: set[str] = set()
+    urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
+    diag_motivo = "indisponível"
+    serie_diaria_fb = pd.Series(dtype=float)
+
+    for url_c in urls_unicas[:10]:
+        try:
+            r_c = sess.get(url_c, timeout=6.0)
+            if r_c.status_code in (401, 403, 429):
+                diag_motivo = f"HTTP {r_c.status_code}"
+                break
+            if r_c.status_code != 200:
+                diag_motivo = f"HTTP {r_c.status_code}"
+                continue
+            txt_head = (r_c.text or "").lstrip()[:80].lower()
+            if txt_head.startswith(("<!doctype", "<html")):
+                diag_motivo = "HTML/Cloudflare na API"
+                continue
+            js = r_c.json()
+            s_out = _parse_i10_chart_json(js, eh_intraday_per=eh_intraday_per)
+            if s_out.empty:
+                diag_motivo = "lista vazia na API"
+                continue
+
+            tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
+            if periodo_label == "1 D":
+                if not tem_hora or len(s_out) < 5:
+                    diag_motivo = "API retornou apenas série diária para 1 D"
+                    continue
+                s_out = s_out[s_out.index.date == s_out.index.date[-1]]
+                if len(s_out) < 5:
+                    diag_motivo = "menos de 5 pontos intradiários para 1 D"
+                    continue
+                if cot_live and float(cot_live) > 0:
+                    s_out.iloc[-1] = float(cot_live)
+                return s_out, "Investidor10"
+
+            if periodo_label == "7 D":
+                dias_dist_i10 = len({ts.date() for ts in s_out.index})
+                if tem_hora and len(s_out) >= 12 and dias_dist_i10 >= 2:
+                    if cot_live and float(cot_live) > 0:
+                        s_out.iloc[-1] = float(cot_live)
+                    return s_out, "Investidor10"
+                if serie_diaria_fb.empty and len(s_out) >= 3 and dias_dist_i10 >= 2:
+                    serie_diaria_fb = s_out
+                diag_motivo = "API retornou apenas série diária para 7 D"
+                continue
+
+            span_dias = int((s_out.index[-1] - s_out.index[0]).days)
+            dt_ini_s = s_out.index[0].date()
+            dt_fim_s = s_out.index[-1].date()
+            min_spans = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
+            max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
+            if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
+                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                continue
+            if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
+                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                continue
+            if periodo_label == "YTD":
+                if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                    diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                    continue
+                s_ytd_ano = s_out[(s_out.index.year == dt_fim_s.year) & ~((s_out.index.month == 1) & (s_out.index.day == 1))]
+                if len(s_ytd_ano) >= 3:
+                    s_out = s_ytd_ano
+            if cot_live and float(cot_live) > 0:
+                s_out.iloc[-1] = float(cot_live)
+            return s_out, "Investidor10"
+        except Exception as exc:
+            diag_motivo = f"{type(exc).__name__}: {str(exc)[:35]}"
+            continue
+
+    if periodo_label == "7 D" and not serie_diaria_fb.empty:
+        if cot_live and float(cot_live) > 0:
+            serie_diaria_fb.iloc[-1] = float(cot_live)
+        return serie_diaria_fb, "Investidor10 (diária 7 D)"
 
     return pd.Series(dtype=float), diag_motivo
 
@@ -1467,7 +1406,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 16,
+    _v: int = 15,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
@@ -2280,14 +2219,10 @@ def buscar_ohlcv_preco(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    prev_close_ref: float | None = None,
-    dt_ini_ref: str | None = None,
-    _v: int = 5,
+    _v: int = 4,
 ) -> pd.DataFrame:
     tk = yf.Ticker(f"{ticker}.SA")
     eh_intraday = periodo_label in ("1 D", "7 D")
-    agora_brt = datetime.now(BRT)
-    hoje_brt_ts = pd.Timestamp(agora_brt.date())
 
     if periodo_label == "1 D":
         df = tk.history(period="5d", interval="5m", auto_adjust=False)
@@ -2298,8 +2233,7 @@ def buscar_ohlcv_preco(
         df = tk.history(period="1mo", interval="15m", auto_adjust=ajustada)
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
-            ref_7d = max(df.index.max().normalize(), hoje_brt_ts)
-            df = df[df.index >= (ref_7d - timedelta(days=7))]
+            df = df[df.index >= (df.index.max().normalize() - timedelta(days=6))]
     else:
         mapa_fetch = {"30 D": "3mo", "6 M": "1y", "YTD": "2y", "1 A": "2y", "5 A": "10y", "10 A": "max", "15 A": "max"}
         df = tk.history(period=mapa_fetch.get(periodo_label, "2y"), interval="1d", auto_adjust=ajustada)
@@ -2313,9 +2247,6 @@ def buscar_ohlcv_preco(
     df = df[cols_ok].dropna(subset=["Close"]).copy()
     if df.empty:
         return df
-
-    px_cols = [c for c in ("Open", "High", "Low", "Close") if c in df.columns]
-    prev_ref_f = float(prev_close_ref) if (prev_close_ref and float(prev_close_ref) > 0.0) else None
 
     # Sincroniza pregões recentes caso o endpoint diário (1d) do Yahoo esteja 1+ dia atrasado
     if not eh_intraday:
@@ -2339,7 +2270,6 @@ def buscar_ohlcv_preco(
         except Exception:
             pass
 
-        df = df.sort_index()
         if cot_live and float(cot_live) > 0.0:
             cot_f = float(cot_live)
             ult_data_df = df.index.normalize().max()
@@ -2352,52 +2282,29 @@ def buscar_ohlcv_preco(
             except Exception:
                 dt_fund_ts = None
 
-            pregao_hoje_ativo = (agora_brt.weekday() < 5 and agora_brt.hour >= 10)
-            novo_pregao_ts = None
             if dt_fund_ts is not None and pd.notna(dt_fund_ts) and dt_fund_ts > ult_data_df:
-                novo_pregao_ts = dt_fund_ts
-            elif ult_data_df < hoje_brt_ts and pregao_hoje_ativo and abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
-                novo_pregao_ts = hoje_brt_ts
-
-            if novo_pregao_ts is not None:
-                if prev_ref_f is not None:
-                    c_ant_yh = float(df["Close"].iloc[-1])
-                    if c_ant_yh > 0 and 0.70 <= (prev_ref_f / c_ant_yh) <= 1.30 and abs(prev_ref_f - c_ant_yh) / c_ant_yh > 0.0005:
-                        df[px_cols] = df[px_cols] * (prev_ref_f / c_ant_yh)
                 nova_l = {"Open": cot_f, "High": cot_f, "Low": cot_f, "Close": cot_f, "Volume": 0.0}
-                df.loc[novo_pregao_ts] = {k: nova_l[k] for k in df.columns}
-            else:
-                if prev_ref_f is not None and len(df) >= 2:
-                    c_pen_yh = float(df["Close"].iloc[-2])
-                    if c_pen_yh > 0 and 0.70 <= (prev_ref_f / c_pen_yh) <= 1.30 and abs(prev_ref_f - c_pen_yh) / c_pen_yh > 0.0005:
-                        fator_cal = prev_ref_f / c_pen_yh
-                        df.iloc[:-1, [df.columns.get_loc(c) for c in px_cols]] = df.iloc[:-1][px_cols] * fator_cal
-                if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
-                    idx_ult = df.index[-1]
-                    df.loc[idx_ult, "Close"] = cot_f
-                    if "High" in df.columns:
-                        df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
-                    if "Low" in df.columns:
-                        df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
+                df.loc[dt_fund_ts] = {k: nova_l[k] for k in df.columns}
+            elif abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
+                idx_ult = df.index[-1]
+                df.loc[idx_ult, "Close"] = cot_f
+                if "High" in df.columns:
+                    df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
+                if "Low" in df.columns:
+                    df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
 
         df = df.sort_index()
         ult_d_ref = df.index.normalize().max()
+        hoje_brt_ts = pd.Timestamp(datetime.now(BRT).date())
         ref_corte = max(ult_d_ref, hoje_brt_ts)
         offsets_per = {
-            "30 D": timedelta(days=30),
-            "6 M": timedelta(days=182),
-            "1 A": timedelta(days=365),
-            "5 A": timedelta(days=1825),
-            "10 A": timedelta(days=3650),
-            "15 A": timedelta(days=5475),
+            "30 D": pd.DateOffset(days=30),
+            "6 M": pd.DateOffset(months=6),
+            "1 A": pd.DateOffset(years=1),
+            "5 A": pd.DateOffset(years=5),
+            "10 A": pd.DateOffset(years=10),
+            "15 A": pd.DateOffset(years=15),
         }
-        if dt_ini_ref:
-            dt_ref_ts = pd.to_datetime(dt_ini_ref, errors="coerce")
-            if pd.notna(dt_ref_ts):
-                sub_ref = df[df.index.normalize() >= dt_ref_ts.normalize()]
-                if not sub_ref.empty:
-                    df = sub_ref
-                    return df.sort_index()
         if periodo_label == "YTD":
             df = df[df.index.normalize() >= pd.Timestamp(year=ref_corte.year, month=1, day=1)]
         elif periodo_label in offsets_per:
@@ -2405,32 +2312,15 @@ def buscar_ohlcv_preco(
             sub_corte = df[df.index.normalize() >= dt_corte]
             if not sub_corte.empty:
                 df = sub_corte
-    else:
-        if periodo_label == "7 D" and prev_ref_f is not None:
-            dias_7d = sorted({d for d in df.index.normalize()})
-            if len(dias_7d) >= 2:
-                mask_ant = df.index.normalize() < dias_7d[-1]
-                if mask_ant.any():
-                    c_ant_7d = float(df.loc[mask_ant, "Close"].iloc[-1])
-                    if c_ant_7d > 0 and 0.70 <= (prev_ref_f / c_ant_7d) <= 1.30 and abs(prev_ref_f - c_ant_7d) / c_ant_7d > 0.0005:
-                        df.loc[mask_ant, px_cols] = df.loc[mask_ant, px_cols] * (prev_ref_f / c_ant_7d)
-
-        if dt_ini_ref:
-            dt_ref_ts = pd.to_datetime(dt_ini_ref, errors="coerce")
-            if pd.notna(dt_ref_ts):
-                sub_ref = df[df.index >= dt_ref_ts]
-                if not sub_ref.empty:
-                    df = sub_ref
-
-        if cot_live and float(cot_live) > 0.0:
-            cot_f = float(cot_live)
-            if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
-                idx_ult = df.index[-1]
-                df.loc[idx_ult, "Close"] = cot_f
-                if "High" in df.columns:
-                    df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
-                if "Low" in df.columns:
-                    df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
+    elif cot_live and float(cot_live) > 0.0:
+        cot_f = float(cot_live)
+        if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
+            idx_ult = df.index[-1]
+            df.loc[idx_ult, "Close"] = cot_f
+            if "High" in df.columns:
+                df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
+            if "Low" in df.columns:
+                df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
 
     return df.sort_index()
 
@@ -2439,17 +2329,8 @@ def buscar_historico_preco(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    prev_close_ref: float | None = None,
-    dt_ini_ref: str | None = None,
 ) -> pd.Series:
-    df = buscar_ohlcv_preco(
-        ticker,
-        periodo_label,
-        ajustada,
-        cot_live=cot_live,
-        prev_close_ref=prev_close_ref,
-        dt_ini_ref=dt_ini_ref,
-    )
+    df = buscar_ohlcv_preco(ticker, periodo_label, ajustada, cot_live=cot_live)
     if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
     return df["Close"].dropna()
@@ -3669,10 +3550,10 @@ def html_logo_ativo(
         onerror_js = "this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='inline-flex';"
     fs_mono = max(9, int(size * 0.27))
     return (
-        f"<span style='display:inline-flex; align-items:center; justify-content:center; width:{size}px; min-width:{size}px; max-width:{size}px; height:{size}px; min-height:{size}px; flex-shrink:0;'>"
+        f"<span style='display:inline-flex; align-items:center; justify-content:center; width:{size}px; height:{size}px; flex-shrink:0;'>"
         f"<img src='{src_prim}' alt='{tk_esc}' loading='lazy' onerror=\"{onerror_js}\" "
-        f"style='width:{size}px; min-width:{size}px; max-width:{size}px; height:{size}px; min-height:{size}px; max-height:{size}px; object-fit:contain; border-radius:{radius}px; background:rgba(255,255,255,0.04); padding:2px; display:block;' />"
-        f"<span style='display:none; align-items:center; justify-content:center; width:{size}px; min-width:{size}px; height:{size}px; min-height:{size}px; "
+        f"style='width:{size}px; height:{size}px; object-fit:contain; border-radius:{radius}px; background:rgba(255,255,255,0.04); padding:2px;' />"
+        f"<span style='display:none; align-items:center; justify-content:center; width:{size}px; height:{size}px; "
         f"border-radius:{radius}px; background:{bg_monogram}; border:1px solid rgba(148,163,184,0.35); "
         f"font-size:{fs_mono}px; font-weight:800; color:#e2e8f0; letter-spacing:0.3px;'>{html.escape(ticker[:4])}</span>"
         "</span>"
@@ -4328,9 +4209,9 @@ def render_grafico_e_tabela_ativo(
     def _frag_cotacao_sim():
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
-            logo_hdr_g = html_logo_ativo(ticker, logo_fb_rx, size=26, radius=6)
+            logo_hdr_g = html_logo_ativo(ticker, logo_fb_rx, size=24, radius=5)
             st.markdown(
-                f"<div style='display:flex; align-items:center; gap:9px; font-weight:700; font-size:15px; white-space:nowrap;'>"
+                f"<div style='display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;'>"
                 f"{logo_hdr_g}<span>COTAÇÃO {html.escape(ticker)}</span></div>",
                 unsafe_allow_html=True,
             )
@@ -4369,12 +4250,6 @@ def render_grafico_e_tabela_ativo(
                         dt_custom_fim = st.date_input("Até:", value=hoje_d_i10, format="DD/MM/YYYY", key=f"{key_prefix}_dt_f_{ticker}")
 
         cot_ref_live = float(base_ativo.get("cotacao") or 0.0) if base_ativo else None
-        var_dia_live = base_ativo.get("var_dia_pct") if base_ativo else None
-        prev_close_live = None
-        if cot_ref_live and cot_ref_live > 0.0 and var_dia_live is not None:
-            denom_vd = 1.0 + (float(var_dia_live) / 100.0)
-            if denom_vd > 0.1:
-                prev_close_live = cot_ref_live / denom_vd
         c_tb_px, c_tb_b1, c_tb_b2, c_tb_b3, c_tb_moeda, c_tb_tipo, c_tb_cmp = st.columns(
             [1.95, 0.42, 0.42, 0.42, 0.85, 1.25, 0.95],
             vertical_alignment="center",
@@ -4413,75 +4288,58 @@ def render_grafico_e_tabela_ativo(
         usou_i10_graf = False
         diag_i10_graf = ""
         ajustada_alt = not ajustada
-        df_ohlcv = pd.DataFrame()
-        serie_alt = pd.Series(dtype=float)
-
         if usar_custom_range:
             with ThreadPoolExecutor(max_workers=2) as ex_gc:
-                f_main = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada, cot_ref_live, prev_close_live)
-                f_alt = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada_alt, cot_ref_live, prev_close_live)
+                f_main = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada, cot_ref_live)
+                f_alt = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada_alt, cot_ref_live)
                 df_ohlcv = f_main.result()
                 df_alt = f_alt.result()
             if df_ohlcv is not None and not df_ohlcv.empty:
                 df_ohlcv = df_ohlcv[(df_ohlcv.index.date >= dt_custom_ini) & (df_ohlcv.index.date <= dt_custom_fim)]
             serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+            serie_alt = pd.Series(dtype=float)
             if df_alt is not None and not df_alt.empty and "Close" in df_alt.columns:
                 df_alt = df_alt[(df_alt.index.date >= dt_custom_ini) & (df_alt.index.date <= dt_custom_fim)]
                 serie_alt = df_alt["Close"].dropna()
             lbl_per_exib = f"{dt_custom_ini.strftime('%d/%m/%y')}–{dt_custom_fim.strftime('%d/%m/%y')}"
         else:
             lbl_per_exib = periodo
-            if not eh_candles_req:
-                with ThreadPoolExecutor(max_workers=2) as ex_g:
-                    f_i10 = ex_g.submit(buscar_serie_investidor10_chart_com_info, ticker, periodo, ajustada, cot_ref_live)
-                    f_i10_alt = ex_g.submit(buscar_serie_investidor10_chart, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
-                    serie_i10_c, diag_i10_graf = f_i10.result()
-                    if f_i10_alt is not None:
-                        serie_alt = f_i10_alt.result()
+            with ThreadPoolExecutor(max_workers=3) as ex_g:
+                f_i10 = ex_g.submit(buscar_serie_investidor10_chart_com_info, ticker, periodo, ajustada, cot_ref_live) if not eh_candles_req else None
+                f_yh = ex_g.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live)
+                f_alt_yh = ex_g.submit(buscar_historico_preco, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
 
-                if not serie_i10_c.empty:
+                serie_i10_c, diag_i10_graf = f_i10.result() if f_i10 is not None else (pd.Series(dtype=float), "")
+                i10_eh_diaria_7d = (periodo == "7 D") and ("diária 7 D" in diag_i10_graf)
+                df_ohlcv = f_yh.result() if (eh_candles_req or serie_i10_c.empty or i10_eh_diaria_7d) else pd.DataFrame()
+                if not serie_i10_c.empty and not i10_eh_diaria_7d:
+                    serie = serie_i10_c
+                    usou_i10_graf = True
+                elif i10_eh_diaria_7d and df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns:
+                    # Usa a curva intradiária 15m do Yahoo ancorada aos fechamentos diários oficiais do Investidor10
+                    serie_yh_15m = df_ohlcv["Close"].dropna().copy()
+                    for dt_i10, vl_i10 in serie_i10_c.items():
+                        d_i10 = dt_i10.date()
+                        mask_d = serie_yh_15m.index.date == d_i10
+                        if mask_d.any():
+                            v_yh_fim = float(serie_yh_15m[mask_d].iloc[-1])
+                            if v_yh_fim > 0:
+                                serie_yh_15m.loc[mask_d] = serie_yh_15m.loc[mask_d] * (float(vl_i10) / v_yh_fim)
+                    serie = serie_yh_15m
+                    usou_i10_graf = True
+                elif not serie_i10_c.empty:
                     serie = serie_i10_c
                     usou_i10_graf = True
                 else:
-                    dt_ini_fb = serie_alt.index[0].strftime("%Y-%m-%d") if not serie_alt.empty else None
-                    df_ohlcv = buscar_ohlcv_preco(
-                        ticker,
-                        periodo,
-                        ajustada,
-                        cot_live=cot_ref_live,
-                        prev_close_ref=prev_close_live,
-                        dt_ini_ref=dt_ini_fb,
-                    )
                     serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
 
-                if not serie.empty and periodo != "1 D" and serie_alt.empty:
-                    serie_alt = buscar_historico_preco(
-                        ticker,
-                        periodo,
-                        ajustada_alt,
-                        cot_live=cot_ref_live,
-                        prev_close_ref=prev_close_live,
-                        dt_ini_ref=serie.index[0].strftime("%Y-%m-%d"),
-                    )
-            else:
-                with ThreadPoolExecutor(max_workers=2) as ex_c:
-                    f_yh_c = ex_c.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live, prev_close_live)
-                    f_alt_c = ex_c.submit(buscar_serie_investidor10_chart, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
-                    df_ohlcv = f_yh_c.result()
-                    if f_alt_c is not None:
-                        serie_alt = f_alt_c.result()
-                serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
-                if not serie.empty and periodo != "1 D" and serie_alt.empty:
-                    serie_alt = buscar_historico_preco(
-                        ticker,
-                        periodo,
-                        ajustada_alt,
-                        cot_live=cot_ref_live,
-                        prev_close_ref=prev_close_live,
-                        dt_ini_ref=serie.index[0].strftime("%Y-%m-%d"),
-                    )
-
-            if not serie.empty and not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
+                serie_alt = pd.Series(dtype=float)
+                if not serie.empty and periodo != "1 D":
+                    if usou_i10_graf and not eh_candles_req:
+                        serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
+                    if serie_alt.empty and f_alt_yh is not None:
+                        serie_alt = f_alt_yh.result()
+            if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
                 sub_alt = serie_alt[serie_alt.index.normalize() >= serie.index[0].normalize()]
                 if not sub_alt.empty:
                     serie_alt = sub_alt
@@ -4517,15 +4375,16 @@ def render_grafico_e_tabela_ativo(
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
             p_ref_var = p_ini
             if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
-                prev_attr_1d = serie.attrs.get("prev_close") if hasattr(serie, "attrs") else None
-                if prev_attr_1d and float(prev_attr_1d) > 0:
-                    p_ref_var = float(prev_attr_1d)
-                elif prev_close_live and prev_close_live > 0:
-                    p_ref_var = float(prev_close_live)
-                else:
-                    prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)
-                    if prev_c_1d and prev_c_1d > 0:
-                        p_ref_var = prev_c_1d
+                prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)
+                if prev_c_1d and prev_c_1d > 0:
+                    p_ref_var = prev_c_1d
+            elif not usar_custom_range and periodo == "7 D" and moeda_graf == "Real":
+                if not usou_i10_graf:
+                    prev_c_7d = buscar_prev_close_ativo(ticker, serie.index[0].date(), ajustada=ajustada)
+                    if prev_c_7d and prev_c_7d > 0:
+                        p_ref_var = prev_c_7d
+                elif i10_eh_diaria_7d and not serie_i10_c.empty:
+                    p_ref_var = float(serie_i10_c.iloc[0])
             var_pct = ((p_fim - p_ref_var) / p_ref_var) * 100.0 if p_ref_var > 0 else 0.0
             cor = "#22c55e" if var_pct >= 0 else "#dc2626"
             fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"
@@ -4615,7 +4474,7 @@ def render_grafico_e_tabela_ativo(
                             y_all_vals.extend(list(fator_ac.values))
                 cores_cmp = ["#a78bfa", "#38bdf8", "#f472b6", "#fb923c"]
                 for idx_c, tk_c in enumerate(comp_tks[:4]):
-                    s_cmp = buscar_serie_investidor10_chart(tk_c, periodo, ajustada) if not usar_custom_range else pd.Series(dtype=float)
+                    s_cmp = buscar_serie_investidor10_chart(tk_c, periodo, ajustada) if (not usar_custom_range and periodo != "1 D") else pd.Series(dtype=float)
                     if s_cmp.empty:
                         s_cmp = buscar_historico_preco(tk_c, periodo if not usar_custom_range else "15 A", ajustada)
                         if usar_custom_range and not s_cmp.empty:
@@ -4667,8 +4526,7 @@ def render_grafico_e_tabela_ativo(
                 dt_fmt_s = "%d/%m/%Y %H:%M" if (not usar_custom_range and periodo in ("1 D", "7 D")) else "%d/%m/%Y"
                 dt_lbls_s = [dt.strftime(dt_fmt_s) for dt in serie.index]
                 ts_ms_s = [int(dt.timestamp() * 1000) for dt in serie.index]
-                base_hover = p_ref_var if (not usar_custom_range and periodo == "1 D" and p_ref_var > 0) else p_ini
-                pct_hover = [((float(v) / base_hover) - 1.0) * 100.0 if base_hover > 0 else 0.0 for v in serie.values]
+                pct_hover = [((float(v) / p_ini) - 1.0) * 100.0 if p_ini > 0 else 0.0 for v in serie.values]
                 custom_s = [[lbl, pct, ts_m] for lbl, pct, ts_m in zip(dt_lbls_s, pct_hover, ts_ms_s)]
                 fig.add_trace(
                     go.Scatter(
@@ -4685,13 +4543,6 @@ def render_grafico_e_tabela_ativo(
                     )
                 )
                 y_min, y_max = float(serie.min()), float(serie.max())
-                if not usar_custom_range and periodo == "1 D" and p_ref_var > 0 and abs(p_ref_var - p_fim) / max(0.01, p_fim) < 0.25:
-                    fig.add_hline(
-                        y=p_ref_var,
-                        line_dash="dot",
-                        line_width=1.1,
-                        line_color="rgba(148,1
- 4m58.3s
 
             if not modo_comparar and st.session_state[k_marcos]:
                 pos_max = int(serie.values.argmax())

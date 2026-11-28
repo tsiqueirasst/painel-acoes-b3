@@ -6708,9 +6708,16 @@ with tab1:
                 "busca": busca_tickers.strip(),
             },
         )
-        _payload_ia_js = json.dumps(relatorio_ia_txt, ensure_ascii=False).replace("</", "<\\/")
-        _usa_st_html_ia = hasattr(st, "html") and "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+        _payload_ia_js = (
+            json.dumps(relatorio_ia_txt, ensure_ascii=False)
+            .replace("</", "<\\/")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
         _html_bolinha_ia = f"""
+        <!DOCTYPE html>
+        <html>
+        <body style="margin:0;padding:0;background:transparent;overflow:hidden;font-family:system-ui,-apple-system,sans-serif;">
         <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; margin-top:2px;">
           <button id="btn-copiar-ia-b3" type="button"
             title="Copiar análise completa dos {len(resultados_tab)} ativos filtrados (Geral, LP e CP) para auditar em IA"
@@ -6726,37 +6733,65 @@ with tab1:
         <script>
         (function() {{
           const txt = {_payload_ia_js};
-          const doc = __USE_PARENT__ ? window.parent.document : document;
-          const btn = document.getElementById("btn-copiar-ia-b3") || doc.getElementById("btn-copiar-ia-b3");
-          const lbl = document.getElementById("lbl-copiar-ia-b3") || doc.getElementById("lbl-copiar-ia-b3");
+          const btn = document.getElementById("btn-copiar-ia-b3");
+          const lbl = document.getElementById("lbl-copiar-ia-b3");
           if (!btn) return;
-          btn.onclick = async function() {{
+          btn.addEventListener("click", async function() {{
             let ok = false;
             try {{
-              const nav = (__USE_PARENT__ ? window.parent.navigator : navigator);
-              if (nav && nav.clipboard && nav.clipboard.writeText) {{
-                await nav.clipboard.writeText(txt);
+              if (navigator && navigator.clipboard && navigator.clipboard.writeText) {{
+                await navigator.clipboard.writeText(txt);
                 ok = true;
               }}
-            }} catch (e) {{}}
+            }} catch (e1) {{}}
             if (!ok) {{
               try {{
-                const ta = doc.createElement("textarea");
+                const ta = document.createElement("textarea");
                 ta.value = txt;
+                ta.setAttribute("readonly", "");
                 ta.style.position = "fixed";
                 ta.style.left = "-9999px";
-                doc.body.appendChild(ta);
+                ta.style.top = "0";
+                document.body.appendChild(ta);
                 ta.focus();
                 ta.select();
-                ok = doc.execCommand("copy");
-                doc.body.removeChild(ta);
+                ta.setSelectionRange(0, txt.length);
+                ok = document.execCommand("copy");
+                document.body.removeChild(ta);
               }} catch (e2) {{}}
+            }}
+            if (!ok) {{
+              try {{
+                if (window.parent && window.parent.navigator && window.parent.navigator.clipboard && window.parent.navigator.clipboard.writeText) {{
+                  await window.parent.navigator.clipboard.writeText(txt);
+                  ok = true;
+                }}
+              }} catch (e3) {{}}
+            }}
+            if (!ok) {{
+              try {{
+                const pDoc = window.parent && window.parent.document;
+                if (pDoc) {{
+                  const taP = pDoc.createElement("textarea");
+                  taP.value = txt;
+                  taP.style.position = "fixed";
+                  taP.style.left = "-9999px";
+                  pDoc.body.appendChild(taP);
+                  taP.focus();
+                  taP.select();
+                  ok = pDoc.execCommand("copy");
+                  pDoc.body.removeChild(taP);
+                }}
+              }} catch (e4) {{}}
             }}
             if (ok) {{
               btn.textContent = "✓";
               btn.style.background = "linear-gradient(135deg, #16a34a, #22c55e)";
               btn.style.borderColor = "#4ade80";
-              if (lbl) lbl.textContent = "Copiado ({len(resultados_tab)} ativos)!";
+              if (lbl) {{
+                lbl.style.color = "#4ade80";
+                lbl.textContent = "Copiado ({len(resultados_tab)} ativos)!";
+              }}
               setTimeout(function() {{
                 btn.textContent = "🤖";
                 btn.style.background = "linear-gradient(135deg, rgba(59,130,246,0.28), rgba(37,99,235,0.45))";
@@ -6767,15 +6802,14 @@ with tab1:
               lbl.style.color = "#f87171";
               lbl.textContent = "Erro ao copiar";
             }}
-          }};
+          }});
         }})();
         </script>
-        """.replace("__USE_PARENT__", "false" if _usa_st_html_ia else "true")
+        </body>
+        </html>
+        """
         with slot_copiar_ia:
-            if _usa_st_html_ia:
-                st.html(_html_bolinha_ia, unsafe_allow_javascript=True)
-            else:
-                components.html(_html_bolinha_ia, height=62)
+            components.html(_html_bolinha_ia, height=64)
 
         def _ao_clicar_comparar_tabela():
             raw_c = st.session_state.get("comp_bridge", "").strip().upper()

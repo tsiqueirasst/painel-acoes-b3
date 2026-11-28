@@ -269,6 +269,7 @@ def _eh_pagina_seo_ou_irrelevante(titulo: str, fonte: str = "", link: str = "") 
         "preco alvo, dividendos", "valor justo e dividendos", "o que saber antes",
         "cotacao hoje, dividendos", "cotacao de hoje", "graficos e noticias",
         "acoes - cotacao", "ficha tecnica", "raiox completo", "raio-x completo",
+        "veja o calendario", "historico de cotacoes",
     )
     if any(p in t for p in padroes_seo_exatos):
         return True
@@ -444,9 +445,9 @@ def _classificar_sentimento_noticia(titulo: str, fonte: str = "", link: str = ""
             t_work = t_work.replace(frase, " ")
 
     pats_neg_flex = (
-        (re.compile(r"\b(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)(?:\s+\w+){0,4}\s+(?:cai|cair|recua|desaba|despenca|encolhe|diminui|reduz|baixa|tomba|frustra|decepciona|pressionad[oa]|abaixo)\b"), 4.5),
-        (re.compile(r"\b(?:queda|recuo|reducao|baixa|corte|tombo|encolhimento|duvida|duvidas|incerteza|pressao)(?:\s+\w+){0,4}\s+(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)\b"), 4.5),
-        (re.compile(r"\b(?:corta|cortar|reduz|reduzir|suspende|adia|cancela|limita|ameaca)(?:\s+\w+){0,3}\s+(?:dividendo|dividendos|provento|proventos|jcp|payout|distribuicao)\b"), 4.5),
+        (re.compile(r"\b(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)(?:\s+\w+){0,3}\s+(?:cai|cair|recua|desaba|despenca|encolhe|diminui|reduz|baixa|tomba|frustra|decepciona|pressionad[oa]|abaixo|prejuizo)\b"), 5.5),
+        (re.compile(r"\b(?:queda|recuo|reducao|baixa|corte|tombo|encolhimento|duvida|duvidas|incerteza|pressao)(?:\s+\w+){0,3}\s+(?:lucro|resultado|ebitda|receita|margem|dividendo|dividendos|provento|proventos|jcp|payout)\b"), 5.5),
+        (re.compile(r"\b(?:corta|cortar|reduz|reduzir|suspende|adia|cancela|limita|ameaca)(?:\s+\w+){0,3}\s+(?:dividendo|dividendos|provento|proventos|jcp|payout|distribuicao)\b"), 5.5),
     )
     for pat_nf, peso_nf in pats_neg_flex:
         if pat_nf.search(t_work):
@@ -550,10 +551,10 @@ def _classificar_sentimento_noticia(titulo: str, fonte: str = "", link: str = ""
     if pts_neg > 0.0:
         m_pct = re.search(r"(\d+(?:[.,]\d+)?)\s*%", t)
         pct_num = float(m_pct.group(1).replace(",", ".")) if m_pct else 0.0
-        bonus_pct = 2.0 if pct_num >= 25.0 else (1.0 if pct_num >= 10.0 else 0.0)
+        bonus_pct = 2.5 if pct_num >= 30.0 else (1.5 if pct_num >= 15.0 else (1.0 if pct_num >= 8.0 else 0.0))
         nota_neg = -(pts_neg + bonus_pct)
         if teve_composto_neg_forte or pct_num >= 10.0:
-            nota_neg = min(-3.0, nota_neg)
+            nota_neg = min(-4.0, nota_neg)
         else:
             nota_neg = min(-2.0, nota_neg)
         pts_final = round(max(-8.0, nota_neg), 1)
@@ -913,6 +914,7 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
             "dy": "dy_i10",
             "dividend yield": "dy_i10",
             "dividend yield (dy)": "dy_i10",
+            "margem bruta": "marg_bruta_i10",
             "margem liquida": "marg_liq_i10",
             "margem ebit": "marg_ebit_i10",
             "ev/ebitda": "ev_ebitda_i10",
@@ -1991,9 +1993,12 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
         tot_cash_raw = info.get("totalCash")
         ebitda_raw = info.get("ebitda")
         fcf_raw = info.get("freeCashflow")
+        fco_raw = info.get("operatingCashflow")
         earn_g_raw = info.get("earningsGrowth")
+        gross_m_raw = info.get("grossMargins")
 
         div_liq_ebitda_yf = None
+        div_liq_fco_yf = None
         div_liq_mktcap_ratio = None
         fcf_yield_yf = None
         if tot_debt_raw is not None and tot_cash_raw is not None:
@@ -2001,11 +2006,15 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             if ebitda_raw is not None and float(ebitda_raw) > 0:
                 ebitda_brl = float(ebitda_raw) * fx_atual_yf
                 div_liq_ebitda_yf = div_liq_brl / ebitda_brl
+            if fco_raw is not None and float(fco_raw) > 0:
+                fco_brl = float(fco_raw) * fx_atual_yf
+                div_liq_fco_yf = div_liq_brl / fco_brl
             if mktcap_yf is not None and float(mktcap_yf) > 0:
                 div_liq_mktcap_ratio = div_liq_brl / float(mktcap_yf)
         if fcf_raw is not None and mktcap_yf is not None and float(mktcap_yf) > 0:
             fcf_yield_yf = ((float(fcf_raw) * fx_atual_yf) / float(mktcap_yf)) * 100.0
         cresc_lucro_yf = (float(earn_g_raw) * 100.0) if earn_g_raw is not None else None
+        marg_bruta_yf = (float(gross_m_raw) * 100.0) if gross_m_raw is not None else None
 
         divs = tk.dividends
         dpa_12m = None
@@ -2019,14 +2028,20 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             hoje = pd.Timestamp.now().tz_localize(None)
             dpa_12m = float(divs[divs.index >= (hoje - timedelta(days=365))].sum())
             ano_atual = hoje.year
-            anos_validos = [a for a in range(ano_atual - 6, ano_atual)]
-            divs_6a = divs[divs.index.year.isin(anos_validos)]
-            if not divs_6a.empty:
-                por_ano = divs_6a.groupby(divs_6a.index.year).sum()
+            anos_validos_5a = [a for a in range(ano_atual - 5, ano_atual)]
+            divs_5a = divs[divs.index.year.isin(anos_validos_5a)]
+            if not divs_5a.empty:
+                por_ano = divs_5a.groupby(divs_5a.index.year).sum()
                 anos_hist = len(por_ano)
                 ano_min_div = int(por_ano.index.min())
-                serie_anos = [float(por_ano.get(a, 0.0)) for a in anos_validos if a >= ano_min_div]
-                dpa_med_6a = float(pd.Series(serie_anos).median()) if serie_anos else float(por_ano.median())
+                serie_anos = sorted([float(por_ano.get(a, 0.0)) for a in anos_validos_5a if a >= ano_min_div])
+                if len(serie_anos) >= 3:
+                    aparados = serie_anos[1:-1]
+                    dpa_med_6a = float(sum(aparados) / len(aparados))
+                elif serie_anos:
+                    dpa_med_6a = float(sum(serie_anos) / len(serie_anos))
+                else:
+                    dpa_med_6a = float(por_ano.median())
 
             divs_pos = divs[divs > 0]
             if not divs_pos.empty:
@@ -2060,9 +2075,11 @@ def _fetch_yf(ticker: str) -> tuple[str, dict]:
             "vpa_yf": float(vpa) if vpa is not None else None,
             "roe_yf": float(roe) if roe is not None else None,
             "div_liq_ebitda_yf": float(div_liq_ebitda_yf) if div_liq_ebitda_yf is not None else None,
+            "div_liq_fco_yf": float(div_liq_fco_yf) if div_liq_fco_yf is not None else None,
             "div_liq_mktcap_ratio": float(div_liq_mktcap_ratio) if div_liq_mktcap_ratio is not None else None,
             "fcf_yield_yf": float(fcf_yield_yf) if fcf_yield_yf is not None else None,
             "cresc_lucro_yf": float(cresc_lucro_yf) if cresc_lucro_yf is not None else None,
+            "marg_bruta_yf": float(marg_bruta_yf) if marg_bruta_yf is not None else None,
             "dpa_12m_yf": float(dpa_12m) if dpa_12m is not None else None,
             "dpa_med_6a": float(dpa_med_6a) if dpa_med_6a is not None else None,
             "anos_hist": anos_hist,
@@ -2104,6 +2121,19 @@ def buscar_ret_ibov_30d() -> float | None:
     except Exception:
         pass
     return None
+
+
+@st.cache_data(ttl=43200, show_spinner=False)
+def buscar_yield_exigido_bazin() -> float:
+    """Retorna Yield exigido para Bazin Dinâmico entre 6,0% e 7,5% (NTN-B 10a + 1,0%)."""
+    try:
+        _, selic_aa = buscar_historico_selic_bcb()
+        if selic_aa and selic_aa > 0:
+            ntnb_est = 0.045 + max(0.0, (float(selic_aa) - 10.0) * 0.004)
+            return max(0.060, min(0.075, ntnb_est + 0.010))
+    except Exception:
+        pass
+    return 0.065
 
 
 @st.cache_data(ttl=180, show_spinner=False)
@@ -3445,7 +3475,9 @@ def badge_veredito_html(veredito: str) -> str:
     estilos = {
         "🟢 Excelente": ("rgba(34,197,94,0.18)", "#22c55e", "rgba(34,197,94,0.45)", "🟢 Excelente"),
         "🔵 Bom (Desconto": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Desc. Patr."),
-        "🔵 Bom (Qualidade": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Qualidade"),
+        "🔵 Bom (Foco": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Renda Passiva"),
+        "🔵 Bom (Empresa": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Alta Eficiência"),
+        "🔵 Bom (Retorno": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Ret. Equilibrado"),
         "🔵 Bom": ("rgba(59,130,246,0.18)", "#60a5fa", "rgba(59,130,246,0.45)", "🔵 Bom (LP)"),
         "🟣 Esticado": ("rgba(168,85,247,0.18)", "#c084fc", "rgba(168,85,247,0.45)", "🟣 Esticado"),
         "🟠 Indeciso": ("rgba(249,115,22,0.18)", "#fb923c", "rgba(249,115,22,0.45)", "🟠 Indeciso"),
@@ -5195,41 +5227,51 @@ def html_preco_ms(preco_calc: float | None, cotacao: float, sufixo: str = "") ->
     )
 
 
+def mapear_trilha(setor: str, subsetor: str = "", segmento: str = "") -> str:
+    s = _norm_txt(f"{setor} {subsetor} {segmento}")
+    if any(b in s for b in ("banco", "intermediarios financeiros", "previdencia", "seguro", "servicos financeiros")):
+        return "FINANCEIRO"
+    if any(u in s for u in ("utilidade publica", "energia", "eletric", "saneamento", "agua", "transmiss", "transporte", "rodovia", "porto", "ferrovia", "concess")) or (re.search(r"\bgas\b", s) and "petroleo" not in s):
+        return "CONCESSOES_UTILITIES"
+    if any(c in s for c in ("petroleo", "biocombustiveis", "mineracao", "siderurgia", "metalurgia", "madeira e papel", "papel e celulose", "celulose", "agropecuaria", "commodit")):
+        return "COMMODITIES_CICLICAS"
+    if any(r in s for r in ("construcao civil", "incorporac", "exploracao de imoveis", "imobiliari")):
+        return "REAL_ESTATE"
+    return "GERAL_VAREJO_TECH_IND"
+
+
 def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazin: float | None, graham: float | None) -> dict:
     cot = float(d.get("cotacao") or 0.0)
-    setor_norm_d = _norm_txt(str(d.get("setor_nome") or d.get("setor") or ""))
-    eh_banco_seg = bool(d.get("eh_banco_seg", False)) or any(
-        k in setor_norm_d for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
-    )
-    eh_utilities = (not eh_banco_seg) and (
-        bool(d.get("eh_utilities", False))
-        or any(k in setor_norm_d for k in ("energia", "eletric", "saneamento", "agua", "telecom", "transmiss", "gas"))
-    )
-    eh_ciclica = (not eh_banco_seg) and (not eh_utilities) and (
-        bool(d.get("eh_ciclica", False))
-        or any(k in setor_norm_d for k in ("petrol", "miner", "siderurg", "metalurg", "papel", "celulose", "madeira", "agro", "quimic", "commodit"))
-    )
-    trilha_nome = "Bancos/Seguros" if eh_banco_seg else ("Utilities/Infra" if eh_utilities else ("Commodities/Cíclicas" if eh_ciclica else "Geral"))
+    setor_str = str(d.get("setor_oficial") or d.get("setor_nome") or d.get("setor") or "")
+    trilha = d.get("trilha") or mapear_trilha(setor_str, str(d.get("subsetor") or ""), str(d.get("segmento") or ""))
+    eh_banco_seg = (trilha == "FINANCEIRO") or bool(d.get("eh_banco_seg", False))
+    eh_utilities = (trilha == "CONCESSOES_UTILITIES")
+    eh_ciclica = (trilha == "COMMODITIES_CICLICAS")
+    eh_real_estate = (trilha == "REAL_ESTATE")
+    eh_transmissora = bool(d.get("eh_transmissora", False))
 
     pl = d.get("pl")
     pvp = d.get("pvp")
+    lpa = d.get("lpa")
     vpa = d.get("vpa")
     roe = d.get("roe")
     roic = d.get("roic")
     marg_liq = d.get("marg_liq")
     marg_ebit = d.get("marg_ebit")
+    marg_bruta = d.get("marg_bruta")
     ev_ebitda = d.get("ev_ebitda")
     liq_corr = d.get("liq_corr")
     div_brut_patrim = d.get("div_brut_patrim")
     div_liq_ebitda = d.get("div_liq_ebitda")
+    div_liq_fco = d.get("div_liq_fco")
     cresc_rec_5a = d.get("cresc_rec_5a")
     cresc_lucro_5a = d.get("cresc_lucro_5a")
     fcf_yield = d.get("fcf_yield")
 
     dy_12m = float(d.get("dy_12m") or 0.0)
     dpa_12m_v = float(d.get("dpa_12m") or 0.0)
-    dpa_proj_v = float(d.get("dpa_proj") or 0.0)
-    dpa_med_6a = float(d.get("dpa_med_6a") or 0.0)
+    dpa_med_5a = float(d.get("dpa_med_6a") or 0.0)
+    dpa_base = float(d.get("dpa_base") or (min(dpa_12m_v, dpa_med_5a * 1.25) if (dpa_12m_v > 0 and dpa_med_5a > 0) else dpa_12m_v))
     anos_hist = int(d.get("anos_hist") or 0)
     anos_divs_consec = int(d.get("anos_divs_consec") or anos_hist or 0)
     pt_mult_justo = d.get("pt_mult_justo")
@@ -5240,7 +5282,6 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     mm200 = d.get("mm200")
     mm20_incl_pos = d.get("mm20_incl_pos")
     dist_mm20_pct = d.get("dist_mm20_pct")
-    dist_mm50_pct = d.get("dist_mm50_pct")
     dist_mm200_pct = d.get("dist_mm200_pct")
     dist_max_52s_pct = d.get("dist_max_52s_pct")
     razao_volume = d.get("razao_volume")
@@ -5252,91 +5293,22 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
     news_resumo = str(d.get("news_resumo") or "⚪ Neutro")
     news_tem_rj = bool(d.get("news_tem_rj", False)) or ("/ RJ" in news_resumo)
 
-    # === 1) FAIXAS DE PREÇO DO MODELO ===
-    pt_atual_ou_proj = pt_bazin if (pt_bazin and pt_bazin > 0) else (pt_proj if (pt_proj and pt_proj > 0) else None)
-    if pt_atual_ou_proj and pt_med and pt_med > 0:
-        div_teto_ref = (0.60 * float(pt_atual_ou_proj)) + (0.40 * float(pt_med))
-        if pt_bazin and pt_bazin > 0:
-            div_teto_ref = min(div_teto_ref, 1.25 * float(pt_bazin))
-    elif pt_atual_ou_proj:
-        div_teto_ref = float(pt_atual_ou_proj)
-    elif pt_med and pt_med > 0:
-        div_teto_ref = float(pt_med)
-    else:
-        div_teto_ref = None
+    # Transmissoras elétricas: prioriza FCO/EBITDA regulatório para endividamento
+    div_liq_efetiva = div_liq_ebitda
+    if eh_transmissora and div_liq_fco is not None and div_liq_fco >= 0:
+        div_liq_efetiva = min(div_liq_ebitda, div_liq_fco) if div_liq_ebitda is not None else div_liq_fco
 
-    cands_teto = []
-    if graham and graham > 0:
-        cands_teto.append(float(graham))
-    if div_teto_ref and div_teto_ref > 0:
-        cands_teto.append(float(div_teto_ref) * 0.85)
-    preco_teto_modelo = min(cands_teto) if cands_teto else None
+    # === 1) VALUATION ROBUSTO: TRIPÉ DE MÉTODOS INDEPENDENTES + MS ===
+    pts_tripe = [float(x) for x in (pt_bazin, graham, pt_mult_justo) if x is not None and float(x) > 0]
+    n_metodos = len(pts_tripe)
+    fator_confianca = 0.65 if n_metodos == 1 else (0.85 if n_metodos == 2 else 1.0)
 
-    dpa_ref_sp = dpa_proj_v if dpa_proj_v > 0 else (dpa_12m_v if dpa_12m_v > 0 else None)
-    p_yield_4pct = (float(dpa_ref_sp) / 0.04) if (dpa_ref_sp and dpa_ref_sp > 0) else None
-    p_graham_125 = (float(graham) * 1.25) if (graham and graham > 0) else None
-
-    if eh_banco_seg:
-        fator_roe_sp = max(0.65, min(1.50, float(roe) / 14.0)) if roe is not None else 1.0
-        teto_patrimonial = (float(vpa) * fator_roe_sp) if (vpa is not None and float(vpa) > 0) else None
-        if graham and graham > 0:
-            if teto_patrimonial is not None:
-                preco_sobrepreco = min(float(graham), teto_patrimonial)
-            else:
-                preco_sobrepreco = float(graham) * 1.10
-        elif teto_patrimonial is not None:
-            preco_sobrepreco = teto_patrimonial
-        else:
-            preco_sobrepreco = p_yield_4pct
-        if preco_sobrepreco is not None and preco_teto_modelo is not None and preco_teto_modelo > 0:
-            preco_sobrepreco = max(preco_teto_modelo * 1.15, preco_sobrepreco)
-    else:
-        cands_sp = [x for x in (p_yield_4pct, p_graham_125) if x is not None]
-        preco_sobrepreco = min(cands_sp) if cands_sp else None
-        if preco_sobrepreco is not None and preco_teto_modelo is not None and preco_teto_modelo > 0:
-            preco_sobrepreco = max(preco_teto_modelo * 1.20, preco_sobrepreco)
-
-    # === 2) SCORE LONGO PRAZO (0 a 100): Val(35) + Rent(30) + Saúde(30) + News(5) ===
-    # 2.1 Valuation (35 pts): Métodos independentes + MS Consolidada
-    pts_metodos: list[float] = []
-    if dpa_12m_v > 0 and dpa_proj_v > 0:
-        if abs(dpa_proj_v - dpa_12m_v) / dpa_12m_v < 0.10:
-            dpa_u = dpa_proj_v
-            dpa_sust = min(dpa_u, dpa_med_6a * 1.25) if dpa_med_6a > 0 else dpa_u
-            pts_metodos.append(dpa_sust / 0.06)
-        else:
-            dpa_s12 = min(dpa_12m_v, dpa_med_6a * 1.25) if dpa_med_6a > 0 else dpa_12m_v
-            dpa_spr = min(dpa_proj_v, dpa_med_6a * 1.25) if dpa_med_6a > 0 else dpa_proj_v
-            pts_metodos.append(dpa_s12 / 0.06)
-            pts_metodos.append(dpa_spr / 0.06)
-    elif dpa_12m_v > 0:
-        dpa_sust = min(dpa_12m_v, dpa_med_6a * 1.25) if dpa_med_6a > 0 else dpa_12m_v
-        pts_metodos.append(dpa_sust / 0.06)
-    elif dpa_proj_v > 0:
-        dpa_sust = min(dpa_proj_v, dpa_med_6a * 1.25) if dpa_med_6a > 0 else dpa_proj_v
-        pts_metodos.append(dpa_sust / 0.06)
-    elif pt_med and pt_med > 0:
-        pts_metodos.append(float(pt_med))
-
-    if graham and graham > 0:
-        pts_metodos.append(float(graham))
-    if pt_mult_justo and float(pt_mult_justo) > 0:
-        pts_metodos.append(float(pt_mult_justo))
-
-    n_metodos = len(pts_metodos)
-    if n_metodos == 1:
-        fator_confianca = 0.65
-    elif n_metodos == 2:
-        fator_confianca = 0.85
-    else:
-        fator_confianca = 1.0
-
-    if pts_metodos and cot > 0:
-        pts_ord = sorted(pts_metodos)
+    if pts_tripe and cot > 0:
+        pts_ord = sorted(pts_tripe)
         mid_m = len(pts_ord) // 2
         pt_justo_consolidado = pts_ord[mid_m] if (len(pts_ord) % 2 == 1) else ((pts_ord[mid_m - 1] + pts_ord[mid_m]) / 2.0)
         ms_bruta = ((pt_justo_consolidado - cot) / pt_justo_consolidado) * 100.0 if pt_justo_consolidado > 0 else -100.0
-        ms_consolidada = max(-100.0, ms_bruta)
+        ms_consolidada = max(-100.0, min(150.0, ms_bruta))
         ms_para_pts = max(-40.0, min(60.0, ms_consolidada))
         pts_ms = max(0.0, min(20.0, ((ms_para_pts + 40.0) / 100.0) * 20.0)) * fator_confianca
     else:
@@ -5344,367 +5316,291 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         ms_consolidada = None
         pts_ms = 0.0
 
+    # === 2) FAIXA DE PREÇO DO MODELO (CONSISTENTE E UNIVERSAL) ===
+    cands_teto = []
+    if graham and graham > 0:
+        cands_teto.append(float(graham))
+    em_capex_utilities = eh_utilities and dy_12m < 4.5 and (div_liq_efetiva is None or div_liq_efetiva < 3.0) and pt_mult_justo and float(pt_mult_justo) > 0
+    if em_capex_utilities:
+        cands_teto.append(float(pt_mult_justo) * 0.85)
+    elif pt_bazin and pt_bazin > 0:
+        cands_teto.append(float(pt_bazin) * 0.85)
+    preco_teto_modelo = min(cands_teto) if cands_teto else None
+
+    if eh_banco_seg:
+        fator_roe_sp = max(0.80, min(1.60, float(roe) / 14.0)) if roe is not None else 1.0
+        preco_sobrepreco = (float(vpa) * fator_roe_sp * 1.15) if (vpa is not None and float(vpa) > 0) else (float(graham) * 1.15 if graham else None)
+    else:
+        dpa_ref_sp = max(dpa_12m_v, dpa_med_5a * 0.85) if (dpa_12m_v > 0 or dpa_med_5a > 0) else 0.0
+        p_yield_4pct = (dpa_ref_sp / 0.04) if dpa_ref_sp > 0 else None
+        p_graham_125 = (float(graham) * 1.25) if (graham and graham > 0) else None
+        if em_capex_utilities and pt_mult_justo:
+            cands_sp = [x for x in (p_graham_125, float(pt_mult_justo) * 1.15) if x is not None]
+        else:
+            cands_sp = [x for x in (p_graham_125, p_yield_4pct) if x is not None]
+        preco_sobrepreco = min(cands_sp) if cands_sp else None
+
+    if preco_sobrepreco is not None and preco_teto_modelo is not None and preco_teto_modelo > 0:
+        preco_sobrepreco = max(preco_teto_modelo * 1.15, preco_sobrepreco)
+
+    # === 3) SCORE LONGO PRAZO (0 a 100): Val(35) + Rent(30) + Saúde(30) + News(5) ===
     if eh_banco_seg:
         pts_pvp_m = (max(0.0, min(4.0, ((2.2 - pvp) / 1.4) * 4.0)) + (1.0 if pvp <= 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
         pts_pl_m = max(0.0, min(5.0, ((16.0 - pl) / 12.0) * 5.0)) if (pl and pl > 0) else 0.0
         pts_mult = min(10.0, pts_pvp_m + pts_pl_m)
     elif eh_ciclica:
-        pts_ev = max(0.0, min(5.0, ((10.0 - ev_ebitda) / 5.5) * 5.0)) if (ev_ebitda and ev_ebitda > 0) else 0.0
-        pts_pl_m = max(0.0, min(3.0, ((16.0 - pl) / 12.0) * 3.0)) if (pl and pl > 0) else 0.0
+        pts_ev = max(0.0, min(5.0, ((8.0 - ev_ebitda) / 4.5) * 5.0)) if (ev_ebitda and ev_ebitda > 0) else 0.0
+        pts_pl_m = max(0.0, min(3.0, ((15.0 - pl) / 11.0) * 3.0)) if (pl and pl > 0) else 0.0
         pts_pvp_m = max(0.0, min(2.0, ((2.2 - pvp) / 1.4) * 2.0)) if (pvp and pvp > 0) else 0.0
         pts_mult = min(10.0, pts_ev + pts_pl_m + pts_pvp_m)
     else:
         pts_pvp_m = (max(0.0, min(3.0, ((2.5 - pvp) / 1.5) * 3.0)) + (1.0 if pvp < 1.0 else 0.0)) if (pvp and pvp > 0) else 0.0
         pts_pl_m = max(0.0, min(4.0, ((20.0 - pl) / 15.0) * 4.0)) if (pl and pl > 0) else 0.0
-        ev_lim = 12.0 if eh_utilities else 11.0
+        ev_lim = 11.0 if eh_utilities else 12.0
         pts_ev = max(0.0, min(2.0, ((ev_lim - ev_ebitda) / 6.0) * 2.0)) if (ev_ebitda and ev_ebitda > 0) else 0.0
         pts_mult = min(10.0, pts_pvp_m + pts_pl_m + pts_ev)
 
     if eh_ciclica and fcf_yield is not None:
-        pts_dy12 = min(3.0, (max(0.0, dy_12m) / 8.0) * 3.0)
-        pts_fcf = max(0.0, min(2.0, (fcf_yield / 10.0) * 2.0))
-        pts_div = min(5.0, pts_dy12 + pts_fcf)
-    elif dy_12m <= 0.0 and dpa_med_6a <= 0.0 and anos_hist <= 0:
+        pts_div = min(5.0, min(3.0, (max(0.0, dy_12m) / 8.0) * 3.0) + max(0.0, min(2.0, (fcf_yield / 10.0) * 2.0)))
+    elif trilha == "GERAL_VAREJO_TECH_IND" and dy_12m < 3.0 and roe is not None and roe >= 16.0:
+        pts_div = min(5.0, (max(0.0, dy_12m) / 6.0) * 2.5 + (min(anos_hist, 5) / 5.0) * 1.5 + 1.5)
+    elif dy_12m <= 0.0 and dpa_med_5a <= 0.0 and anos_hist <= 0:
         pts_div = 0.0
     else:
-        pts_dy12 = min(3.5, (max(0.0, dy_12m) / 8.0) * 3.5)
-        pts_h6 = min(1.5, (min(anos_hist, 6) / 6.0) * 1.5) if anos_hist > 0 else 0.0
-        pts_div = min(5.0, pts_dy12 + pts_h6)
-
+        pts_div = min(5.0, min(3.5, (max(0.0, dy_12m) / 8.0) * 3.5) + (min(1.5, (min(anos_hist, 5) / 5.0) * 1.5) if anos_hist > 0 else 0.0))
     pts_val_lp = min(35.0, pts_ms + pts_mult + pts_div)
 
-    # 2.2 Rentabilidade (30 pts) por Trilha
+    # 3.2 Rentabilidade (30 pts) pelas 5 Trilhas
     if eh_banco_seg:
-        if roe is None or roe <= 0.0:
-            pts_roe_lp = 0.0
-        elif roe <= 14.0:
-            pts_roe_lp = (roe / 14.0) * 13.0
-        elif roe <= 22.0:
-            pts_roe_lp = 13.0 + ((roe - 14.0) / 8.0) * 7.0
-        else:
-            pts_roe_lp = 20.0
-
+        pts_roe_lp = 0.0 if (roe is None or roe <= 0) else ((roe / 14.0) * 13.0 if roe <= 14.0 else min(20.0, 13.0 + ((roe - 14.0) / 8.0) * 7.0))
         cresc_lpa_ref = cresc_lucro_5a if cresc_lucro_5a is not None else cresc_rec_5a
         if cresc_lpa_ref is not None:
-            pts_estab_lpa = max(1.0 if (pl and pl > 0) else 0.0, min(10.0, ((cresc_lpa_ref + 10.0) / 25.0) * 10.0))
+            pts_estab = max(1.0 if (pl and pl > 0) else 0.0, min(10.0, ((cresc_lpa_ref + 10.0) / 25.0) * 10.0))
         elif marg_liq is not None and marg_liq > 0.0:
-            pts_estab_lpa = min(10.0, (marg_liq / 20.0) * 10.0)
+            pts_estab = min(10.0, (marg_liq / 20.0) * 10.0)
         else:
-            pts_estab_lpa = 6.0 if (pl and pl > 0 and roe and roe >= 10.0) else (3.5 if (pl and pl > 0) else 0.0)
-        pts_rent_lp = min(30.0, pts_roe_lp + pts_estab_lpa)
+            pts_estab = 6.5 if (pl and pl > 0 and roe and roe >= 10.0) else (3.5 if (pl and pl > 0) else 0.0)
+        pts_rent_lp = min(30.0, pts_roe_lp + pts_estab)
     elif eh_utilities:
-        pts_roe_lp = min(10.0, (roe / 20.0) * 10.0) if (roe and roe > 0) else 0.0
-        pts_roic_lp = min(10.0, (roic / 15.0) * 10.0) if (roic and roic > 0) else (min(10.0, (roe / 20.0) * 10.0) if (roe and roe > 0) else 0.0)
-        pts_ml_lp = min(5.0, (marg_liq / 20.0) * 5.0) if (marg_liq and marg_liq > 0) else 0.0
-        pts_me_lp = min(5.0, (marg_ebit / 25.0) * 5.0) if (marg_ebit and marg_ebit > 0) else (min(5.0, (marg_liq / 20.0) * 5.0) if (marg_liq and marg_liq > 0) else 0.0)
-        pts_rent_lp = min(30.0, pts_roe_lp + pts_roic_lp + pts_ml_lp + pts_me_lp)
+        pts_roic_lp = min(12.0, (roic / 15.0) * 12.0) if (roic and roic > 0) else (min(12.0, (roe / 18.0) * 12.0) if (roe and roe > 0) else 0.0)
+        pts_roe_lp = min(10.0, (roe / 18.0) * 10.0) if (roe and roe > 0) else 0.0
+        pts_me_lp = min(8.0, (marg_ebit / 30.0) * 8.0) if (marg_ebit and marg_ebit > 0) else (min(8.0, (marg_liq / 20.0) * 8.0) if (marg_liq and marg_liq > 0) else 0.0)
+        pts_rent_lp = min(30.0, pts_roic_lp + pts_roe_lp + pts_me_lp)
     elif eh_ciclica:
-        pts_roic_lp = min(14.0, (roic / 20.0) * 14.0) if (roic and roic > 0) else (min(14.0, (roe / 22.0) * 14.0) if (roe and roe > 0) else 0.0)
-        pts_roe_lp = min(8.0, (roe / 22.0) * 8.0) if (roe and roe > 0) else 0.0
-        pts_ml_lp = min(4.0, (marg_liq / 18.0) * 4.0) if (marg_liq and marg_liq > 0) else 0.0
-        pts_me_lp = min(4.0, (marg_ebit / 22.0) * 4.0) if (marg_ebit and marg_ebit > 0) else 0.0
-        pts_rent_lp = min(30.0, pts_roic_lp + pts_roe_lp + pts_ml_lp + pts_me_lp)
+        pts_roic_lp = min(16.0, (roic / 20.0) * 16.0) if (roic and roic > 0) else (min(16.0, (roe / 22.0) * 16.0) if (roe and roe > 0) else 0.0)
+        pts_meb_lp = min(8.0, (marg_ebit / 25.0) * 8.0) if (marg_ebit and marg_ebit > 0) else (min(8.0, (marg_liq / 18.0) * 8.0) if (marg_liq and marg_liq > 0) else 0.0)
+        pts_roe_lp = min(6.0, (roe / 22.0) * 6.0) if (roe and roe > 0) else 0.0
+        pts_rent_lp = min(30.0, pts_roic_lp + pts_meb_lp + pts_roe_lp)
+    elif eh_real_estate:
+        pts_roe_lp = min(15.0, (roe / 20.0) * 15.0) if (roe and roe > 0) else 0.0
+        mb_ref = marg_bruta if marg_bruta is not None else (marg_ebit if marg_ebit is not None else marg_liq)
+        pts_mb_lp = min(15.0, (mb_ref / 35.0) * 15.0) if (mb_ref and mb_ref > 0) else 0.0
+        pts_rent_lp = min(30.0, pts_roe_lp + pts_mb_lp)
     else:
-        pts_roe_lp = min(12.0, (roe / 25.0) * 12.0) if (roe and roe > 0) else 0.0
-        pts_roic_lp = min(10.0, (roic / 20.0) * 10.0) if (roic and roic > 0) else (min(10.0, (roe / 25.0) * 10.0) if (roe and roe > 0) else 0.0)
-        pts_ml_lp = min(5.0, (marg_liq / 20.0) * 5.0) if (marg_liq and marg_liq > 0) else 0.0
-        pts_me_lp = min(3.0, (marg_ebit / 25.0) * 3.0) if (marg_ebit and marg_ebit > 0) else (min(3.0, (marg_liq / 20.0) * 3.0) if (marg_liq and marg_liq > 0) else 0.0)
-        pts_rent_lp = min(30.0, pts_roe_lp + pts_roic_lp + pts_ml_lp + pts_me_lp)
+        pts_roe_lp = min(12.0, (roe / 24.0) * 12.0) if (roe and roe > 0) else 0.0
+        pts_roic_lp = min(10.0, (roic / 20.0) * 10.0) if (roic and roic > 0) else (min(10.0, (roe / 24.0) * 10.0) if (roe and roe > 0) else 0.0)
+        pts_ml_lp = min(8.0, (marg_liq / 18.0) * 8.0) if (marg_liq and marg_liq > 0) else 0.0
+        pts_rent_lp = min(30.0, pts_roe_lp + pts_roic_lp + pts_ml_lp)
 
-    # 2.3 Saúde Financeira e Crescimento (30 pts) por Trilha
+    # 3.3 Saúde & Solvência (30 pts) pelas 5 Trilhas
     if eh_banco_seg:
-        pts_prov_6a = min(10.0, (min(anos_divs_consec, 6) / 6.0) * 10.0) if anos_divs_consec > 0 else 0.0
-        cresc_ref_b = cresc_rec_5a if cresc_rec_5a is not None else cresc_lucro_5a
-        pts_cresc = max(0.0, min(10.0, ((cresc_ref_b + 5.0) / 20.0) * 10.0)) if (cresc_ref_b is not None) else 4.5
+        pts_prov = min(10.0, (min(anos_divs_consec, 6) / 6.0) * 10.0) if anos_divs_consec > 0 else 0.0
+        cresc_b = cresc_rec_5a if cresc_rec_5a is not None else cresc_lucro_5a
+        pts_cresc = max(0.0, min(10.0, ((cresc_b + 5.0) / 20.0) * 10.0)) if cresc_b is not None else 4.5
         if roe is not None and roe > 0 and (pl is None or pl > 0):
-            pvp_justo_b = max(0.50, min(1.80, roe / 14.0))
+            pvp_justo_b = max(0.60, min(2.00, (roe - 5.0) / 9.0))
             if pvp is not None and pvp > 0:
-                if pvp <= pvp_justo_b * 1.15:
-                    pts_solv_b = 10.0 if roe >= 12.0 else 7.5
-                elif pvp <= pvp_justo_b * 1.50:
-                    pts_solv_b = 7.0 if roe >= 12.0 else 5.5
-                else:
-                    pts_solv_b = 4.5
+                pts_solv = 10.0 if (roe >= 12.0 and pvp <= pvp_justo_b * 1.15) else (7.5 if pvp <= pvp_justo_b * 1.40 else 5.0)
             else:
-                pts_solv_b = 7.5 if roe >= 12.0 else 5.5
+                pts_solv = 7.5 if roe >= 12.0 else 5.5
         else:
-            pts_solv_b = 0.0
-        pts_saude_lp = min(30.0, pts_prov_6a + pts_cresc + pts_solv_b)
+            pts_solv = 0.0
+        pts_saude_lp = min(30.0, pts_prov + pts_cresc + pts_solv)
     elif eh_utilities:
-        if div_liq_ebitda is not None:
-            if div_liq_ebitda <= 2.5:
-                pts_divida = 14.0
-            elif div_liq_ebitda <= 3.5:
-                pts_divida = 14.0 - ((div_liq_ebitda - 2.5) / 1.0) * 5.0
-            elif div_liq_ebitda <= 4.0:
-                pts_divida = 9.0 - ((div_liq_ebitda - 3.5) / 0.5) * 4.0
-            else:
-                pts_divida = max(0.0, 5.0 - (div_liq_ebitda - 4.0) * 2.5)
+        if div_liq_efetiva is not None:
+            pts_divida = 14.0 if div_liq_efetiva <= 2.5 else (14.0 - ((div_liq_efetiva - 2.5) / 1.0) * 5.0 if div_liq_efetiva <= 3.5 else (max(0.0, 9.0 - ((div_liq_efetiva - 3.5) / 1.0) * 9.0)))
         elif div_brut_patrim is not None:
             pts_divida = 14.0 if div_brut_patrim <= 1.5 else (9.0 if div_brut_patrim <= 3.0 else max(0.0, 9.0 - (div_brut_patrim - 3.0) * 4.0))
         else:
             pts_divida = 7.0
-
-        if liq_corr is not None:
-            pts_liq = 4.0 if liq_corr >= 1.2 else (max(0.0, ((liq_corr - 0.7) / 0.5) * 4.0))
-        else:
-            pts_liq = 2.0
-
-        pts_cresc = max(0.0, min(6.0, ((cresc_rec_5a + 5.0) / 20.0) * 6.0)) if (cresc_rec_5a is not None) else 3.0
-        if roic is not None and roic >= 9.0:
-            pts_estab = 6.0 if (marg_ebit is None or marg_ebit >= 18.0) else 4.5
-        elif marg_ebit is not None and marg_ebit >= 15.0:
-            pts_estab = 4.0
-        elif roic is not None and roic > 0:
-            pts_estab = 2.5
-        else:
-            pts_estab = 0.0
-        pts_saude_lp = min(30.0, pts_divida + pts_liq + pts_cresc + pts_estab)
+        pts_liq = (4.0 if liq_corr >= 1.1 else max(0.0, ((liq_corr - 0.7) / 0.4) * 4.0)) if liq_corr is not None else 2.0
+        pts_marg_estab = 0.0
+        if marg_ebit is not None and marg_ebit >= 20.0:
+            pts_marg_estab += 7.0
+        elif marg_ebit is not None and marg_ebit > 0.0:
+            pts_marg_estab += (marg_ebit / 20.0) * 7.0
+        elif roic is not None and roic >= 9.0:
+            pts_marg_estab += 6.0
+        pts_cresc_u = max(0.0, min(5.0, ((cresc_rec_5a + 5.0) / 20.0) * 5.0)) if cresc_rec_5a is not None else 2.5
+        pts_saude_lp = min(30.0, pts_divida + pts_liq + pts_marg_estab + pts_cresc_u)
     elif eh_ciclica:
-        if div_liq_ebitda is not None:
-            if div_liq_ebitda < 1.5:
-                pts_divida = 15.0
-            elif div_liq_ebitda <= 2.5:
-                pts_divida = 15.0 - ((div_liq_ebitda - 1.5) / 1.0) * 5.0
-            elif div_liq_ebitda <= 4.0:
-                pts_divida = 10.0 - ((div_liq_ebitda - 2.5) / 1.5) * 8.0
-            else:
-                pts_divida = 0.0
+        if div_liq_efetiva is not None:
+            pts_divida = 16.0 if div_liq_efetiva < 1.5 else (16.0 - ((div_liq_efetiva - 1.5) / 1.0) * 6.0 if div_liq_efetiva <= 2.5 else max(0.0, 10.0 - ((div_liq_efetiva - 2.5) / 1.5) * 10.0))
         elif div_brut_patrim is not None:
-            pts_divida = 15.0 if div_brut_patrim <= 0.8 else max(0.0, 15.0 - ((div_brut_patrim - 0.8) / 2.2) * 15.0)
+            pts_divida = 16.0 if div_brut_patrim <= 0.8 else max(0.0, 16.0 - ((div_brut_patrim - 0.8) / 2.2) * 16.0)
         else:
-            pts_divida = 7.5
-
-        if liq_corr is not None:
-            pts_liq = 5.0 if liq_corr >= 0.85 else max(0.0, ((liq_corr - 0.50) / 0.35) * 5.0)
+            pts_divida = 8.0
+        if fcf_yield is not None:
+            pts_fcf_c = 10.0 if fcf_yield >= 8.0 else max(0.0, min(10.0, 3.0 + (fcf_yield / 8.0) * 7.0))
+        elif roic is not None and roic > 0:
+            pts_fcf_c = min(10.0, (roic / 15.0) * 8.0 + (2.0 if dy_12m >= 5.0 else 0.0))
         else:
-            pts_liq = 2.5
-
-        if cresc_rec_5a is not None:
-            pts_cresc = max(2.0 if (cresc_rec_5a >= -15.0 and (pl is None or pl > 0)) else 0.0, min(5.0, ((cresc_rec_5a + 10.0) / 25.0) * 5.0))
+            pts_fcf_c = 4.0
+        pts_liq = (4.0 if liq_corr >= 0.85 else max(0.0, ((liq_corr - 0.50) / 0.35) * 4.0)) if liq_corr is not None else 2.0
+        pts_saude_lp = min(30.0, pts_divida + pts_fcf_c + pts_liq)
+    elif eh_real_estate:
+        if div_brut_patrim is not None:
+            pts_div_re = 15.0 if div_brut_patrim <= 0.5 else (15.0 - ((div_brut_patrim - 0.5) / 1.0) * 7.0 if div_brut_patrim <= 1.5 else max(0.0, 8.0 - (div_brut_patrim - 1.5) * 8.0))
         else:
-            pts_cresc = 2.5
-
-        if (fcf_yield is not None and fcf_yield >= 6.0) or (roic is not None and roic >= 10.0 and (marg_ebit is None or marg_ebit >= 12.0)):
-            pts_caixa_c = 5.0
-        elif (fcf_yield is not None and fcf_yield > 0.0) or (roic is not None and roic > 0.0):
-            pts_caixa_c = 3.0
-        else:
-            pts_caixa_c = 0.0
-        pts_saude_lp = min(30.0, pts_divida + pts_liq + pts_cresc + pts_caixa_c)
+            pts_div_re = 7.5
+        pts_liq_re = (8.0 if liq_corr >= 1.5 else max(0.0, ((liq_corr - 0.8) / 0.7) * 8.0)) if liq_corr is not None else 4.0
+        pts_giro_re = max(0.0, min(7.0, ((cresc_rec_5a + 5.0) / 20.0) * 7.0)) if cresc_rec_5a is not None else 3.5
+        pts_saude_lp = min(30.0, pts_div_re + pts_liq_re + pts_giro_re)
     else:
-        if div_liq_ebitda is not None:
-            if div_liq_ebitda <= 1.5:
-                pts_divida = 12.0
-            elif div_liq_ebitda <= 3.0:
-                pts_divida = 12.0 - ((div_liq_ebitda - 1.5) / 1.5) * 7.0
-            elif div_liq_ebitda <= 4.5:
-                pts_divida = max(0.0, 5.0 - ((div_liq_ebitda - 3.0) / 1.5) * 5.0)
-            else:
-                pts_divida = 0.0
+        if div_liq_efetiva is not None:
+            pts_divida = 12.0 if div_liq_efetiva <= 1.5 else (12.0 - ((div_liq_efetiva - 1.5) / 1.5) * 7.0 if div_liq_efetiva <= 3.0 else max(0.0, 5.0 - ((div_liq_efetiva - 3.0) / 1.5) * 5.0))
         elif div_brut_patrim is not None:
             pts_divida = 12.0 if div_brut_patrim <= 0.5 else max(0.0, 12.0 - ((div_brut_patrim - 0.5) / 2.5) * 12.0)
         else:
             pts_divida = 6.0
-
-        if liq_corr is not None:
-            pts_liq = 8.0 if liq_corr >= 1.5 else (max(0.0, ((liq_corr - 0.8) / 0.7) * 8.0))
-        else:
-            pts_liq = 4.0
-
-        pts_cresc = max(0.0, min(10.0, ((cresc_rec_5a + 5.0) / 20.0) * 10.0)) if (cresc_rec_5a is not None) else 4.0
+        pts_liq = (8.0 if liq_corr >= 1.4 else max(0.0, ((liq_corr - 0.8) / 0.6) * 8.0)) if liq_corr is not None else 4.0
+        pts_cresc = max(0.0, min(10.0, ((cresc_rec_5a + 5.0) / 23.0) * 10.0)) if cresc_rec_5a is not None else 4.0
         pts_saude_lp = min(30.0, pts_divida + pts_liq + pts_cresc)
 
-    # 2.4 Contexto Notícias LP (5 pts)
     pts_news_lp = max(0.0, min(5.0, ((news_score + 10.0) / 20.0) * 5.0))
-
     score_lp_bruto = pts_val_lp + pts_rent_lp + pts_saude_lp + pts_news_lp
 
-    # Trava Anti-Armadilha (Value Trap)
+    # === 4) TRAVA ANTI-ARMADILHA (VALUE TRAP) ===
     armadilha_motivos = []
-    if (not eh_banco_seg) and marg_liq is not None and marg_liq < 0:
-        armadilha_motivos.append(f"margem líquida negativa ({fmt_num(marg_liq, 1)}%)")
-    if roe is not None and roe < 0:
-        armadilha_motivos.append(f"ROE negativo ({fmt_num(roe, 1)}%)")
-    if (not eh_banco_seg) and div_liq_ebitda is not None:
-        if eh_utilities:
-            if div_liq_ebitda > 5.5 or (div_liq_ebitda > 4.5 and roe is not None and roe < 10.0):
-                armadilha_motivos.append(f"Dív.Líq/EBITDA crítica ({fmt_num(div_liq_ebitda)}x)")
-        elif div_liq_ebitda > 4.5:
-            armadilha_motivos.append(f"Dív.Líq/EBITDA crítica ({fmt_num(div_liq_ebitda)}x > 4,5x)")
-    elif (not eh_banco_seg) and (not eh_utilities) and (div_brut_patrim is not None) and div_brut_patrim > 3.0:
-        armadilha_motivos.append(f"Dív/Patrim elevada ({fmt_num(div_brut_patrim)}x > 3,0x)")
+    if (not eh_banco_seg) and ((marg_liq is not None and marg_liq < 0) or (lpa is not None and lpa <= 0)):
+        armadilha_motivos.append("prejuízo operacional (Margem Líq. / LPA ≤ 0)")
+    if vpa is not None and float(vpa) <= 0:
+        armadilha_motivos.append("patrimônio líquido negativo (VPA ≤ 0)")
+    if roe is not None and roe <= 0:
+        armadilha_motivos.append(f"destruição de capital (ROE {fmt_num(roe, 1)}%)")
+    if div_liq_efetiva is not None and div_liq_efetiva > 4.5 and trilha in ("CONCESSOES_UTILITIES", "GERAL_VAREJO_TECH_IND"):
+        if not (eh_transmissora and div_liq_fco is not None and div_liq_fco <= 4.5):
+            armadilha_motivos.append(f"alavancagem perigosa (Dív.Líq/EBITDA {fmt_num(div_liq_efetiva)}x > 4,5x)")
     if news_tem_rj:
-        armadilha_motivos.append("menção comprovada a recuperação judicial / falência")
+        armadilha_motivos.append("risco de falência / recuperação judicial")
 
     eh_value_trap = len(armadilha_motivos) > 0
     score_lp = round(min(score_lp_bruto, 50.0) if eh_value_trap else min(100.0, score_lp_bruto), 1)
 
-    # === 3) SCORE CURTO PRAZO (0 a 100): Médias(35) + IFR(30) + Vol(15) + IBOV(10) + News(10) ===
-    # 3.1 Estrutura de Tendência — Médias Móveis (35 pts)
+    # === 5) SCORE CURTO PRAZO (0 a 100): Médias(35) + IFR(30) + Vol(15) + IBOV(10) + News(10) ===
     if mm20 is None and mm50 is None and mm200 is None:
         pts_medias = 17.5
     else:
         pts_mm200 = 7.0
         if dist_mm200_pct is not None:
-            if dist_mm200_pct >= 0.0:
-                pts_mm200 = 15.0
-            elif dist_mm200_pct >= -5.0:
-                pts_mm200 = 7.0
-            elif dist_mm200_pct >= -10.0:
-                pts_mm200 = 3.0
-            else:
-                pts_mm200 = 0.0
-
+            pts_mm200 = 15.0 if dist_mm200_pct >= 0.0 else (7.0 if dist_mm200_pct >= -5.0 else (3.0 if dist_mm200_pct >= -10.0 else 0.0))
         pts_mm50_al = 6.0
         if mm50 is not None and cot > 0:
-            if cot >= mm50 and (mm20 is None or mm20 >= mm50):
-                pts_mm50_al = 12.0
-            elif cot >= mm50 or (mm20 is not None and mm20 >= mm50):
-                pts_mm50_al = 6.0
-            else:
-                pts_mm50_al = 0.0
-
+            pts_mm50_al = 12.0 if (cot >= mm50 and (mm20 is None or mm20 >= mm50)) else (6.0 if (cot >= mm50 or (mm20 is not None and mm20 >= mm50)) else 0.0)
         pts_mm20_tac = 4.0
         if dist_mm20_pct is not None:
-            if -2.0 <= dist_mm20_pct <= 5.0:
+            if -2.0 <= dist_mm20_pct <= 5.0 and (mm20_incl_pos is True or mm20_incl_pos is None):
                 pts_mm20_tac = 8.0
-            elif (-5.0 <= dist_mm20_pct < -2.0) or (5.0 < dist_mm20_pct <= 10.0):
+            elif -4.0 <= dist_mm20_pct <= 8.0:
                 pts_mm20_tac = 4.0
             else:
                 pts_mm20_tac = 0.0
-        elif mm20 is not None and cot > 0:
-            d20_fb = ((cot / mm20) - 1.0) * 100.0
-            pts_mm20_tac = 8.0 if (-2.0 <= d20_fb <= 5.0) else (4.0 if -5.0 <= d20_fb <= 10.0 else 0.0)
-
         pts_medias = min(35.0, pts_mm200 + pts_mm50_al + pts_mm20_tac)
 
-    # 3.2 IFR 14d Contextualizado (30 pts) + Trava de tendência MM200
     trava_ifr_mm200 = False
     if ifr_14 is not None:
-        if 35.0 <= ifr_14 <= 48.0:
-            pts_ifr = 30.0 - (abs(ifr_14 - 41.5) / 6.5) * 1.5
-        elif 30.0 <= ifr_14 < 35.0:
-            pts_ifr = 24.0 + ((ifr_14 - 30.0) / 5.0) * 4.5
+        if 38.0 <= ifr_14 <= 50.0:
+            pts_ifr = 30.0 - (abs(ifr_14 - 44.0) / 6.0) * 1.5
+        elif 30.0 <= ifr_14 < 38.0:
+            pts_ifr = 23.0 + ((ifr_14 - 30.0) / 8.0) * 5.5
         elif ifr_14 < 30.0:
-            pts_ifr = max(14.0, 22.0 - (30.0 - ifr_14) * 0.8)
+            pts_ifr = max(14.0, 22.0 - (30.0 - ifr_14) * 0.7)
         elif ifr_14 < 70.0:
-            pts_ifr = max(7.0, 28.5 - ((ifr_14 - 48.0) / 22.0) * 21.5)
+            pts_ifr = max(7.0, 28.5 - ((ifr_14 - 50.0) / 20.0) * 21.5)
         else:
             pts_ifr = max(0.0, 5.0 - ((ifr_14 - 70.0) / 15.0) * 5.0)
-
-        recuperou_mm20_pos = (mm20 is not None and cot > 0 and cot >= mm20 and (mm20_incl_pos is True or mm20_incl_pos is None))
-        if mm200 is not None and cot > 0 and cot < (mm200 * 0.90) and not recuperou_mm20_pos:
+        if mm200 is not None and cot > 0 and cot < (mm200 * 0.90):
             trava_ifr_mm200 = True
-            pts_ifr = min(pts_ifr, 15.0)
+            pts_ifr = min(pts_ifr, 12.0)
     else:
         pts_ifr = 15.0
 
-    # 3.3 Volume 5d/60d Direcional (15 pts)
     trava_vol_dist = False
     if razao_volume is not None:
         em_distribuicao = (
-            (razao_volume >= 1.5 and ret_5d_pct is not None and ret_5d_pct < -2.0)
+            (razao_volume >= 1.2 and ret_5d_pct is not None and ret_5d_pct < -2.0)
             or (var_dia_pct is not None and var_dia_pct < -2.0 and mm20 is not None and cot > 0 and cot < mm20)
             or (mm20 is not None and cot > 0 and cot < mm20 * 0.97 and news_score < 0)
         )
         if em_distribuicao:
             trava_vol_dist = True
             pts_vol = 3.0
+        elif razao_volume >= 1.2 and (ret_5d_pct is None or ret_5d_pct >= 0.0):
+            pts_vol = 15.0
         elif razao_volume >= 1.2:
-            if ret_5d_pct is None or ret_5d_pct >= 0.0:
-                pts_vol = min(15.0, 11.0 + ((razao_volume - 1.2) / 0.6) * 4.0)
-            else:
-                pts_vol = 8.5
+            pts_vol = 9.0
         else:
             pts_vol = max(3.0, min(11.0, (razao_volume / 1.2) * 11.0))
     else:
         pts_vol = 7.5
 
-    # 3.4 Força Relativa vs IBOV 30d (10 pts)
     if forca_rel_ibov is not None:
-        if forca_rel_ibov >= 5.0:
+        if forca_rel_ibov > 5.0:
             pts_ibov = 10.0
-        elif forca_rel_ibov >= 0.0:
-            pts_ibov = 7.0 + (forca_rel_ibov / 5.0) * 3.0
-        elif forca_rel_ibov >= -5.0:
-            pts_ibov = 4.0 + ((forca_rel_ibov + 5.0) / 5.0) * 3.0
-        elif forca_rel_ibov >= -15.0:
-            pts_ibov = max(0.0, ((forca_rel_ibov + 15.0) / 10.0) * 4.0)
-        else:
+        elif forca_rel_ibov < -5.0:
             pts_ibov = 0.0
+        else:
+            pts_ibov = 5.0 + (forca_rel_ibov / 5.0) * 5.0
     else:
         pts_ibov = 5.0
 
-    # 3.5 Notícias 30d Corrigidas (10 pts)
     pts_news_cp = max(0.0, min(10.0, ((news_score + 10.0) / 20.0) * 10.0))
 
     score_cp = round(min(100.0, pts_medias + pts_ifr + pts_vol + pts_ibov + pts_news_cp), 1)
     score_geral_bruto = (0.70 * score_lp) + (0.30 * score_cp)
-    if score_lp < 55.0:
-        score_geral = round(min(score_geral_bruto, score_lp + 8.0), 1)
-    else:
-        score_geral = round(min(100.0, score_geral_bruto), 1)
+    score_geral = round(min(score_geral_bruto, score_lp + 8.0) if score_lp < 55.0 else min(100.0, score_geral_bruto), 1)
 
-    # === 4) VEREDITO QUANTITATIVO DO MODELO ===
-    if eh_banco_seg and (marg_liq is None or marg_liq == 0.0):
-        lucro_solido = (roe is not None and roe >= 10.0) and (pl is None or pl > 0.0)
-    else:
-        lucro_solido = (roe is not None and roe >= 10.0) and (marg_liq is not None and marg_liq >= 5.0)
-
-    esta_esticado = (
-        (ifr_14 is not None and ifr_14 >= 70.0)
-        or (preco_sobrepreco is not None and cot > 0.0 and cot > float(preco_sobrepreco))
-    )
-
-    divergencia_pilares = abs(score_lp - score_cp) >= 20.0 and not (score_lp >= 70.0 and score_cp >= 68.0)
-    queda_rent_hist = (roe is not None and 0.0 <= roe < 8.0 and (anos_hist >= 3 or anos_divs_consec >= 3))
-    sinal_indeciso = (
-        (lucro_solido and news_score < 0.0)
-        or (news_score <= -2.5)
-        or divergencia_pilares
-        or (score_cp >= 65.0 and score_lp < 55.0)
-        or queda_rent_hist
-    )
-
-    div_baixo_ou_distorcido = (
-        dy_12m < 4.5
-        or (div_teto_ref is None)
-        or (cot > 0.0 and float(div_teto_ref) < cot)
-    )
-
-    if eh_value_trap:
-        veredito = "🔴 Crítico (Risco Alto)"
-    elif esta_esticado:
+    # === 6) ÁRVORE DE DECISÃO DOS VEREDITOS (SEQUÊNCIA EXATA) ===
+    if (marg_liq is not None and marg_liq < 0) and trilha != "FINANCEIRO":
+        veredito = "🔴 Crítico (Prejuízo Operacional)"
+    elif (lpa is not None and lpa <= 0) and trilha != "FINANCEIRO":
+        veredito = "🔴 Crítico (Prejuízo Operacional)"
+    elif vpa is not None and float(vpa) <= 0:
+        veredito = "🔴 Crítico (Destruição de Capital)"
+    elif roe is not None and roe <= 0:
+        veredito = "🔴 Crítico (Destruição de Capital)"
+    elif div_liq_efetiva is not None and div_liq_efetiva > 4.5 and trilha in ("CONCESSOES_UTILITIES", "GERAL_VAREJO_TECH_IND") and not (eh_transmissora and div_liq_fco is not None and div_liq_fco <= 4.5):
+        veredito = "🔴 Crítico (Alavancagem Perigosa)"
+    elif news_tem_rj:
+        veredito = "🔴 Crítico (Risco de Falência/RJ)"
+    elif (ifr_14 is not None and ifr_14 >= 70.0) or (preco_sobrepreco is not None and cot > 0.0 and cot > float(preco_sobrepreco)):
         veredito = "🟣 Esticado (Alerta Topo/Sobrepreço)"
-    elif sinal_indeciso:
-        veredito = "🟠 Indeciso (Sinais Mistos)"
+    elif score_lp >= 70.0 and score_cp < 40.0:
+        veredito = "🟠 Indeciso (Aguardar Estabilização Técnica)"
+    elif score_lp < 50.0 and score_cp >= 70.0:
+        veredito = "🟠 Indeciso (Rali Sem Fundamento)"
+    elif news_score <= -4.0:
+        veredito = "🟠 Indeciso (Pressão de Notícias Negativas)"
     elif (
         score_geral >= 72.0
         and score_lp >= 70.0
         and (ms_consolidada is not None and ms_consolidada > 10.0)
-        and (preco_sobrepreco is None or cot <= float(preco_sobrepreco))
+        and (preco_teto_modelo is None or cot <= float(preco_teto_modelo))
     ):
         veredito = "🟢 Excelente (Forte Atratividade)"
-    elif pvp is not None and 0.0 < pvp <= 1.05 and score_lp >= 55.0 and score_geral >= 55.0:
-        veredito = "🔵 Bom (Desconto Patrimonial)"
-    elif (
-        roe is not None
-        and roe >= 15.0
-        and (pvp is None or pvp > 1.05)
-        and (ms_consolidada is None or ms_consolidada >= -10.0)
-        and score_lp >= 60.0
-        and score_geral >= 58.0
-    ):
-        veredito = "🔵 Bom (Qualidade / Retorno Equilibrado)"
-    elif score_lp >= 65.0 and (ms_consolidada is None or ms_consolidada > 0.0):
-        veredito = "🔵 Bom (Acúmulo LP)"
-    elif div_baixo_ou_distorcido:
-        veredito = "🟡 Regular (Yield Baixo)"
+    elif score_geral >= 60.0 and score_lp >= 60.0:
+        if pvp is not None and 0.0 < pvp <= 0.95:
+            veredito = "🔵 Bom (Desconto Patrimonial Real)"
+        elif dy_12m >= 7.5:
+            veredito = "🔵 Bom (Foco em Renda Passiva)"
+        elif roe is not None and roe >= 16.0 and roic is not None and roic >= 12.0:
+            veredito = "🔵 Bom (Empresa de Alta Eficiência)"
+        else:
+            veredito = "🔵 Bom (Retorno Equilibrado)"
     else:
-        veredito = "🟡 Regular (Neutro)"
+        veredito = "🟡 Regular (Aguardar Melhor Ponto)"
 
-    # === 5) MOTIVOS EXPLICATIVOS ===
+    # === 7) MOTIVOS EXPLICATIVOS ===
     motivos = []
     if eh_value_trap:
         motivos.append(f"⚠️ Trava Anti-Armadilha (teto LP 50): {', '.join(armadilha_motivos)}")
@@ -5719,33 +5615,29 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         motivos.append("cobertura limitada (apenas 1 método independente)")
     elif n_metodos == 2:
         motivos.append("cobertura parcial (2 métodos independentes)")
-    if dy_12m <= 0.0 and dpa_med_6a <= 0.0 and anos_hist <= 0:
+    if dy_12m <= 0.0 and dpa_med_5a <= 0.0 and anos_hist <= 0:
         motivos.append("sem histórico de dividendos (DY 0%)")
-    elif dy_12m >= 6.0:
+    elif dy_12m >= 7.5:
         motivos.append(f"DY atrativo ({fmt_num(dy_12m, 1)}%)")
     if pvp is not None:
-        if pvp <= 1.05:
+        if pvp <= 0.95:
             motivos.append(f"P/VP descontado ({fmt_num(pvp)})")
         elif pvp > 1.8:
             motivos.append(f"P/VP esticado ({fmt_num(pvp)})")
     if roe is not None:
-        if roe >= 15:
+        if roe >= 16:
             motivos.append(f"ROE forte ({fmt_num(roe, 1)}%)")
         elif 0 <= roe < 8:
             motivos.append(f"ROE baixo ({fmt_num(roe, 1)}%)")
     if ifr_14 is not None:
         if trava_ifr_mm200:
-            motivos.append(f"IFR {fmt_num(ifr_14, 1)} travado por tendência abaixo da MM200")
-        elif 35.0 <= ifr_14 <= 48.0:
+            motivos.append(f"IFR {fmt_num(ifr_14, 1)} travado (máx 12 pts) abaixo da MM200")
+        elif 38.0 <= ifr_14 <= 50.0:
             motivos.append(f"IFR em ponto técnico atrativo ({fmt_num(ifr_14, 1)})")
         elif ifr_14 >= 70.0:
             motivos.append(f"IFR sobrecomprado ({fmt_num(ifr_14, 1)})")
-        elif ifr_14 < 30.0:
-            motivos.append(f"IFR muito sobrevendido ({fmt_num(ifr_14, 1)})")
     if news_resumo != "⚪ Neutro":
         motivos.append(f"notícias 30d: {news_resumo}")
-    if pl is not None and pl < 0:
-        motivos.append("atenção: lucro negativo")
 
     return {
         "score_lp": score_lp,
@@ -5758,10 +5650,11 @@ def calcular_score(d: dict, pt_med: float | None, pt_proj: float | None, pt_bazi
         "eh_value_trap": eh_value_trap,
         "eh_utilities": eh_utilities,
         "eh_ciclica": eh_ciclica,
+        "trilha": trilha,
         "preco_teto_modelo": preco_teto_modelo,
         "preco_sobrepreco": preco_sobrepreco,
         "detalhes": {
-            "trilha": trilha_nome,
+            "trilha": trilha,
             "pts_val_lp": round(pts_val_lp, 1),
             "pts_rent_lp": round(pts_rent_lp, 1),
             "pts_saude_lp": round(pts_saude_lp, 1),
@@ -6325,25 +6218,30 @@ if setores_alvo:
 ids_fin_seg = tuple(sorted({setores_dict[s] for s in ("Intermediários Financeiros", "Previdência e Seguros") if s in setores_dict}))
 mapa_fin_seg = carregar_tickers_por_setor(ids_fin_seg) if ids_fin_seg else {}
 
+yield_bazin_din = buscar_yield_exigido_bazin()
+TRANSMISSORAS_B3 = {"TAEE11", "TAEE3", "TAEE4", "ISAE4", "ISAE3", "TRPL4", "TRPL3", "ALUP11", "ALUP3", "ALUP4"}
+
 preliminares = []
 for a in ativos_filtrados:
     setor_of_pre = mapa_setores_ativos.get(a["ticker"], "") or mapa_fin_seg.get(a["ticker"], "")
+    trilha_pre = mapear_trilha(setor_of_pre)
     roe_pre = a.get("roe")
     lpa_pre = a.get("lpa")
     vpa_pre = a.get("vpa")
     cot_pre = float(a.get("cotacao") or 0.0)
-    pl_pre = (cot_pre / lpa_pre) if (cot_pre > 0 and lpa_pre is not None and lpa_pre != 0) else a.get("pl")
-    pvp_pre = (cot_pre / vpa_pre) if (cot_pre > 0 and vpa_pre is not None and vpa_pre > 0) else a.get("pvp")
+    pl_pre = (cot_pre / lpa_pre) if (cot_pre > 0 and lpa_pre is not None and lpa_pre > 0) else None
+    pvp_pre = (cot_pre / vpa_pre) if (cot_pre > 0 and vpa_pre is not None and vpa_pre > 0) else None
     a_pre = {
         **a,
         "pl": pl_pre,
         "pvp": pvp_pre,
         "setor_nome": setor_of_pre,
-        "eh_banco_seg": (a["ticker"] in mapa_fin_seg) or any(
-            k in _norm_txt(setor_of_pre) for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
-        ),
+        "setor_oficial": setor_of_pre,
+        "trilha": trilha_pre,
+        "eh_banco_seg": (trilha_pre == "FINANCEIRO") or (a["ticker"] in mapa_fin_seg),
+        "eh_transmissora": a["ticker"] in TRANSMISSORAS_B3,
     }
-    pt_bazin = a["dpa_12m"] / 0.06 if a["dpa_12m"] > 0 else None
+    pt_bazin = a["dpa_12m"] / yield_bazin_din if a["dpa_12m"] > 0 else None
     if lpa_pre and vpa_pre and lpa_pre > 0 and vpa_pre > 0:
         f_roe_p = max(0.40, min(1.50, float(roe_pre) / 14.0)) if roe_pre is not None else 1.0
         graham = math.sqrt(22.5 * lpa_pre * (vpa_pre * f_roe_p))
@@ -6426,22 +6324,20 @@ def montar_item_completo(a: dict) -> dict:
     vpa = vpa_i10 if vpa_i10 is not None else (a.get("vpa") if a.get("vpa") is not None else yf_info.get("vpa_yf"))
     roe = roe_i10 if roe_i10 is not None else (a.get("roe") if a.get("roe") is not None else yf_info.get("roe_yf"))
 
-    # Recalcula P/L e P/VP sempre pela cotação ao vivo
-    if cot > 0 and lpa is not None and float(lpa) != 0.0:
-        pl = cot / float(lpa)
-    elif pl_i10 is not None and cot > 0 and cot_i10 and cot_i10 > 0:
+    # Recálculo ao vivo: P/L = None se LPA <= 0; P/VP = None se VPA <= 0
+    if lpa is not None:
+        pl = (cot / float(lpa)) if (cot > 0 and float(lpa) > 0.0) else None
+    elif pl_i10 is not None and float(pl_i10) > 0 and cot > 0 and cot_i10 and cot_i10 > 0:
         pl = pl_i10 * (cot / cot_i10)
     else:
-        pl = None if (lpa is not None and float(lpa) == 0.0) else (pl_i10 if pl_i10 is not None else a.get("pl"))
+        pl = a.get("pl") if (a.get("pl") is not None and float(a.get("pl")) > 0) else None
 
-    if cot > 0 and vpa is not None and float(vpa) > 0.0:
-        pvp = cot / float(vpa)
-    elif vpa is not None and float(vpa) <= 0.0:
-        pvp = None
-    elif pvp_i10 is not None and cot > 0 and cot_i10 and cot_i10 > 0:
+    if vpa is not None:
+        pvp = (cot / float(vpa)) if (cot > 0 and float(vpa) > 0.0) else None
+    elif pvp_i10 is not None and float(pvp_i10) > 0 and cot > 0 and cot_i10 and cot_i10 > 0:
         pvp = pvp_i10 * (cot / cot_i10)
     else:
-        pvp = pvp_i10 if pvp_i10 is not None else a.get("pvp")
+        pvp = a.get("pvp") if (a.get("pvp") is not None and float(a.get("pvp")) > 0) else None
 
     dy_fund = float(a.get("dy_12m") or 0.0)
     dpa_confiavel = (cot * (dy_fund / 100.0)) if (cot > 0 and dy_fund > 0) else 0.0
@@ -6463,6 +6359,7 @@ def montar_item_completo(a: dict) -> dict:
 
     dpa_med_6a = yf_info.get("dpa_med_6a")
     anos_hist = yf_info.get("anos_hist", 0)
+    dpa_base = min(float(dpa_12m), float(dpa_med_6a) * 1.25) if (dpa_12m and dpa_12m > 0 and dpa_med_6a and dpa_med_6a > 0) else float(dpa_12m or 0.0)
 
     dy_ref_proj = dy_12m if dy_12m > 0 else dy_fund
     dpa_ref_proj = dpa_12m if dpa_12m > 0 else dpa_confiavel
@@ -6476,34 +6373,32 @@ def montar_item_completo(a: dict) -> dict:
     else:
         dpa_proj = dpa_ref_proj if dpa_ref_proj > 0 else None
 
-    pt_med = (dpa_med_6a / 0.06) if (dpa_med_6a and dpa_med_6a > 0) else None
-    pt_proj = (dpa_proj / 0.06) if (dpa_proj and dpa_proj > 0) else None
-    pt_bazin = (dpa_12m / 0.06) if (dpa_12m and dpa_12m > 0) else None
+    # Bazin Dinâmico (Yield exigido entre 6% e 7,5%)
+    pt_med = (dpa_med_6a / yield_bazin_din) if (dpa_med_6a and dpa_med_6a > 0) else None
+    pt_proj = (dpa_proj / yield_bazin_din) if (dpa_proj and dpa_proj > 0) else None
+    pt_bazin = (dpa_base / yield_bazin_din) if dpa_base > 0 else None
 
-    # Graham Ajustado pelo ROE (Ke ≈ 14%)
+    # Graham Modernizado (Ajustado pelo ROE, Ke = 14%)
     if lpa and vpa and float(lpa) > 0 and float(vpa) > 0:
         fator_roe_g = max(0.40, min(1.50, float(roe) / 14.0)) if roe is not None else 1.0
-        vpa_ef_g = float(vpa) * fator_roe_g
-        graham = math.sqrt(22.5 * float(lpa) * vpa_ef_g)
+        graham = math.sqrt(22.5 * float(lpa) * (float(vpa) * fator_roe_g))
     else:
         graham = None
 
     setor_oficial_t = mapa_setores_ativos.get(t, "") or mapa_fin_seg.get(t, "")
     setor_exib_t = SETOR_CURTO.get(setor_oficial_t, setor_oficial_t)
-    set_norm_t = _norm_txt(setor_oficial_t)
-    eh_banco_seg = (t in mapa_fin_seg) or any(
-        k in set_norm_t for k in ("banco", "intermediarios financeiros", "seguro", "previdencia")
-    )
-    eh_utilities = (not eh_banco_seg) and any(
-        k in set_norm_t for k in ("energia", "eletric", "saneamento", "agua", "telecom", "transmiss", "gas")
-    )
-    eh_ciclica = (not eh_banco_seg) and (not eh_utilities) and any(
-        k in set_norm_t for k in ("petrol", "miner", "siderurg", "metalurg", "papel", "celulose", "madeira", "agro", "quimic", "commodit")
-    )
+    trilha_t = mapear_trilha(setor_oficial_t)
+    if t in mapa_fin_seg:
+        trilha_t = "FINANCEIRO"
+    eh_banco_seg = (trilha_t == "FINANCEIRO")
+    eh_utilities = (trilha_t == "CONCESSOES_UTILITIES")
+    eh_ciclica = (trilha_t == "COMMODITIES_CICLICAS")
+    eh_transmissora = (t in TRANSMISSORAS_B3) or ("transmiss" in _norm_txt(setor_oficial_t))
 
     a_merged = dict(a)
     for k_base, k_i10 in (
         ("roic", "roic_i10"),
+        ("marg_bruta", "marg_bruta_i10"),
         ("marg_liq", "marg_liq_i10"),
         ("marg_ebit", "marg_ebit_i10"),
         ("ev_ebitda", "ev_ebitda_i10"),
@@ -6518,49 +6413,60 @@ def montar_item_completo(a: dict) -> dict:
             a_merged[k_base] = i10_info[k_i10]
 
     div_liq_ebitda = a_merged.get("div_liq_ebitda") if a_merged.get("div_liq_ebitda") is not None else yf_info.get("div_liq_ebitda_yf")
+    div_liq_fco = yf_info.get("div_liq_fco_yf")
     cresc_lucro_5a = a_merged.get("cresc_lucro_5a") if a_merged.get("cresc_lucro_5a") is not None else yf_info.get("cresc_lucro_yf")
+    marg_bruta = a_merged.get("marg_bruta") if a_merged.get("marg_bruta") is not None else yf_info.get("marg_bruta_yf")
     ev_eb_val = a_merged.get("ev_ebitda")
     div_liq_mkt_ratio = yf_info.get("div_liq_mktcap_ratio")
 
-    # Novo método independente: Múltiplo Justo de Caixa/Lucro
+    # Método C: Múltiplo Justo Operacional Setorial
     pt_mult_justo = None
     if eh_banco_seg:
         if vpa is not None and float(vpa) > 0:
-            fator_pvp_b = max(0.50, min(1.80, float(roe) / 14.0)) if roe is not None else 1.0
-            pt_mult_justo = float(vpa) * fator_pvp_b
-    elif cot > 0 and ev_eb_val is not None and float(ev_eb_val) > 0:
-        mult_alvo = 6.0 if eh_ciclica else (7.5 if eh_utilities else 7.0)
-        div_liq_acao = None
-        if div_liq_mkt_ratio is not None:
-            div_liq_acao = cot * float(div_liq_mkt_ratio)
-        elif div_liq_ebitda is not None and (float(ev_eb_val) - float(div_liq_ebitda)) > 0.25:
-            ebitda_acao_est = cot / (float(ev_eb_val) - float(div_liq_ebitda))
-            div_liq_acao = ebitda_acao_est * float(div_liq_ebitda)
-        if div_liq_acao is not None:
-            ev_acao_atual = cot + div_liq_acao
-            if ev_acao_atual > 0:
-                ebitda_acao = ev_acao_atual / float(ev_eb_val)
-                pt_ev_calc = (mult_alvo * ebitda_acao) - div_liq_acao
-                if pt_ev_calc > 0:
-                    pt_mult_justo = pt_ev_calc
-        else:
-            pt_mult_justo = cot * (mult_alvo / float(ev_eb_val))
+            pvp_justo_gordon = max(0.60, min(2.00, (float(roe) - 5.0) / 9.0)) if roe is not None else 1.0
+            pt_mult_justo = float(vpa) * pvp_justo_gordon
+    elif trilha_t in ("CONCESSOES_UTILITIES", "COMMODITIES_CICLICAS"):
+        if cot > 0 and ev_eb_val is not None and float(ev_eb_val) > 0:
+            mult_alvo = 7.0 if eh_utilities else 4.0
+            div_liq_acao = None
+            if div_liq_mkt_ratio is not None:
+                div_liq_acao = cot * float(div_liq_mkt_ratio)
+            elif div_liq_ebitda is not None and (float(ev_eb_val) - float(div_liq_ebitda)) > 0.25:
+                ebitda_acao_est = cot / (float(ev_eb_val) - float(div_liq_ebitda))
+                div_liq_acao = ebitda_acao_est * float(div_liq_ebitda)
+            if div_liq_acao is not None:
+                ev_acao_atual = cot + div_liq_acao
+                if ev_acao_atual > 0:
+                    ebitda_acao = ev_acao_atual / float(ev_eb_val)
+                    pt_ev_calc = (mult_alvo * ebitda_acao) - div_liq_acao
+                    pt_mult_justo = max(0.0, pt_ev_calc) if pt_ev_calc > 0 else None
+            else:
+                pt_mult_justo = cot * (mult_alvo / float(ev_eb_val))
+    else:
+        if lpa is not None and float(lpa) > 0:
+            cresc_peg = cresc_lucro_5a if cresc_lucro_5a is not None else (a_merged.get("cresc_rec_5a") if a_merged.get("cresc_rec_5a") is not None else 5.0)
+            pl_justo_peg = max(7.0, min(18.0, 8.0 + (0.5 * float(cresc_peg))))
+            pt_mult_justo = float(lpa) * pl_justo_peg
 
     ret_30d_a = yf_info.get("ret_30d_pct")
     forca_rel_ibov_30d = (ret_30d_a - ibov_ret_30d_global) if (ret_30d_a is not None and ibov_ret_30d_global is not None) else None
 
     item = {
         **a_merged,
-        "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t,
-        "eh_banco_seg": eh_banco_seg, "eh_utilities": eh_utilities, "eh_ciclica": eh_ciclica,
+        "cotacao": cot, "nome": nome, "setor_nome": setor_exib_t, "setor_oficial": setor_oficial_t,
+        "trilha": trilha_t, "eh_banco_seg": eh_banco_seg, "eh_utilities": eh_utilities,
+        "eh_ciclica": eh_ciclica, "eh_transmissora": eh_transmissora,
         "pl": pl, "pvp": pvp, "lpa": lpa, "vpa": vpa, "roe": roe,
+        "marg_bruta": marg_bruta,
         "div_liq_ebitda": div_liq_ebitda,
+        "div_liq_fco": div_liq_fco,
         "cresc_lucro_5a": cresc_lucro_5a,
         "fcf_yield": yf_info.get("fcf_yield_yf"),
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
-        "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
+        "dpa_med_6a": dpa_med_6a, "dpa_base": dpa_base, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,
         "pt_mult_justo": pt_mult_justo,
+        "yield_exigido_bazin": yield_bazin_din * 100.0,
         "logo_i10": i10_info.get("logo_i10", ""),
         "var_dia_pct": i10_info.get("var_dia_i10") if i10_info.get("var_dia_i10") is not None else yf_info.get("var_dia_pct"),
         "ret_5d_pct": yf_info.get("ret_5d_pct"),
@@ -6625,11 +6531,11 @@ with tab1:
         }
         VEREDITOS_OPCOES = [
             "🟢 Excelente (Forte Atratividade)",
-            "🔵 Bom (Acúmulo LP / Desconto / Qualidade)",
+            "🔵 Bom (Desc. Patr. / Renda / Eficiência / Equil.)",
             "🟣 Esticado (Alerta Topo/Sobrepreço)",
-            "🟠 Indeciso (Sinais Mistos)",
-            "🟡 Regular (Neutro / Yield Baixo)",
-            "🔴 Crítico (Risco Alto)",
+            "🟠 Indeciso (Estabilização / Rali / Notícias)",
+            "🟡 Regular (Aguardar Melhor Ponto)",
+            "🔴 Crítico (Prejuízo / Capital / Alavancagem / RJ)",
         ]
 
         if "tab1_modo_score_val" not in st.session_state:
@@ -7158,9 +7064,9 @@ with tab1:
                 "P/VP": "pvp",
                 "ROE (%)": "roe",
                 "ROIC (%)": "roic",
-                "Preço Teto Mediana (6a)": "pt_med",
+                "Preço Teto Med. Aparada (5a)": "pt_med",
                 "Preço Teto Projetivo": "pt_proj",
-                "Preço-Teto Bazin (12m)": "pt_bazin",
+                "Preço-Teto Bazin Dinâmico": "pt_bazin",
                 "Preço Justo Graham Adj.": "graham",
                 "Ticker (A-Z)": "ticker",
             }

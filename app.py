@@ -1480,15 +1480,50 @@ def buscar_serie_investidor10_chart(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def buscar_prev_close_investidor10(ticker: str, data_ref_iso: str, _v: int = 2) -> float | None:
+def buscar_prev_close_investidor10(
+    ticker: str,
+    data_ref_iso: str,
+    p_ini_1d: float | None = None,
+    p_fim_1d: float | None = None,
+    n_pts_1d: int = 0,
+    _v: int = 3,
+) -> float | None:
     """Fechamento anterior segundo o Investidor10: último ponto do pregão anterior na série seven-days (fallback: série diária de 30 D)."""
     try:
         dt_ref = pd.Timestamp(data_ref_iso).normalize()
+        agora_brt = datetime.now(BRT)
+        hoje_brt_d = agora_brt.date()
         for per_pc in ("7 D", "30 D"):
             s_d, _ = buscar_serie_investidor10_chart_com_info(ticker, per_pc, False, None)
             if s_d is None or s_d.empty:
                 continue
-            s_ant = s_d[s_d.index.normalize() < dt_ref]
+            if per_pc == "30 D":
+                s_d_uteis = s_d[s_d.index.weekday < 5]
+                if not s_d_uteis.empty:
+                    s_d = s_d_uteis
+            dias_d = sorted({ts.normalize() for ts in s_d.index})
+            if not dias_d:
+                continue
+            dt_sessao = dt_ref
+            if dt_ref not in dias_d:
+                d_ult = dias_d[-1]
+                eh_mesma_sessao = False
+                if dt_ref.weekday() >= 5:
+                    eh_mesma_sessao = True
+                elif per_pc == "7 D" and p_ini_1d is not None and p_fim_1d is not None and n_pts_1d >= 5:
+                    sub_ult = s_d[s_d.index.normalize() == d_ult]
+                    if (
+                        len(sub_ult) >= 5
+                        and abs(len(sub_ult) - n_pts_1d) <= 5
+                        and abs(float(sub_ult.iloc[0]) - p_ini_1d) <= 0.02
+                        and abs(float(sub_ult.iloc[-1]) - p_fim_1d) <= 0.02
+                    ):
+                        eh_mesma_sessao = True
+                elif per_pc == "30 D" and dt_ref.date() == hoje_brt_d and agora_brt.hour < 10:
+                    eh_mesma_sessao = True
+                if eh_mesma_sessao:
+                    dt_sessao = d_ult
+            s_ant = s_d[s_d.index.normalize() < dt_sessao]
             if s_ant.empty:
                 continue
             v_prev = float(s_ant.iloc[-1])
@@ -4468,9 +4503,24 @@ def render_grafico_e_tabela_ativo(
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
             p_ref_var = p_ini
             if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
-                prev_i10_1d = buscar_prev_close_investidor10(ticker, serie.index[-1].strftime("%Y-%m-%d")) if usou_i10_graf else None
+                prev_i10_1d = buscar_prev_close_investidor10(
+                    ticker,
+                    serie.index[-1].strftime("%Y-%m-%d"),
+                    p_ini_1d=p_ini,
+                    p_fim_1d=p_fim,
+                    n_pts_1d=len(serie),
+                ) if usou_i10_graf else None
+                var_i10_ref = (base_ativo or {}).get("var_dia_i10")
+                cot_i10_ref = (base_ativo or {}).get("cotacao_i10")
+                prev_card_i10 = (
+                    float(cot_i10_ref) / (1.0 + float(var_i10_ref) / 100.0)
+                    if (var_i10_ref is not None and cot_i10_ref and float(cot_i10_ref) > 0 and (1.0 + float(var_i10_ref) / 100.0) > 0)
+                    else None
+                )
                 var_dia_ref = (base_ativo or {}).get("var_dia_pct")
-                if prev_i10_1d and prev_i10_1d > 0:
+                if prev_card_i10 and prev_card_i10 > 0 and (not prev_i10_1d or abs(prev_card_i10 - prev_i10_1d) / prev_i10_1d <= 0.005):
+                    p_ref_var = prev_card_i10
+                elif prev_i10_1d and prev_i10_1d > 0:
                     p_ref_var = prev_i10_1d
                 elif var_dia_ref is not None and p_fim > 0 and (1.0 + float(var_dia_ref) / 100.0) > 0:
                     p_ref_var = p_fim / (1.0 + float(var_dia_ref) / 100.0)
@@ -4685,8 +4735,16 @@ def render_grafico_e_tabela_ativo(
 
             margem_y = (y_max - y_min) * 0.06 if y_max > y_min else max(0.5, abs(y_max) * 0.05)
             if not modo_comparar and not eh_candles and y_min > 0:
-                y_rng_lo = max(0.0, round(y_min * 0.98, 2))
-                y_rng_hi = round(y_max * 1.02, 2)
+                if not usar_custom_range and periodo == "1 D":
+                    span_1d = y_max - y_min
+                    pad_1d = (span_1d * 0.10) if span_1d > 0 else max(0.02, y_max * 0.005)
+                    y_rng_lo = max(0.0, round(y_min - pad_1d, 2))
+                    y_rng_hi = round(y_max + pad_1d, 2)
+                    if y_rng_hi <= y_rng_lo:
+                        y_rng_hi = round(y_rng_lo + 0.04, 2)
+                else:
+                    y_rng_lo = max(0.0, round(y_min * 0.98, 2))
+                    y_rng_hi = round(y_max * 1.02, 2)
             else:
                 y_rng_lo = y_min - (margem_y * (2.4 if eh_candles else 0.7))
                 if not modo_comparar:
@@ -4713,7 +4771,10 @@ def render_grafico_e_tabela_ativo(
                 spikedash="dash",
             )
             if not modo_comparar and not eh_candles:
-                ticks_y = _calc_ticks_y_i10(y_rng_lo, y_rng_hi)
+                if not usar_custom_range and periodo == "1 D" and y_rng_hi > y_rng_lo:
+                    ticks_y = sorted({round(y_rng_lo + i * (y_rng_hi - y_rng_lo) / 6.0, 2) for i in range(7)})
+                else:
+                    ticks_y = _calc_ticks_y_i10(y_rng_lo, y_rng_hi)
                 yaxis_cfg["tickmode"] = "array"
                 yaxis_cfg["tickvals"] = ticks_y
                 yaxis_cfg["ticktext"] = [f"{simb_moeda} {fmt_num(tv)}" for tv in ticks_y]
@@ -6729,6 +6790,8 @@ def montar_item_completo(a: dict) -> dict:
         "yield_exigido_bazin": yield_bazin_din * 100.0,
         "logo_i10": i10_info.get("logo_i10", ""),
         "var_dia_pct": i10_info.get("var_dia_i10") if i10_info.get("var_dia_i10") is not None else yf_info.get("var_dia_pct"),
+        "var_dia_i10": i10_info.get("var_dia_i10"),
+        "cotacao_i10": cot_i10,
         "ret_5d_pct": yf_info.get("ret_5d_pct"),
         "ret_30d_pct": ret_30d_a,
         "forca_rel_ibov_30d": forca_rel_ibov_30d,

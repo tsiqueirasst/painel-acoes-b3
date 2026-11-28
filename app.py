@@ -1055,7 +1055,7 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 6) -> lis
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _obter_meta_chart_i10(ticker: str, _v: int = 3) -> dict:
+def _obter_meta_chart_i10(ticker: str, _v: int = 4) -> dict:
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
     sess = requests.Session()
     sess.headers.update({
@@ -1069,16 +1069,11 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 3) -> dict:
         sess.headers["Cookie"] = i10_cookie
 
     try:
-        resp_pg = sess.get(url_pg, timeout=4)
+        resp_pg = sess.get(url_pg, timeout=5)
         if resp_pg.status_code != 200:
             return {"erro": f"página HTTP {resp_pg.status_code}"}
         if "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
             return {"erro": "bloqueio Cloudflare"}
-
-        csrf_tok = ""
-        m_csrf = re.search(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
-        if m_csrf:
-            csrf_tok = m_csrf.group(1)
 
         tid = ""
         for pat_tid in (
@@ -1096,9 +1091,8 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 3) -> dict:
                 break
 
         rotas_desc: list[str] = []
-        kws_api = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
         for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
-            if any(k in path.lower() for k in kws_api):
+            if "/chart" in path.lower() or "/intraday" in path.lower():
                 norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
                 if norm_p not in rotas_desc:
                     rotas_desc.append(norm_p)
@@ -1118,12 +1112,7 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 3) -> dict:
                 if rt_js not in rotas_desc:
                     rotas_desc.append(rt_js)
 
-        return {
-            "tid": tid,
-            "csrf": csrf_tok,
-            "rotas": tuple(rotas_desc),
-            "cookies": dict(sess.cookies),
-        }
+        return {"tid": tid, "rotas": tuple(rotas_desc)}
     except Exception:
         return {"erro": "erro de conexão"}
 
@@ -1207,14 +1196,14 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 8,
+    _v: int = 9,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
         "1 D": 1,
         "7 D": 7,
         "30 D": 30,
-        "6 M": 182,
+        "6 M": 180,
         "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
         "1 A": 365,
         "5 A": 1825,
@@ -1229,7 +1218,6 @@ def buscar_serie_investidor10_chart_com_info(
         return pd.Series(dtype=float), meta["erro"]
 
     tid = meta.get("tid", "")
-    csrf_tok = meta.get("csrf", "")
     rotas_desc = [r for r in meta.get("rotas", ()) if ("/chart" in r.lower() or "/intraday" in r.lower())]
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
 
@@ -1238,23 +1226,11 @@ def buscar_serie_investidor10_chart_com_info(
         **HEADERS,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-        "Origin": "https://investidor10.com.br",
         "Referer": url_pg,
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "X-Requested-With": "XMLHttpRequest",
     })
     i10_cookie = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
     if i10_cookie:
         sess.headers["Cookie"] = i10_cookie
-    for ck, cv in (meta.get("cookies") or {}).items():
-        sess.cookies.set(ck, cv)
-    if csrf_tok:
-        sess.headers["X-CSRF-TOKEN"] = csrf_tok
-    xsrf_c = sess.cookies.get("XSRF-TOKEN")
-    if xsrf_c:
-        sess.headers["X-XSRF-TOKEN"] = requests.utils.unquote(xsrf_c)
 
     dias = mapa_dias[periodo_label]
     adj_str = "true" if ajustada else "false"
@@ -1262,26 +1238,23 @@ def buscar_serie_investidor10_chart_com_info(
     mapa_cands = {
         "1 D": [1, "1d", "intraday"],
         "7 D": [7, "7d", 5],
-        "30 D": [30, "30d"],
-        "6 M": [182, 183, 184, 180, "6m"],
-        "YTD": ["ytd", dias],
-        "1 A": [365, 366, "1y"],
-        "5 A": [1825, 1826, "5y"],
-        "10 A": [3650, 3652, "10y"],
-        "15 A": [5475, 5478, "15y"],
+        "30 D": [30],
+        "6 M": [180, 182, 183, "6m"],
+        "YTD": [dias, "ytd"],
+        "1 A": [365, 366],
+        "5 A": [1825, 1826],
+        "10 A": [3650, 3652],
+        "15 A": [5475, 5478],
     }
     dias_cands = mapa_cands.get(periodo_label, [dias])
     eh_intraday_per = periodo_label in ("1 D", "7 D")
 
     cands_urls: list[str] = []
-    # 1) Prioridade máxima: rotas oficiais conhecidas do Investidor10
     if tid:
-        d_prim = str(dias_cands[0])
         if periodo_label == "7 D":
             cands_urls.extend([
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7",
                 f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}?days=7",
-                f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/7/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/7/{adj_int}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/5/{adj_str}/real",
@@ -1303,7 +1276,7 @@ def buscar_serie_investidor10_chart_com_info(
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
                 ])
-    # 2) Rotas descobertas dinamicamente no HTML/JS
+
     for d_c in dias_cands[:2]:
         d_s = str(d_c)
         for r_tpl in rotas_desc:
@@ -1336,16 +1309,21 @@ def buscar_serie_investidor10_chart_com_info(
     diag_motivo = "indisponível"
     serie_diaria_fb = pd.Series(dtype=float)
 
-    for url_c in urls_unicas[:12]:
+    for url_c in urls_unicas[:8]:
         try:
-            r_c = sess.get(url_c, timeout=2.5)
+            r_c = sess.get(url_c, timeout=6.0)
             if r_c.status_code in (401, 403, 429):
                 diag_motivo = f"HTTP {r_c.status_code}"
                 break
             if r_c.status_code != 200:
                 diag_motivo = f"HTTP {r_c.status_code}"
                 continue
-            s_out = _parse_i10_chart_json(r_c.json(), eh_intraday_per=eh_intraday_per)
+            txt_head = (r_c.text or "").lstrip()[:80].lower()
+            if txt_head.startswith(("<!doctype", "<html")):
+                diag_motivo = "HTML/Cloudflare na API"
+                continue
+            js = r_c.json()
+            s_out = _parse_i10_chart_json(js, eh_intraday_per=eh_intraday_per)
             if s_out.empty:
                 diag_motivo = "lista vazia na API"
                 continue
@@ -1391,8 +1369,8 @@ def buscar_serie_investidor10_chart_com_info(
             if cot_live and float(cot_live) > 0:
                 s_out.iloc[-1] = float(cot_live)
             return s_out, "Investidor10"
-        except Exception:
-            diag_motivo = "erro ao ler JSON"
+        except Exception as exc:
+            diag_motivo = f"{type(exc).__name__}: {str(exc)[:35]}"
             continue
 
     if periodo_label == "7 D" and not serie_diaria_fb.empty:
@@ -1407,7 +1385,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 8,
+    _v: int = 9,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
@@ -4309,7 +4287,6 @@ def render_grafico_e_tabela_ativo(
                 f_i10 = ex_g.submit(buscar_serie_investidor10_chart_com_info, ticker, periodo, ajustada, cot_ref_live) if not eh_candles_req else None
                 f_yh = ex_g.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live)
                 f_alt_yh = ex_g.submit(buscar_historico_preco, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
-                f_alt_i10 = ex_g.submit(buscar_serie_investidor10_chart, ticker, periodo, ajustada_alt, cot_ref_live) if (not eh_candles_req and periodo != "1 D") else None
 
                 serie_i10_c, diag_i10_graf = f_i10.result() if f_i10 is not None else (pd.Series(dtype=float), "")
                 i10_eh_diaria_7d = (periodo == "7 D") and ("diária 7 D" in diag_i10_graf)
@@ -4337,8 +4314,8 @@ def render_grafico_e_tabela_ativo(
 
                 serie_alt = pd.Series(dtype=float)
                 if not serie.empty and periodo != "1 D":
-                    if usou_i10_graf and f_alt_i10 is not None:
-                        serie_alt = f_alt_i10.result()
+                    if usou_i10_graf and not eh_candles_req:
+                        serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
                     if serie_alt.empty and f_alt_yh is not None:
                         serie_alt = f_alt_yh.result()
             if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():

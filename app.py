@@ -1196,7 +1196,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 11,
+    _v: int = 12,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1313,7 +1313,7 @@ def buscar_serie_investidor10_chart_com_info(
     diag_motivo = "indisponível"
     serie_diaria_fb = pd.Series(dtype=float)
 
-    for url_c in urls_unicas[:8]:
+    for url_c in urls_unicas[:10]:
         try:
             r_c = sess.get(url_c, timeout=6.0)
             if r_c.status_code in (401, 403, 429):
@@ -1371,7 +1371,7 @@ def buscar_serie_investidor10_chart_com_info(
                 if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
                     diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
                     continue
-                s_ytd_ano = s_out[s_out.index.year == dt_fim_s.year]
+                s_ytd_ano = s_out[(s_out.index.year == dt_fim_s.year) & ~((s_out.index.month == 1) & (s_out.index.day == 1))]
                 if len(s_ytd_ano) >= 3:
                     s_out = s_ytd_ano
             if cot_live and float(cot_live) > 0:
@@ -1393,7 +1393,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 11,
+    _v: int = 12,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

@@ -3261,7 +3261,7 @@ DICIONARIO_TERMOS = {
     "Dívida Líquida / Patrimônio Líquido": {
         "categoria": "🏛️ Eficiência & Dívida",
         "nome_completo": "Endividamento sobre o Patrimônio (e Dív.Brut/Patrim)",
-        "o_que_e": "Compara o tamanho das dívidas da empresa com o patrimônio líquido que ela possui. No filtro de risco do painel, também monitora a Dívida Bruta/Patrimônio.",
+        "o_que_e": "Compara o tamanho das dívidas da empresa com o patrimônio líquido que ela possui. No filtro de risco do painel, também monitora a Dívida Bruta/Patrimônio e Dívida Líquida / EBITDA.",
         "como_interpretar": "Até 1,0x costuma ser confortável. Entre 1,0x e 2,5x pede atenção em juros altos. Acima de 3,0x (para não-bancos) sinaliza alavancagem elevada e aciona a trava de cautela.",
     },
     "Liquidez Corrente": {
@@ -3291,14 +3291,14 @@ DICIONARIO_TERMOS = {
     "News Score (Notícias)": {
         "categoria": "🎯 Conceitos do Painel",
         "nome_completo": "Analisador de Sentimento de Notícias (30 dias, -10 a +10)",
-        "o_que_e": "Lê manchetes recentes do Google News nos últimos 30 dias (dando peso dobrado para os últimos 7 dias), classificando proventos, lucros, quedas ou riscos críticos.",
-        "como_interpretar": "Valores positivos (+2 a +10) indicam catalisadores como dividendos ou lucros fortes; negativos (-2 a -10) alertam sobre ruídos ou resultados fracos.",
+        "o_que_e": "Lê manchetes recentes do Google News nos últimos 30 dias com filtro contra páginas estáticas de SEO e trimestres defasados, aplicando classificador direcional contra falsos positivos.",
+        "como_interpretar": "Valores positivos (+2 a +10) indicam catalisadores como dividendos ou lucros fortes; negativos (-2 a -10) alertam sobre ruídos, cortes ou resultados fracos.",
     },
     "Vereditos do Modelo": {
         "categoria": "🎯 Conceitos do Painel",
         "nome_completo": "Selos Quantitativos de Classificação (Excelente, Bom, Regular, Indeciso, Esticado, Yield Baixo, Crítico)",
         "o_que_e": "Resumo visual automático que cruza fundamentos, descontos patrimoniais, nível de preço, técnica e notícias.",
-        "como_interpretar": "🟢 Excelente: alta atratividade geral. 🔵 Bom (LP ou Desconto Patrimonial): boa tese de acúmulo/valor. 🟡 Regular / Yield Baixo: empresa equilibrada ou barata no patrimônio com dividendo baixo. 🟠 Indeciso: empresa lucrativa com ruído negativo ou sinais mistos. 🟣 Esticado: múltiplos caros acima dos tetos. 🔴 Crítico: prejuízo, dívida >3x ou recuperação judicial.",
+        "como_interpretar": "🟢 Excelente: alta atratividade geral. 🔵 Bom (LP, Qualidade ou Desconto Patrimonial): boa tese de acúmulo/valor. 🟡 Regular / Yield Baixo: empresa equilibrada ou barata no patrimônio com dividendo baixo. 🟠 Indeciso: divergência entre LP e CP (|LP-CP|>=20), lucro com notícia negativa ou sinais mistos. 🟣 Esticado: IFR>=70 ou cotação acima do teto de sobrepreço. 🔴 Crítico: prejuízo, dívida crítica ou recuperação judicial.",
     },
 }
 

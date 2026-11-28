@@ -1023,20 +1023,20 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 6) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 7) -> list[str]:
     rotas: list[str] = []
-    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180})\1""")
+    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?(?:cotacoes|quotations)/[^'"`\s]{3,180})\1""")
     pat_api = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
     ign_js = ("jquery", "bootstrap", "popper", "chart.js", "apexcharts", "echarts", "highcharts", "sentry", "gtag", "analytics", "vendor")
     filtrados = [
         su for su in script_urls
         if not any(ig in su.lower() for ig in ign_js)
-        and any(k in su.lower() for k in ("app", "main", "chart", "cotac", "acao", "acoes", "compan", "asset", "stock", "quote", "ticker", "bundle", "index", "show", "build", "pages"))
+        and any(k in su.lower() for k in ("app", "main", "chart", "cotac", "quot", "acao", "acoes", "compan", "asset", "stock", "ticker", "bundle", "index", "show", "build", "pages"))
     ] or [su for su in script_urls if not any(ig in su.lower() for ig in ign_js)]
 
     def _ler_js(su: str):
         try:
-            r = requests.get(su, headers=HEADERS, timeout=2.0)
+            r = requests.get(su, headers=HEADERS, timeout=2.5)
             if r.status_code == 200:
                 return [p for _, p in (pat.findall(r.text) + pat_api.findall(r.text))]
         except Exception:
@@ -1044,18 +1044,18 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 6) -> lis
         return []
 
     with ThreadPoolExecutor(max_workers=6) as ex_js:
-        for paths in ex_js.map(_ler_js, filtrados[:10]):
+        for paths in ex_js.map(_ler_js, filtrados[:14]):
             for path in paths:
                 p_low = path.lower()
-                if "/chart" in p_low or "/intraday" in p_low:
-                    norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
+                if any(k in p_low for k in ("/chart", "/intraday", "/quotations")):
+                    norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith(("/cotacoes/", "/quotations/")) else path)
                     if norm_p not in rotas:
                         rotas.append(norm_p)
     return rotas
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _obter_meta_chart_i10(ticker: str, _v: int = 4) -> dict:
+def _obter_meta_chart_i10(ticker: str, _v: int = 5) -> dict:
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
     sess = requests.Session()
     sess.headers.update({
@@ -1091,9 +1091,9 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 4) -> dict:
                 break
 
         rotas_desc: list[str] = []
-        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
-            if "/chart" in path.lower() or "/intraday" in path.lower():
-                norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?(?:cotacoes|quotations)/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
+            if any(k in path.lower() for k in ("/chart", "/intraday", "/quotations")):
+                norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith(("/cotacoes/", "/quotations/")) else path)
                 if norm_p not in rotas_desc:
                     rotas_desc.append(norm_p)
 
@@ -1201,7 +1201,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 13,
+    _v: int = 14,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1246,7 +1246,7 @@ def buscar_serie_investidor10_chart_com_info(
         "7 D": [7, "7d", 5],
         "30 D": [30],
         "6 M": [182, 183, 184, 185, 180, 181, 186, "6m"],
-        "YTD": [dias, "ytd"],
+        "YTD": ["ytd", dias],
         "1 A": [365, 366],
         "5 A": [1825, 1826],
         "10 A": [3650, 3652],
@@ -1265,6 +1265,7 @@ def buscar_serie_investidor10_chart_com_info(
     elif periodo_label == "7 D":
         cands_urls.extend([
             f"https://investidor10.com.br/api/quotations/seven-days/{tk_up}/",
+            f"https://investidor10.com.br/api/quotations/seven-day/{tk_up}/",
             f"https://investidor10.com.br/api/quotations/one-week/{tk_up}/",
             f"https://investidor10.com.br/api/quotations/week/{tk_up}/",
         ])
@@ -1404,7 +1405,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 13,
+    _v: int = 14,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 

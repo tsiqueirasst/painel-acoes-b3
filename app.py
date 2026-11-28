@@ -841,23 +841,23 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...]) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 2) -> list[str]:
     rotas: list[str] = []
-    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,160})\1""")
-    for su in script_urls[:18]:
+    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
+    kws = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
+    for su in script_urls[:30]:
         try:
             r = requests.get(su, headers=HEADERS, timeout=5)
             if r.status_code != 200:
                 continue
             for _, path in pat.findall(r.text):
                 p_low = path.lower()
-                if any(k in p_low for k in ("chart", "cotac", "quot", "hist")):
+                if any(k in p_low for k in kws):
                     if path not in rotas:
                         rotas.append(path)
         except Exception:
             continue
     return rotas
-
 
 @st.cache_data(ttl=900, show_spinner=False)
 def buscar_serie_investidor10_chart_com_info(
@@ -865,13 +865,14 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 4,
+    _v: int = 5,
 ) -> tuple[pd.Series, str]:
-    """Tenta obter a série diária exata do gráfico do Investidor10 (retorna (serie, motivo))."""
+    """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
+        "1 D": 1,
         "7 D": 7,
         "30 D": 30,
-        "6 M": 180,
+        "6 M": 182,
         "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
         "1 A": 365,
         "5 A": 1825,
@@ -914,6 +915,7 @@ def buscar_serie_investidor10_chart_com_info(
 
         for pat_tid in (
             r'/api/cotacoes/acao/chart/(\d{1,7})/',
+            r'/api/cotacoes/acao/intraday/(\d{1,7})',
             r'["\']?ticker[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
             r'data-ticker-id\s*=\s*["\']?(\d{1,7})',
             r'["\']?(?:acao|stock)[_-]?id["\']?\s*[:=]\s*["\']?(\d{1,7})',
@@ -926,41 +928,42 @@ def buscar_serie_investidor10_chart_com_info(
                 break
 
         rotas_desc: list[str] = []
-        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,160})\1""", resp_pg.text):
-            if any(k in path.lower() for k in ("chart", "cotac", "quot", "hist")):
+        kws_api = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
+            if any(k in path.lower() for k in kws_api):
                 if path not in rotas_desc:
                     rotas_desc.append(path)
-        has_chart_route = any("chart" in r.lower() for r in rotas_desc)
 
-        if not has_chart_route:
-            srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
-            local_srcs = []
-            for s in srcs:
-                s_low = s.lower()
-                if any(ig in s_low for ig in ("google", "gtm", "facebook", "clarity", "hotjar", "jquery", "bootstrap", "ads", "analytics")):
-                    continue
-                if s.startswith("/"):
-                    local_srcs.append("https://investidor10.com.br" + s)
-                elif "investidor10.com.br" in s_low:
-                    local_srcs.append(s)
-            if local_srcs:
-                for rt_js in _descobrir_rotas_chart_i10(tuple(local_srcs)):
-                    if rt_js not in rotas_desc:
-                        rotas_desc.append(rt_js)
+        srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
+        local_srcs = []
+        for s in srcs:
+            s_low = s.lower()
+            if any(ig in s_low for ig in ("google", "gtm", "facebook", "clarity", "hotjar", "jquery", "bootstrap", "ads", "analytics")):
+                continue
+            if s.startswith("/"):
+                local_srcs.append("https://investidor10.com.br" + s)
+            elif "investidor10.com.br" in s_low:
+                local_srcs.append(s)
+        if local_srcs:
+            for rt_js in _descobrir_rotas_chart_i10(tuple(local_srcs)):
+                if rt_js not in rotas_desc:
+                    rotas_desc.append(rt_js)
     except Exception:
         return pd.Series(dtype=float), "erro de conexão"
 
     mapa_cands = {
-        "7 D": [7],
-        "30 D": [30],
-        "6 M": [180, 182],
-        "YTD": [dias, "ytd"],
-        "1 A": [365, 366],
+        "1 D": [1, "1d", "intraday"],
+        "7 D": [7, "7d", 5],
+        "30 D": [30, "30d"],
+        "6 M": [182, 183, 184, 180, "6m"],
+        "YTD": ["ytd", dias],
+        "1 A": [365, 366, "1y"],
         "5 A": [1825, 1826, "5y"],
         "10 A": [3650, 3652, "10y"],
         "15 A": [5475, 5478, "15y"],
     }
     dias_cands = mapa_cands.get(periodo_label, [dias])
+    eh_intraday_per = periodo_label in ("1 D", "7 D")
 
     for d_c in dias_cands:
         d_s = str(d_c)
@@ -977,15 +980,27 @@ def buscar_serie_investidor10_chart_com_info(
                     url_mont,
                     flags=re.IGNORECASE,
                 )
-            if "${" not in url_mont and "{" not in url_mont and re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
-                cands_urls.append(url_mont)
+            tem_intra = "intraday" in url_mont.lower()
+            if "${" not in url_mont and "{" not in url_mont:
+                if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
+                    cands_urls.append(url_mont)
         if tid:
+            if eh_intraday_per:
+                cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+                ])
             cands_urls.extend([
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
             ])
         if d_c == dias_cands[0]:
+            if eh_intraday_per:
+                cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{ticker.upper()}/{d_s}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{ticker.upper()}",
+                ])
             cands_urls.extend([
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}",
@@ -1010,8 +1025,10 @@ def buscar_serie_investidor10_chart_com_info(
 
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
+    hoje_brt_str = datetime.now(BRT).strftime("%Y-%m-%d")
+    ano_brt_int = datetime.now(BRT).year
 
-    for url_c in urls_unicas[:8]:
+    for url_c in urls_unicas[:14]:
         try:
             r_c = sess.get(url_c, headers=api_hdrs, timeout=6)
             if r_c.status_code in (401, 403, 429):
@@ -1045,7 +1062,7 @@ def buscar_serie_investidor10_chart_com_info(
             for pt in lista_pts:
                 dt_raw, vl_raw = None, None
                 if isinstance(pt, dict):
-                    dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("x")
+                    dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("time") or pt.get("x")
                     vl_raw = (
                         pt.get("price") if pt.get("price") is not None
                         else (pt.get("value") if pt.get("value") is not None
@@ -1058,12 +1075,20 @@ def buscar_serie_investidor10_chart_com_info(
                 if dt_raw is None or vl_raw is None:
                     continue
                 if isinstance(dt_raw, (int, float)) and dt_raw > 1e11:
-                    dt_p = pd.to_datetime(dt_raw, unit="ms", errors="coerce")
+                    dt_u = pd.to_datetime(dt_raw, unit="ms", utc=True, errors="coerce")
+                    dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
                 elif isinstance(dt_raw, (int, float)) and dt_raw > 1e8:
-                    dt_p = pd.to_datetime(dt_raw, unit="s", errors="coerce")
+                    dt_u = pd.to_datetime(dt_raw, unit="s", utc=True, errors="coerce")
+                    dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
                 else:
                     dt_str_raw = str(dt_raw).strip()
-                    dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
+                    if re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", dt_str_raw):
+                        dt_p = pd.to_datetime(f"{hoje_brt_str} {dt_str_raw}", errors="coerce")
+                    elif re.match(r"^\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", dt_str_raw):
+                        p_sp = dt_str_raw.split(None, 1)
+                        dt_p = pd.to_datetime(f"{p_sp[0]}/{ano_brt_int} {p_sp[1]}", dayfirst=True, errors="coerce")
+                    else:
+                        dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
                 if isinstance(vl_raw, str) and ("," in vl_raw or "R$" in vl_raw):
                     vl_p = _parse_i10_num(vl_raw)
                 else:
@@ -1075,11 +1100,29 @@ def buscar_serie_investidor10_chart_com_info(
             if len(datas) >= 3:
                 s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
                 s_out = s_out[~s_out.index.duplicated(keep="last")]
+                tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
+
+                if periodo_label == "1 D":
+                    if not tem_hora or len(s_out) < 5:
+                        diag_motivo = "API retornou apenas série diária para 1 D"
+                        continue
+                    s_out = s_out[s_out.index.date == s_out.index.date[-1]]
+                    if len(s_out) < 5:
+                        diag_motivo = "menos de 5 pontos intradiários para 1 D"
+                        continue
+                    return s_out, "Investidor10"
+
+                if periodo_label == "7 D":
+                    if not tem_hora or len(s_out) < 12:
+                        diag_motivo = "API retornou apenas série diária para 7 D"
+                        continue
+                    return s_out, "Investidor10"
+
                 span_dias = int((s_out.index[-1] - s_out.index[0]).days)
                 dt_ini_s = s_out.index[0].date()
                 dt_fim_s = s_out.index[-1].date()
                 min_spans = {"6 M": 100, "1 A": 240, "5 A": 1400, "10 A": 3100, "15 A": 4700}
-                max_spans = {"7 D": 21, "30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
+                max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
                 if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
                     diag_motivo = f"retornou {span_dias}d para {periodo_label}"
                     continue
@@ -1097,13 +1140,12 @@ def buscar_serie_investidor10_chart_com_info(
 
     return pd.Series(dtype=float), diag_motivo
 
-
 def buscar_serie_investidor10_chart(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 4,
+    _v: int = 5,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
@@ -1787,21 +1829,21 @@ def buscar_ohlcv_preco(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 2,
+    _v: int = 3,
 ) -> pd.DataFrame:
     tk = yf.Ticker(f"{ticker}.SA")
     eh_intraday = periodo_label in ("1 D", "7 D")
 
     if periodo_label == "1 D":
-        df = tk.history(period="5d", interval="15m", auto_adjust=False)
+        df = tk.history(period="5d", interval="5m", auto_adjust=False)
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
             df = df[df.index.date == df.index.date[-1]]
     elif periodo_label == "7 D":
-        df = tk.history(period="1mo", interval="1h", auto_adjust=False)
+        df = tk.history(period="1mo", interval="15m", auto_adjust=False)
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
-            df = df[df.index >= (df.index.max() - timedelta(days=7))]
+            df = df[df.index >= (df.index.max().normalize() - timedelta(days=6))]
     else:
         mapa_fetch = {"30 D": "3mo", "6 M": "1y", "YTD": "2y", "1 A": "2y", "5 A": "10y", "10 A": "max", "15 A": "max"}
         df = tk.history(period=mapa_fetch.get(periodo_label, "2y"), interval="1d", auto_adjust=ajustada)
@@ -1897,6 +1939,28 @@ def buscar_historico_preco(
     if df is None or df.empty or "Close" not in df.columns:
         return pd.Series(dtype=float)
     return df["Close"].dropna()
+
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None) -> float | None:
+    try:
+        tk = yf.Ticker(f"{ticker}.SA")
+        h5 = tk.history(period="7d", interval="1d", auto_adjust=False)
+        if h5 is not None and not h5.empty and "Close" in h5.columns:
+            h5.index = _idx_para_brt_naive(h5.index)
+            c5 = h5["Close"].dropna()
+            if not c5.empty:
+                alvo_d = ref_date or c5.index[-1].date()
+                anteriores = c5[c5.index.date < alvo_d]
+                if not anteriores.empty:
+                    return float(anteriores.iloc[-1])
+        fi = tk.fast_info
+        if fi:
+            pc = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
+            if pc and float(pc) > 0:
+                return float(pc)
+    except Exception:
+        pass
+    return None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -3501,16 +3565,18 @@ def render_grafico_e_tabela_ativo(
     base_ativo: dict | None = None,
     key_prefix: str = "raiox",
     modo_score_chave: str = "score_geral",
+    mostrar_cabecalho: bool = True,
 ):
-    c_tit, c_fav = st.columns([4, 1.3], vertical_alignment="center")
-    eh_fav = ticker in st.session_state["favoritos"]
-    with c_tit:
-        st.markdown(f"### 📈 COTAÇÃO {ticker} {f'— {nome}' if nome and nome != ticker else ''}")
-    with c_fav:
-        lbl_fav = "★ Remover dos Favoritos" if eh_fav else "⭐ Adicionar aos Favoritos"
-        if st.button(lbl_fav, key=f"{key_prefix}_favbtn_{ticker}", use_container_width=True):
-            toggle_favorito(ticker)
-            st.rerun(scope="app")
+    if mostrar_cabecalho:
+        c_tit, c_fav = st.columns([4, 1.3], vertical_alignment="center")
+        eh_fav = ticker in st.session_state["favoritos"]
+        with c_tit:
+            st.markdown(f"### 📈 COTAÇÃO {ticker} {f'— {nome}' if nome and nome != ticker else ''}")
+        with c_fav:
+            lbl_fav = "★ Remover dos Favoritos" if eh_fav else "⭐ Adicionar aos Favoritos"
+            if st.button(lbl_fav, key=f"{key_prefix}_favbtn_{ticker}", use_container_width=True):
+                toggle_favorito(ticker)
+                st.rerun(scope="app")
 
     serie = pd.Series(dtype=float)
     opcoes_per_i10 = ["1 D", "7 D", "30 D", "6 M", "YTD", "1 A", "5 A", "10 A", "15 A"]
@@ -3527,7 +3593,28 @@ def render_grafico_e_tabela_ativo(
     if k_provs not in st.session_state:
         st.session_state[k_provs] = False
 
-    with st.expander(f"📈 Cotação {ticker} & Simulador de Rentabilidade — clique para minimizar/maximizar", expanded=True):
+    st.markdown(
+        "<span class='raiox-blocks-host' style='display:none;'></span>"
+        "<style>"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'],"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander']{"
+        "border:1px solid rgba(59,130,246,0.42)!important;"
+        "border-left:4px solid #3b82f6!important;"
+        "border-radius:8px!important;"
+        "margin-bottom:8px!important;"
+        "overflow:hidden;}"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'] details > summary,"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander'] details > summary{"
+        "background:linear-gradient(90deg, rgba(59,130,246,0.22) 0%, rgba(59,130,246,0.08) 100%)!important;"
+        "font-weight:600!important;}"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'] details > summary:hover,"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander'] details > summary:hover{"
+        "background:linear-gradient(90deg, rgba(59,130,246,0.32) 0%, rgba(59,130,246,0.14) 100%)!important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander(f"📈 :blue-background[**{ticker}**] — Cotação & Simulador de Rentabilidade · clique para minimizar/maximizar", expanded=True):
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
             st.markdown(f"**📈 COTAÇÃO {ticker}**")
@@ -3606,7 +3693,7 @@ def render_grafico_e_tabela_ativo(
             lbl_per_exib = f"{dt_custom_ini.strftime('%d/%m/%y')}–{dt_custom_fim.strftime('%d/%m/%y')}"
         else:
             lbl_per_exib = periodo
-            if eh_candles_req or periodo == "1 D":
+            if eh_candles_req:
                 serie_i10_c = pd.Series(dtype=float)
             else:
                 serie_i10_c, diag_i10_graf = buscar_serie_investidor10_chart_com_info(ticker, periodo, ajustada, cot_live=cot_ref_live)
@@ -3663,7 +3750,12 @@ def render_grafico_e_tabela_ativo(
             st.warning(f"Não foi possível carregar o gráfico de {ticker} para o período {lbl_per_exib}.")
         else:
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
-            var_pct = ((p_fim - p_ini) / p_ini) * 100.0 if p_ini > 0 else 0.0
+            p_ref_var = p_ini
+            if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
+                prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date())
+                if prev_c_1d and prev_c_1d > 0:
+                    p_ref_var = prev_c_1d
+            var_pct = ((p_fim - p_ref_var) / p_ref_var) * 100.0 if p_ref_var > 0 else 0.0
             cor = "#22c55e" if var_pct >= 0 else "#dc2626"
             fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"
             sinal = "+" if var_pct >= 0 else ""
@@ -3770,11 +3862,15 @@ def render_grafico_e_tabela_ativo(
                         y_all_vals.extend(list(pct_c.values))
                 y_min, y_max = min(y_all_vals), max(y_all_vals)
             elif eh_candles:
+                x_ohlcv = list(range(len(df_ohlcv)))
+                dt_fmt_c = "%d/%m/%Y %H:%M" if (not usar_custom_range and periodo in ("1 D", "7 D")) else "%d/%m/%Y"
+                dt_lbls_c = [dt.strftime(dt_fmt_c) for dt in df_ohlcv.index]
                 fig.add_trace(
                     go.Candlestick(
-                        x=df_ohlcv.index,
+                        x=x_ohlcv,
                         open=df_ohlcv["Open"], high=df_ohlcv["High"],
                         low=df_ohlcv["Low"], close=df_ohlcv["Close"],
+                        text=dt_lbls_c,
                         name=ticker,
                         increasing_line_color="#22c55e", decreasing_line_color="#dc2626",
                         increasing_fillcolor="#22c55e", decreasing_fillcolor="#dc2626",
@@ -3787,38 +3883,46 @@ def render_grafico_e_tabela_ativo(
                     ]
                     fig.add_trace(
                         go.Bar(
-                            x=df_ohlcv.index, y=df_ohlcv["Volume"], name="Volume",
+                            x=x_ohlcv, y=df_ohlcv["Volume"], name="Volume",
                             marker_color=cores_vol, yaxis="y2",
-                            hovertemplate="Vol: %{y:,.0f}<extra></extra>",
+                            customdata=[[lbl] for lbl in dt_lbls_c],
+                            hovertemplate="%{customdata[0]}<br>Vol: %{y:,.0f}<extra></extra>",
                         )
                     )
                 y_min = float(df_ohlcv["Low"].min())
                 y_max = float(df_ohlcv["High"].max())
             else:
+                x_idx = list(range(len(serie)))
+                dt_fmt_s = "%d/%m/%Y %H:%M" if (not usar_custom_range and periodo in ("1 D", "7 D")) else "%d/%m/%Y"
+                dt_lbls_s = [dt.strftime(dt_fmt_s) for dt in serie.index]
+                ts_ms_s = [int(dt.timestamp() * 1000) for dt in serie.index]
                 pct_hover = [((float(v) / p_ini) - 1.0) * 100.0 if p_ini > 0 else 0.0 for v in serie.values]
+                custom_s = [[lbl, pct, ts_m] for lbl, pct, ts_m in zip(dt_lbls_s, pct_hover, ts_ms_s)]
                 fig.add_trace(
                     go.Scatter(
-                        x=serie.index, y=serie.values, mode="lines", name=ticker,
-                        customdata=pct_hover,
+                        x=x_idx, y=serie.values, mode="lines", name=ticker,
+                        customdata=custom_s,
                         line=dict(color=cor, width=2.1), fill="tozeroy", fillcolor=fill_cor,
-                        hovertemplate=f"{fmt_hover}<br><b>{simb_moeda} %{{y:,.2f}}</b> (%{{customdata:+.2f}}%)<extra></extra>",
+                        hovertemplate=f"%{{customdata[0]}}<br><b>{simb_moeda} %{{y:,.2f}}</b> (%{{customdata[1]:+.2f}}%)<extra></extra>",
                     )
                 )
                 fig.add_trace(
                     go.Scatter(
-                        x=[serie.index[-1]], y=[p_fim], mode="markers",
+                        x=[x_idx[-1]], y=[p_fim], mode="markers",
                         marker=dict(color=cor, size=7), hoverinfo="skip", showlegend=False,
                     )
                 )
                 y_min, y_max = float(serie.min()), float(serie.max())
 
             if not modo_comparar and st.session_state[k_marcos]:
-                idx_max = serie.idxmax()
-                idx_min = serie.idxmin()
+                pos_max = int(serie.values.argmax())
+                pos_min = int(serie.values.argmin())
+                v_max_m = float(serie.iloc[pos_max])
+                v_min_m = float(serie.iloc[pos_min])
                 fig.add_trace(
                     go.Scatter(
-                        x=[idx_max, idx_min], y=[float(serie.loc[idx_max]), float(serie.loc[idx_min])],
-                        mode="markers+text", text=[f"Máx {simb_moeda} {fmt_num(float(serie.loc[idx_max]))}", f"Mín {simb_moeda} {fmt_num(float(serie.loc[idx_min]))}"],
+                        x=[pos_max, pos_min], y=[v_max_m, v_min_m],
+                        mode="markers+text", text=[f"Máx {simb_moeda} {fmt_num(v_max_m)}", f"Mín {simb_moeda} {fmt_num(v_min_m)}"],
                         textposition=["top center", "bottom center"],
                         marker=dict(color=["#22c55e", "#f59e0b"], size=8, symbol="circle"),
                         textfont=dict(size=10.5), showlegend=False, hoverinfo="skip",
@@ -3835,14 +3939,15 @@ def render_grafico_e_tabela_ativo(
                 if not divs_p.empty:
                     divs_win = divs_p[(divs_p.index >= serie.index[0]) & (divs_p.index <= serie.index[-1])]
                     if not divs_win.empty:
-                        ys_d, txts_d = [], []
+                        xs_d, ys_d, txts_d = [], [], []
                         for dt_d, vl_d in divs_win.items():
-                            idx_near = serie.index.get_indexer([dt_d], method="nearest")[0]
+                            idx_near = int(serie.index.get_indexer([dt_d], method="nearest")[0])
+                            xs_d.append(idx_near)
                             ys_d.append(float(serie.iloc[idx_near]))
                             txts_d.append(f"💰 Provento: R$ {fmt_num(float(vl_d))} ({dt_d.strftime('%d/%m/%Y')})")
                         fig.add_trace(
                             go.Scatter(
-                                x=divs_win.index, y=ys_d, mode="markers", name="Proventos",
+                                x=xs_d, y=ys_d, mode="markers", name="Proventos",
                                 marker=dict(color="#fbbf24", size=9, symbol="diamond", line=dict(color="#ffffff", width=1)),
                                 text=txts_d, hovertemplate="%{text}<extra></extra>", showlegend=False,
                             )
@@ -3915,14 +4020,44 @@ def render_grafico_e_tabela_ativo(
                 spikecolor="rgba(148,163,184,0.55)",
                 spikedash="dash",
             )
-            if len(serie.index) >= 8 and (usar_custom_range or periodo not in ("1 D", "7 D")):
-                n_pts_x = len(serie.index)
-                idxs_x = sorted({round(i * (n_pts_x - 1) / 11.0) for i in range(12)})
-                if len(idxs_x) >= 3 and (idxs_x[-1] - idxs_x[-2]) < max(2, n_pts_x // 20):
-                    idxs_x.pop(-2)
-                xaxis_cfg["tickmode"] = "array"
-                xaxis_cfg["tickvals"] = [serie.index[idx_x] for idx_x in idxs_x]
-                xaxis_cfg["ticktext"] = [serie.index[idx_x].strftime("%d/%m/%y") for idx_x in idxs_x]
+            if not modo_comparar:
+                idx_ref_x = df_ohlcv.index if eh_candles else serie.index
+                n_pts_x = len(idx_ref_x)
+                xaxis_cfg["range"] = [-0.25, max(0.25, n_pts_x - 1 + 0.25)]
+                xaxis_cfg.pop("tickformat", None)
+                if not usar_custom_range and periodo == "1 D":
+                    idxs_x = sorted({round(i * (n_pts_x - 1) / min(10, max(1, n_pts_x - 1))) for i in range(min(11, n_pts_x))})
+                    if len(idxs_x) >= 3 and (idxs_x[-1] - idxs_x[-2]) < max(2, n_pts_x // 18):
+                        idxs_x.pop(-2)
+                    xaxis_cfg["tickmode"] = "array"
+                    xaxis_cfg["tickvals"] = idxs_x
+                    xaxis_cfg["ticktext"] = [idx_ref_x[i].strftime("%H:%M") for i in idxs_x]
+                elif not usar_custom_range and periodo == "7 D":
+                    dias_dist = sorted({dt.date() for dt in idx_ref_x})
+                    if len(dias_dist) >= 2 and n_pts_x >= 12:
+                        idxs_x = []
+                        vistos_d = set()
+                        for pos_i, dt_i in enumerate(idx_ref_x):
+                            d_i = dt_i.date()
+                            if d_i not in vistos_d:
+                                vistos_d.add(d_i)
+                                idxs_x.append(pos_i)
+                        xaxis_cfg["tickmode"] = "array"
+                        xaxis_cfg["tickvals"] = idxs_x
+                        xaxis_cfg["ticktext"] = [idx_ref_x[i].strftime("%d/%m") for i in idxs_x]
+                    else:
+                        idxs_x = list(range(n_pts_x))
+                        xaxis_cfg["tickmode"] = "array"
+                        xaxis_cfg["tickvals"] = idxs_x
+                        xaxis_cfg["ticktext"] = [idx_ref_x[i].strftime("%d/%m") for i in idxs_x]
+                elif n_pts_x >= 2:
+                    n_ticks_alvo = min(11, n_pts_x)
+                    idxs_x = sorted({round(i * (n_pts_x - 1) / max(1, n_ticks_alvo - 1)) for i in range(n_ticks_alvo)})
+                    if len(idxs_x) >= 3 and (idxs_x[-1] - idxs_x[-2]) < max(2, n_pts_x // 22):
+                        idxs_x.pop(-2)
+                    xaxis_cfg["tickmode"] = "array"
+                    xaxis_cfg["tickvals"] = idxs_x
+                    xaxis_cfg["ticktext"] = [idx_ref_x[i].strftime("%d/%m/%y") for i in idxs_x]
 
             layout_kw = dict(
                 height=370 if eh_candles else 345,
@@ -4156,7 +4291,7 @@ def render_grafico_e_tabela_ativo(
             )
 
     # --- BLOCO 2: HISTÓRICO FUNDAMENTALISTA ---
-    with st.expander(f"📑 Histórico Fundamentalista — {ticker} — clique para minimizar/maximizar", expanded=True):
+    with st.expander(f"📑 :blue-background[**{ticker}**] — Histórico Fundamentalista · clique para minimizar/maximizar", expanded=True):
         with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
             hist_fund, eh_banco, fin_curr, fonte_anual = buscar_historico_fundamentalista(
                 ticker,
@@ -4260,7 +4395,7 @@ def render_grafico_e_tabela_ativo(
         gr_txt_r = f"R$ {fmt_num(graham_r)}" if (graham_r and graham_r > 0) else "—"
         bz_txt_r = f"R$ {fmt_num(bazin_r)}" if (bazin_r and bazin_r > 0) else "—"
 
-        with st.expander(f"📊 Score, Faixa de Preço & Diagnóstico — {ticker} — clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"📊 :blue-background[**{ticker}**] — Score, Faixa de Preço & Diagnóstico · clique para minimizar/maximizar", expanded=True):
             st.markdown(
                 f"**{pos_r}º Lugar — {ticker}** ({nome or ticker}) | "
                 f"Cotação: **R$ {fmt_num(cot_r)}** | "
@@ -4320,7 +4455,7 @@ def render_grafico_e_tabela_ativo(
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])
 
-        with st.expander(f"💰 Simulador de Renda Passiva — {ticker} — clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"💰 :blue-background[**{ticker}**] — Simulador de Renda Passiva · clique para minimizar/maximizar", expanded=True):
             sr_in1, sr_in2 = st.columns([1.35, 2.65], vertical_alignment="bottom")
             with sr_in1:
                 meta_mensal = st.number_input(
@@ -4473,7 +4608,7 @@ def render_grafico_e_tabela_ativo(
                         f"(**{fmt_num(pct_meta_rx, 1)}%** da sua meta alcançada nesta empresa!)."
                     )
 
-        with st.expander(f"📅 Sazonalidade de Proventos & 🛡️ Checklist Buy & Hold — {ticker} — clique para minimizar/maximizar", expanded=True):
+        with st.expander(f"📅 :blue-background[**{ticker}**] — Sazonalidade de Proventos & 🛡️ Checklist Buy & Hold · clique para minimizar/maximizar", expanded=True):
             col_saz, col_bh = st.columns([1.05, 1.15], gap="large")
             with col_saz:
                 st.markdown(f"#### 📅 Sazonalidade de Proventos — {ticker}")
@@ -6269,23 +6404,8 @@ with tab1:
                             )
                             with st.container():
                                 st.markdown(
-                                    "<div style='margin:8px 0 10px 0; border-top:2px solid rgba(59,130,246,0.45);'></div>",
-                                    unsafe_allow_html=True,
-                                )
-                                c_rx1, c_rx2 = st.columns([3.8, 1], vertical_alignment="bottom")
-                                with c_rx1:
-                                    st.selectbox(
-                                        "🔎 Raio-X do Ativo selecionado:",
-                                        options=opcoes_rx,
-                                        key="raiox_ativo_sel",
-                                    )
-                                with c_rx2:
-                                    if st.button("✖️ Fechar Raio-X", key="btn_fechar_raiox", use_container_width=True):
-                                        st.session_state["raiox_visivel"] = False
-                                        st.rerun()
-
-                                st.markdown(
-                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>"
+                                    "<div style='margin:6px 0 8px 0; border-top:2px solid rgba(59,130,246,0.45);'></div>",
                                     unsafe_allow_html=True,
                                 )
                                 item_raiox = mapa_res[ativo_escolhido]
@@ -6295,6 +6415,7 @@ with tab1:
                                     base_ativo=item_raiox,
                                     key_prefix="tab1",
                                     modo_score_chave=modo_score_chave,
+                                    mostrar_cabecalho=False,
                                 )
                                 st.markdown(
                                     "<div style='margin:10px 0 10px 0; border-bottom:2px solid rgba(59,130,246,0.45);'></div>",
@@ -7573,90 +7694,9 @@ _js_chart_measure = """
     }
 
     function formatXDisplay(ax, pt) {
-        if (ax.type === "category") {
-            const cats = ax._categories || [];
-            const idx = Math.max(0, Math.min(cats.length - 1, Math.round(pt.cx)));
-            return cats[idx] !== undefined ? String(cats[idx]) : "";
-        }
-        if (ax.type === "date") {
-            const raw = pt.rawX !== undefined ? String(pt.rawX) : String(axisC2D(ax, pt.cx) || "");
-            const m = raw.match(/^(\\d{4})-(\\d{2})-(\\d{2})(?:[T\\s](\\d{2}):(\\d{2}))?/);
-            if (m) {
-                const base = m[3] + "/" + m[2] + "/" + m[1];
-                return (m[4] && m[5] && !(m[4] === "00" && m[5] === "00")) ? (base + " " + m[4] + ":" + m[5]) : base;
-            }
-            return raw;
-        }
-        return fmtNumBr(Number(axisC2D(ax, pt.cx)), 2);
-    }
-
-    function pointFromEvent(gd, e) {
-        const dragEl = getDragEl(gd);
-        const rect = dragEl.getBoundingClientRect();
-        const px = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
-        const py = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
-        const xa = gd._fullLayout.xaxis;
-        const ya = gd._fullLayout.yaxis;
-
-        let bestPt = null;
-        let bestDist = Infinity;
-        const calcArr = gd.calcdata || [];
-        const dataArr = gd.data || [];
-        const visibleCnt = dataArr.filter(function(t) { return t && t.visible !== false && t.visible !== "legendonly" && t.hoverinfo !== "skip"; }).length;
-        const maxDy = visibleCnt <= 1 ? 36 : 22;
-
-        for (let ti = 0; ti < calcArr.length; ti++) {
-            const tr = dataArr[ti];
-            const pts = calcArr[ti];
-            if (!tr || !pts || !pts.length) continue;
-            if (tr.visible === false || tr.visible === "legendonly" || tr.type === "pie" || tr.hoverinfo === "skip") continue;
-            const rawXs = Array.isArray(tr.x) ? tr.x : null;
-
-            for (let i = 0; i < pts.length; i++) {
-                const cpt = pts[i];
-                if (!cpt) continue;
-                const ptCx = cpt.x;
-                const ptCy = Number.isFinite(cpt.close) ? cpt.close : (Number.isFinite(cpt.c) ? cpt.c : cpt.y);
-                if (!Number.isFinite(ptCx) || !Number.isFinite(ptCy)) continue;
-
-                const ptPx = toPxX(xa, ptCx, rect.width);
-                const ptPy = toPxY(ya, ptCy, rect.height);
-                const dx = ptPx - px;
-                const dy = ptPy - py;
-                if (Math.abs(dy) <= maxDy && Math.abs(dx) <= 24) {
-                    const dist = Math.hypot(dx, dy);
-                    if (dist < bestDist) {
-                        bestDist = dist;
-                        const valYNum = Number(axisC2D(ya, ptCy));
-                        bestPt = {
-                            cx: ptCx,
-                            cy: ptCy,
-                            valY: Number.isFinite(valYNum) ? valYNum : ptCy,
-                            rawX: rawXs ? rawXs[i] : undefined,
-                            idx: i,
-                            traceIdx: ti,
-                            snapped: true
-                        };
-                    }
-                }
-            }
-        }
-
-        if (bestPt) return bestPt;
-
-        const cx = toCoordX(xa, px, rect.width);
-        const cy = toCoordY(ya, py, rect.height);
-        const valY = Number(axisC2D(ya, cy));
-        return {
-            cx: cx,
-            cy: cy,
-            valY: Number.isFinite(valY) ? valY : cy,
-            rawX: undefined,
-            idx: null,
-            traceIdx: null,
-            snapped: false
-        };
-    }
+        if (pt.rawLabel !== undefined) return String(pt.rawLabel);
+        if (ax.
+ 5m57.3s
 
     function svgEl(tag, attrs) {
         const el = pDoc.createElementNS(SVG_NS, tag);

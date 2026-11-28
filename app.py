@@ -1023,7 +1023,7 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 3) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 4) -> list[str]:
     rotas: list[str] = []
     pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
     kws = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
@@ -1031,48 +1031,23 @@ def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 3) -> lis
         su for su in script_urls
         if any(k in su.lower() for k in ("app", "main", "chart", "cotac", "acao", "stock", "quote", "ticker", "bundle", "index"))
     ] or list(script_urls)
-    for su in filtrados[:8]:
+    for su in filtrados[:6]:
         try:
-            r = requests.get(su, headers=HEADERS, timeout=2.5)
+            r = requests.get(su, headers=HEADERS, timeout=2.0)
             if r.status_code != 200:
                 continue
             for _, path in pat.findall(r.text):
                 p_low = path.lower()
-                if any(k in p_low for k in kws):
-                    if path not in rotas:
-                        rotas.append(path)
+                if any(k in p_low for k in kws) and path not in rotas:
+                    rotas.append(path)
         except Exception:
             continue
     return rotas
 
-@st.cache_data(ttl=900, show_spinner=False)
-def buscar_serie_investidor10_chart_com_info(
-    ticker: str,
-    periodo_label: str,
-    ajustada: bool,
-    cot_live: float | None = None,
-    _v: int = 5,
-) -> tuple[pd.Series, str]:
-    """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
-    mapa_dias = {
-        "1 D": 1,
-        "7 D": 7,
-        "30 D": 30,
-        "6 M": 182,
-        "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
-        "1 A": 365,
-        "5 A": 1825,
-        "10 A": 3650,
-        "15 A": 5475,
-    }
-    if periodo_label not in mapa_dias:
-        return pd.Series(dtype=float), "período não suportado"
 
-    dias = mapa_dias[periodo_label]
-    adj_str = "true" if ajustada else "false"
-    adj_int = "1" if ajustada else "0"
+@st.cache_data(ttl=86400, show_spinner=False)
+def _obter_meta_chart_i10(ticker: str, _v: int = 2) -> dict:
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
-
     sess = requests.Session()
     sess.headers.update({
         **HEADERS,
@@ -1084,21 +1059,19 @@ def buscar_serie_investidor10_chart_com_info(
     if i10_cookie:
         sess.headers["Cookie"] = i10_cookie
 
-    cands_urls: list[str] = []
-    csrf_tok = ""
-    tid = ""
-    diag_motivo = "indisponível"
     try:
         resp_pg = sess.get(url_pg, timeout=4)
         if resp_pg.status_code != 200:
-            return pd.Series(dtype=float), f"página HTTP {resp_pg.status_code}"
+            return {"erro": f"página HTTP {resp_pg.status_code}"}
         if "cf-browser-verification" in resp_pg.text or "Just a moment" in resp_pg.text[:1500]:
-            return pd.Series(dtype=float), "bloqueio Cloudflare"
+            return {"erro": "bloqueio Cloudflare"}
 
+        csrf_tok = ""
         m_csrf = re.search(r'<meta[^>]+name=["\']csrf-token["\'][^>]+content=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
         if m_csrf:
             csrf_tok = m_csrf.group(1)
 
+        tid = ""
         for pat_tid in (
             r'/api/cotacoes/acao/chart/(\d{1,7})/',
             r'/api/cotacoes/acao/intraday/(\d{1,7})',
@@ -1116,9 +1089,8 @@ def buscar_serie_investidor10_chart_com_info(
         rotas_desc: list[str] = []
         kws_api = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
         for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
-            if any(k in path.lower() for k in kws_api):
-                if path not in rotas_desc:
-                    rotas_desc.append(path)
+            if any(k in path.lower() for k in kws_api) and path not in rotas_desc:
+                rotas_desc.append(path)
 
         srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
         local_srcs = []
@@ -1134,9 +1106,75 @@ def buscar_serie_investidor10_chart_com_info(
             for rt_js in _descobrir_rotas_chart_i10(tuple(local_srcs)):
                 if rt_js not in rotas_desc:
                     rotas_desc.append(rt_js)
-    except Exception:
-        return pd.Series(dtype=float), "erro de conexão"
 
+        return {
+            "tid": tid,
+            "csrf": csrf_tok,
+            "rotas": tuple(rotas_desc),
+            "cookies": dict(sess.cookies),
+        }
+    except Exception:
+        return {"erro": "erro de conexão"}
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def buscar_serie_investidor10_chart_com_info(
+    ticker: str,
+    periodo_label: str,
+    ajustada: bool,
+    cot_live: float | None = None,
+    _v: int = 6,
+) -> tuple[pd.Series, str]:
+    """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
+    mapa_dias = {
+        "1 D": 1,
+        "7 D": 7,
+        "30 D": 30,
+        "6 M": 182,
+        "YTD": max(1, (datetime.now(BRT).date() - date(datetime.now(BRT).year, 1, 1)).days),
+        "1 A": 365,
+        "5 A": 1825,
+        "10 A": 3650,
+        "15 A": 5475,
+    }
+    if periodo_label not in mapa_dias:
+        return pd.Series(dtype=float), "período não suportado"
+
+    meta = _obter_meta_chart_i10(ticker)
+    if meta.get("erro"):
+        return pd.Series(dtype=float), meta["erro"]
+
+    tid = meta.get("tid", "")
+    csrf_tok = meta.get("csrf", "")
+    rotas_desc = list(meta.get("rotas", ()))
+    url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
+
+    sess = requests.Session()
+    sess.headers.update({
+        **HEADERS,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+        "Origin": "https://investidor10.com.br",
+        "Referer": url_pg,
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty",
+        "X-Requested-With": "XMLHttpRequest",
+    })
+    i10_cookie = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
+    if i10_cookie:
+        sess.headers["Cookie"] = i10_cookie
+    for ck, cv in (meta.get("cookies") or {}).items():
+        sess.cookies.set(ck, cv)
+    if csrf_tok:
+        sess.headers["X-CSRF-TOKEN"] = csrf_tok
+    xsrf_c = sess.cookies.get("XSRF-TOKEN")
+    if xsrf_c:
+        sess.headers["X-XSRF-TOKEN"] = requests.utils.unquote(xsrf_c)
+
+    dias = mapa_dias[periodo_label]
+    adj_str = "true" if ajustada else "false"
+    adj_int = "1" if ajustada else "0"
     mapa_cands = {
         "1 D": [1, "1d", "intraday"],
         "7 D": [7, "7d", 5],
@@ -1151,6 +1189,7 @@ def buscar_serie_investidor10_chart_com_info(
     dias_cands = mapa_cands.get(periodo_label, [dias])
     eh_intraday_per = periodo_label in ("1 D", "7 D")
 
+    cands_urls: list[str] = []
     for d_c in dias_cands:
         d_s = str(d_c)
         for r_tpl in rotas_desc:
@@ -1171,55 +1210,45 @@ def buscar_serie_investidor10_chart_com_info(
                 if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
                     cands_urls.append(url_mont)
         if tid:
-            if eh_intraday_per:
+            if periodo_label == "7 D":
                 cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
                     f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
                     f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
                 ])
-            cands_urls.extend([
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
-                f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
-            ])
-        if d_c == dias_cands[0]:
-            if eh_intraday_per:
+            elif eh_intraday_per:
                 cands_urls.extend([
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{ticker.upper()}/{d_s}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{ticker.upper()}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
                 ])
+            else:
+                cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
+                ])
+        if d_c == dias_cands[0]:
             cands_urls.extend([
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}/real",
                 f"https://investidor10.com.br/api/cotacoes/acao/chart/{ticker.upper()}/{d_s}/{adj_str}",
             ])
 
-    api_hdrs = {
-        **HEADERS,
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-        "Origin": "https://investidor10.com.br",
-        "Referer": url_pg,
-        "Sec-Fetch-Site": "same-origin",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Dest": "empty",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    if csrf_tok:
-        api_hdrs["X-CSRF-TOKEN"] = csrf_tok
-    xsrf_c = sess.cookies.get("XSRF-TOKEN")
-    if xsrf_c:
-        api_hdrs["X-XSRF-TOKEN"] = requests.utils.unquote(xsrf_c)
-
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
     hoje_brt_str = datetime.now(BRT).strftime("%Y-%m-%d")
     ano_brt_int = datetime.now(BRT).year
+    diag_motivo = "indisponível"
 
     intraday_404 = False
-    for url_c in urls_unicas[:6]:
+    for url_c in urls_unicas[:9]:
         if intraday_404 and "/intraday/" in url_c:
             continue
         try:
-            r_c = sess.get(url_c, headers=api_hdrs, timeout=2.5)
+            r_c = sess.get(url_c, timeout=2.5)
             if r_c.status_code in (401, 403, 429):
                 diag_motivo = f"HTTP {r_c.status_code}"
                 break
@@ -1233,7 +1262,7 @@ def buscar_serie_investidor10_chart_com_info(
             if isinstance(js, list):
                 lista_pts = js
             elif isinstance(js, dict):
-                for k_l in ("real", "data", "prices", "cotacoes", "chart", "series"):
+                for k_l in ("real", "data", "prices", "cotacoes", "chart", "series", "intraday"):
                     v_l = js.get(k_l)
                     if isinstance(v_l, list) and v_l:
                         lista_pts = v_l
@@ -1285,7 +1314,9 @@ def buscar_serie_investidor10_chart_com_info(
                 else:
                     vl_p = pd.to_numeric(vl_raw, errors="coerce")
                 if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
-                    datas.append(dt_p.tz_localize(None) if getattr(dt_p, "tzinfo", None) else dt_p)
+                    if getattr(dt_p, "tzinfo", None) is not None:
+                        dt_p = dt_p.tz_convert(BRT).tz_localize(None)
+                    datas.append(dt_p)
                     vals.append(float(vl_p))
 
             if len(datas) >= 3:
@@ -1301,12 +1332,16 @@ def buscar_serie_investidor10_chart_com_info(
                     if len(s_out) < 5:
                         diag_motivo = "menos de 5 pontos intradiários para 1 D"
                         continue
+                    if cot_live and float(cot_live) > 0:
+                        s_out.iloc[-1] = float(cot_live)
                     return s_out, "Investidor10"
 
                 if periodo_label == "7 D":
                     if not tem_hora or len(s_out) < 12:
                         diag_motivo = "API retornou apenas série diária para 7 D"
                         continue
+                    if cot_live and float(cot_live) > 0:
+                        s_out.iloc[-1] = float(cot_live)
                     return s_out, "Investidor10"
 
                 span_dias = int((s_out.index[-1] - s_out.index[0]).days)
@@ -1323,6 +1358,8 @@ def buscar_serie_investidor10_chart_com_info(
                 if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
                     diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
                     continue
+                if cot_live and float(cot_live) > 0:
+                    s_out.iloc[-1] = float(cot_live)
                 return s_out, "Investidor10"
             diag_motivo = "menos de 3 pontos válidos"
         except Exception:
@@ -1336,7 +1373,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 5,
+    _v: int = 6,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
@@ -1718,29 +1755,36 @@ def buscar_dados_cvm_empresa(ticker: str, det_fund: dict) -> tuple[dict[int, dic
         return {}, None
 
     ano_atual = datetime.now(BRT).year
-    anos_dfp = list(range(ano_atual - 5, ano_atual + 1))
+    anos_dfp = list(range(ano_atual - 4, ano_atual))
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        dfps_lista = list(ex.map(lambda a: (a, carregar_cvm_doc_ano("DFP", a)), anos_dfp))
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs_dfp = {a: ex.submit(carregar_cvm_doc_ano, "DFP", a) for a in anos_dfp}
+        fut_itr_atual = ex.submit(carregar_cvm_doc_ano, "ITR", ano_atual)
+        fut_itr_ant = ex.submit(carregar_cvm_doc_ano, "ITR", ano_atual - 1)
+        dfps_lista = [(a, fut.result()) for a, fut in futs_dfp.items()]
 
-    anuais: dict[int, dict] = {}
-    for _, dados_ano in dfps_lista:
-        for (c_cnpj, dt_ref), met in dados_ano.items():
-            if c_cnpj == cnpj:
-                yr = int(str(dt_ref)[:4])
-                anuais[yr] = met
+        anuais: dict[int, dict] = {}
+        for _, dados_ano in dfps_lista:
+            for (c_cnpj, dt_ref), met in dados_ano.items():
+                if c_cnpj == cnpj:
+                    yr = int(str(dt_ref)[:4])
+                    anuais[yr] = met
 
-    if not anuais:
-        return {}, None
+        if not anuais:
+            return {}, None
+
+        ult_yr = max(anuais.keys())
+        if ult_yr + 1 == ano_atual:
+            itr_curr = fut_itr_atual.result()
+            itr_prev = fut_itr_ant.result()
+        else:
+            fut_curr = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr + 1)
+            fut_prev = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr)
+            itr_curr = fut_curr.result()
+            itr_prev = fut_prev.result()
 
     # TTM via CVM: DFP(último_ano) + ITR_atual - ITR_mesmo_trimestre_ano_anterior
     ttm_cvm = None
-    ult_yr = max(anuais.keys())
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_curr = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr + 1)
-        fut_prev = ex.submit(carregar_cvm_doc_ano, "ITR", ult_yr)
-        itr_curr = fut_curr.result()
-        itr_prev = fut_prev.result()
 
     datas_curr = sorted([dt_ref for (c_cnpj, dt_ref) in itr_curr.keys() if c_cnpj == cnpj])
     if datas_curr:
@@ -2142,7 +2186,7 @@ def buscar_ohlcv_preco(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 3,
+    _v: int = 4,
 ) -> pd.DataFrame:
     tk = yf.Ticker(f"{ticker}.SA")
     eh_intraday = periodo_label in ("1 D", "7 D")
@@ -2153,7 +2197,7 @@ def buscar_ohlcv_preco(
             df.index = _idx_para_brt_naive(df.index)
             df = df[df.index.date == df.index.date[-1]]
     elif periodo_label == "7 D":
-        df = tk.history(period="1mo", interval="15m", auto_adjust=False)
+        df = tk.history(period="1mo", interval="15m", auto_adjust=ajustada)
         if df is not None and not df.empty:
             df.index = _idx_para_brt_naive(df.index)
             df = df[df.index >= (df.index.max().normalize() - timedelta(days=6))]
@@ -2174,7 +2218,7 @@ def buscar_ohlcv_preco(
     # Sincroniza pregões recentes caso o endpoint diário (1d) do Yahoo esteja 1+ dia atrasado
     if not eh_intraday:
         try:
-            df_5d = tk.history(period="5d", interval="15m", auto_adjust=False)
+            df_5d = tk.history(period="5d", interval="15m", auto_adjust=ajustada)
             if df_5d is not None and not df_5d.empty and "Close" in df_5d.columns:
                 df_5d.index = _idx_para_brt_naive(df_5d.index)
                 ult_data_df = df.index.normalize().max()
@@ -2208,7 +2252,7 @@ def buscar_ohlcv_preco(
             if dt_fund_ts is not None and pd.notna(dt_fund_ts) and dt_fund_ts > ult_data_df:
                 nova_l = {"Open": cot_f, "High": cot_f, "Low": cot_f, "Close": cot_f, "Volume": 0.0}
                 df.loc[dt_fund_ts] = {k: nova_l[k] for k in df.columns}
-            elif abs(float(df["Close"].iloc[-1]) - cot_f) / cot_f > 0.001:
+            elif abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
                 idx_ult = df.index[-1]
                 df.loc[idx_ult, "Close"] = cot_f
                 if "High" in df.columns:
@@ -2235,10 +2279,15 @@ def buscar_ohlcv_preco(
             sub_corte = df[df.index.normalize() >= dt_corte]
             if not sub_corte.empty:
                 df = sub_corte
-    elif cot_live and float(cot_live) > 0.0 and periodo_label == "1 D":
+    elif cot_live and float(cot_live) > 0.0:
         cot_f = float(cot_live)
-        if abs(float(df["Close"].iloc[-1]) - cot_f) / cot_f > 0.002:
-            df.loc[df.index[-1], "Close"] = cot_f
+        if abs(float(df["Close"].iloc[-1]) - cot_f) > 0.001:
+            idx_ult = df.index[-1]
+            df.loc[idx_ult, "Close"] = cot_f
+            if "High" in df.columns:
+                df.loc[idx_ult, "High"] = max(float(df.loc[idx_ult, "High"]), cot_f)
+            if "Low" in df.columns:
+                df.loc[idx_ult, "Low"] = min(float(df.loc[idx_ult, "Low"]), cot_f)
 
     return df.sort_index()
 
@@ -2406,7 +2455,7 @@ def calcular_selic_calculadora_cidadao(dt_ini_str: str, dt_fim_str: str, valor: 
                 **HEADERS,
                 "Referer": "https://www3.bcb.gov.br/CALCIDADAO/publico/exibirFormCorrecaoValores.do?method=exibirFormCorrecaoValores&aba=4",
             },
-            timeout=6,
+            timeout=2.5,
         )
         if resp.status_code != 200:
             return None
@@ -2879,15 +2928,21 @@ def buscar_historico_fundamentalista(
     vpa_live: float | None = None,
 ) -> tuple[list[dict], bool, str, str]:
     tk = yf.Ticker(f"{ticker}.SA")
-    info = tk.info or {}
+    with ThreadPoolExecutor(max_workers=3) as ex_hf:
+        fut_det = ex_hf.submit(buscar_detalhes_fundamentus, ticker)
+        fut_px = ex_hf.submit(lambda: tk.history(period="7y", interval="1d", auto_adjust=False))
+        fut_info = ex_hf.submit(lambda: tk.info or {})
+        det_fund = fut_det.result()
+        hist_px = fut_px.result()
+        info = fut_info.result()
 
-    det_fund = buscar_detalhes_fundamentus(ticker)
     setor_str = det_fund.get("Setor", "").lower()
     eh_banco_seg = any(k in setor_str for k in ("intermediários financeiros", "bancos", "previdência e seguros"))
 
-    hist_px = tk.history(period="7y", interval="1d", auto_adjust=False)
-    if not hist_px.empty:
+    if hist_px is not None and not hist_px.empty:
         hist_px.index = pd.to_datetime(hist_px.index).tz_localize(None)
+    else:
+        hist_px = pd.DataFrame()
 
     acoes_fund = parse_br_num(det_fund.get("Nro. Ações"))
     cot_fund = parse_br_num(det_fund.get("Cotação"))
@@ -4042,11 +4097,18 @@ def render_grafico_e_tabela_ativo(
     mostrar_cabecalho: bool = True,
     expandir_padrao: bool = True,
 ):
+    logo_fb_rx = (base_ativo or {}).get("logo_i10", "")
     if mostrar_cabecalho:
         c_tit, c_fav = st.columns([4, 1.3], vertical_alignment="center")
         eh_fav = ticker in st.session_state["favoritos"]
         with c_tit:
-            st.markdown(f"### 📈 COTAÇÃO {ticker} {f'— {nome}' if nome and nome != ticker else ''}")
+            logo_top_rx = html_logo_ativo(ticker, logo_fb_rx, size=28, radius=6)
+            sub_nm = f" — {html.escape(nome)}" if (nome and nome != ticker) else ""
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:9px; font-size:22px; font-weight:700; margin:6px 0;'>"
+                f"{logo_top_rx}<span>COTAÇÃO {html.escape(ticker)}{sub_nm}</span></div>",
+                unsafe_allow_html=True,
+            )
         with c_fav:
             lbl_fav = "★ Remover dos Favoritos" if eh_fav else "⭐ Adicionar aos Favoritos"
             if st.button(lbl_fav, key=f"{key_prefix}_favbtn_{ticker}", use_container_width=True):
@@ -4113,7 +4175,12 @@ def render_grafico_e_tabela_ativo(
     def _frag_cotacao_sim():
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
-            st.markdown(f"**📈 COTAÇÃO {ticker}**")
+            logo_hdr_g = html_logo_ativo(ticker, logo_fb_rx, size=24, radius=5)
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:8px; font-weight:700; font-size:15px;'>"
+                f"{logo_hdr_g}<span>COTAÇÃO {html.escape(ticker)}</span></div>",
+                unsafe_allow_html=True,
+            )
         with c_i10_hdr2:
             if hasattr(st, "segmented_control"):
                 periodo = st.segmented_control(
@@ -4186,37 +4253,43 @@ def render_grafico_e_tabela_ativo(
 
         usou_i10_graf = False
         diag_i10_graf = ""
+        ajustada_alt = not ajustada
         if usar_custom_range:
-            df_ohlcv = buscar_ohlcv_preco(ticker, "15 A", ajustada, cot_live=cot_ref_live)
+            with ThreadPoolExecutor(max_workers=2) as ex_gc:
+                f_main = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada, cot_ref_live)
+                f_alt = ex_gc.submit(buscar_ohlcv_preco, ticker, "15 A", ajustada_alt, cot_ref_live)
+                df_ohlcv = f_main.result()
+                df_alt = f_alt.result()
             if df_ohlcv is not None and not df_ohlcv.empty:
                 df_ohlcv = df_ohlcv[(df_ohlcv.index.date >= dt_custom_ini) & (df_ohlcv.index.date <= dt_custom_fim)]
             serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+            serie_alt = pd.Series(dtype=float)
+            if df_alt is not None and not df_alt.empty and "Close" in df_alt.columns:
+                df_alt = df_alt[(df_alt.index.date >= dt_custom_ini) & (df_alt.index.date <= dt_custom_fim)]
+                serie_alt = df_alt["Close"].dropna()
             lbl_per_exib = f"{dt_custom_ini.strftime('%d/%m/%y')}–{dt_custom_fim.strftime('%d/%m/%y')}"
         else:
             lbl_per_exib = periodo
-            if eh_candles_req:
-                serie_i10_c = pd.Series(dtype=float)
-            else:
-                serie_i10_c, diag_i10_graf = buscar_serie_investidor10_chart_com_info(ticker, periodo, ajustada, cot_live=cot_ref_live)
-            df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_live=cot_ref_live) if (eh_candles_req or serie_i10_c.empty) else pd.DataFrame()
-            if not serie_i10_c.empty:
-                serie = serie_i10_c
-                usou_i10_graf = True
-            else:
-                serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+            with ThreadPoolExecutor(max_workers=3) as ex_g:
+                f_i10 = ex_g.submit(buscar_serie_investidor10_chart_com_info, ticker, periodo, ajustada, cot_ref_live) if not eh_candles_req else None
+                f_yh = ex_g.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live)
+                f_alt_yh = ex_g.submit(buscar_historico_preco, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
+                f_alt_i10 = ex_g.submit(buscar_serie_investidor10_chart, ticker, periodo, ajustada_alt, cot_ref_live) if (not eh_candles_req and periodo != "1 D") else None
 
-        serie_alt = pd.Series(dtype=float)
-        if not serie.empty and (usar_custom_range or periodo != "1 D"):
-            ajustada_alt = not ajustada
-            if usar_custom_range:
-                df_alt = buscar_ohlcv_preco(ticker, "15 A", ajustada_alt, cot_live=cot_ref_live)
-                if df_alt is not None and not df_alt.empty and "Close" in df_alt.columns:
-                    df_alt = df_alt[(df_alt.index.date >= dt_custom_ini) & (df_alt.index.date <= dt_custom_fim)]
-                    serie_alt = df_alt["Close"].dropna()
-            else:
-                serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live) if usou_i10_graf else pd.Series(dtype=float)
-                if serie_alt.empty:
-                    serie_alt = buscar_historico_preco(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
+                serie_i10_c, diag_i10_graf = f_i10.result() if f_i10 is not None else (pd.Series(dtype=float), "")
+                df_ohlcv = f_yh.result() if (eh_candles_req or serie_i10_c.empty) else pd.DataFrame()
+                if not serie_i10_c.empty:
+                    serie = serie_i10_c
+                    usou_i10_graf = True
+                else:
+                    serie = df_ohlcv["Close"].dropna() if (df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns) else pd.Series(dtype=float)
+
+                serie_alt = pd.Series(dtype=float)
+                if not serie.empty and periodo != "1 D":
+                    if usou_i10_graf and f_alt_i10 is not None:
+                        serie_alt = f_alt_i10.result()
+                    if serie_alt.empty and f_alt_yh is not None:
+                        serie_alt = f_alt_yh.result()
             if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
                 sub_alt = serie_alt[serie_alt.index.normalize() >= serie.index[0].normalize()]
                 if not sub_alt.empty:
@@ -4256,6 +4329,10 @@ def render_grafico_e_tabela_ativo(
                 prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date())
                 if prev_c_1d and prev_c_1d > 0:
                     p_ref_var = prev_c_1d
+            elif not usar_custom_range and periodo == "7 D" and moeda_graf == "Real" and not usou_i10_graf:
+                prev_c_7d = buscar_prev_close_ativo(ticker, serie.index[0].date())
+                if prev_c_7d and prev_c_7d > 0:
+                    p_ref_var = prev_c_7d
             var_pct = ((p_fim - p_ref_var) / p_ref_var) * 100.0 if p_ref_var > 0 else 0.0
             cor = "#22c55e" if var_pct >= 0 else "#dc2626"
             fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"
@@ -4598,7 +4675,6 @@ def render_grafico_e_tabela_ativo(
             )
             st.caption(f"💡 DEXTools: Segure **Shift + Botão Esquerdo e arraste** (ou clique em **📏 Medir**) para medir a variação (%) · Role o mouse para zoom · Arraste para mover. · {fonte_graf_lbl}")
 
-        serie_selic_bcb, _ = buscar_historico_selic_bcb()
         st.markdown("<div style='margin:10px 0 12px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
         s1, s2 = st.columns([1.4, 1.2], vertical_alignment="bottom")
         with s1:
@@ -4610,9 +4686,47 @@ def render_grafico_e_tabela_ativo(
             "1 mês": "30 D", "6 meses": "6 M", "1 ano": "1 A",
             "5 anos": "5 A", "10 anos": "10 A", "15 anos": "15 A",
         }
-        serie_sim = buscar_serie_investidor10_chart(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
-        if serie_sim.empty:
-            serie_sim = buscar_historico_preco(ticker, mapa_jan_per[janela_sim], True, cot_live=cot_ref_live)
+        per_sim_key = mapa_jan_per[janela_sim]
+        reusa_adj = (not usar_custom_range) and (moeda_graf == "Real") and (per_sim_key == periodo)
+
+        with ThreadPoolExecutor(max_workers=4) as ex_sim:
+            f_selic = ex_sim.submit(buscar_historico_selic_bcb)
+            f_divs = ex_sim.submit(buscar_dividendos_ativo, ticker)
+            if reusa_adj and ajustada and not serie.empty:
+                serie_sim = serie
+                f_sim_adj_i10, f_sim_adj_yh = None, None
+            elif reusa_adj and (not ajustada) and not serie_alt.empty:
+                serie_sim = serie_alt
+                f_sim_adj_i10, f_sim_adj_yh = None, None
+            else:
+                f_sim_adj_i10 = ex_sim.submit(buscar_serie_investidor10_chart, ticker, per_sim_key, True, cot_ref_live)
+                f_sim_adj_yh = ex_sim.submit(buscar_historico_preco, ticker, per_sim_key, True, cot_ref_live)
+                serie_sim = pd.Series(dtype=float)
+
+            if reusa_adj and (not ajustada) and not serie.empty:
+                serie_sim_simples = serie
+                f_sim_smp_i10, f_sim_smp_yh = None, None
+            elif reusa_adj and ajustada and not serie_alt.empty:
+                serie_sim_simples = serie_alt
+                f_sim_smp_i10, f_sim_smp_yh = None, None
+            else:
+                f_sim_smp_i10 = ex_sim.submit(buscar_serie_investidor10_chart, ticker, per_sim_key, False, cot_ref_live)
+                f_sim_smp_yh = ex_sim.submit(buscar_historico_preco, ticker, per_sim_key, False, cot_ref_live)
+                serie_sim_simples = pd.Series(dtype=float)
+
+            serie_selic_bcb, _ = f_selic.result()
+            divs_sim_s = f_divs.result()
+            if serie_sim.empty:
+                if f_sim_adj_i10 is not None:
+                    serie_sim = f_sim_adj_i10.result()
+                if serie_sim.empty and f_sim_adj_yh is not None:
+                    serie_sim = f_sim_adj_yh.result()
+            if serie_sim_simples.empty:
+                if f_sim_smp_i10 is not None:
+                    serie_sim_simples = f_sim_smp_i10.result()
+                if serie_sim_simples.empty and f_sim_smp_yh is not None:
+                    serie_sim_simples = f_sim_smp_yh.result()
+
         if serie_sim.empty:
             serie_max_fb = buscar_serie_max_ajustada(ticker)
             if not serie_max_fb.empty:
@@ -4654,16 +4768,10 @@ def render_grafico_e_tabela_ativo(
             s_acao_bruto = f"{'+' if ret_acao_bruto_pct >= 0 else ''}{fmt_num(ret_acao_bruto_pct, 2)}%"
             cor_sim = "#22c55e" if valor_acao_liq >= valor_inv else "#ef4444"
 
-            per_sim_key = mapa_jan_per[janela_sim]
-            serie_sim_simples = buscar_serie_investidor10_chart(ticker, per_sim_key, False, cot_live=cot_ref_live)
-            if serie_sim_simples.empty:
-                serie_sim_simples = buscar_historico_preco(ticker, per_sim_key, False, cot_live=cot_ref_live)
             if not serie_sim_simples.empty:
                 sub_ss = serie_sim_simples[serie_sim_simples.index.normalize() >= dt_base_ts]
                 if not sub_ss.empty:
                     serie_sim_simples = sub_ss
-
-            divs_sim_s = buscar_dividendos_ativo(ticker)
             divs_win_sim = (
                 divs_sim_s[(divs_sim_s.index.normalize() > dt_base_ts) & (divs_sim_s.index.normalize() <= dt_fim_ts)]
                 if not divs_sim_s.empty else pd.Series(dtype=float)
@@ -6733,33 +6841,11 @@ with tab1:
             st.session_state["comp_selecionados"] = sel_c
             st.session_state["ms_comp"] = sel_c
 
-        def _ao_clicar_ticker_tabela():
-            raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
-            st.session_state["raiox_bridge"] = ""
-            if not raw_rx:
-                return
-            tk_clicado = raw_rx.split("|")[0].strip()
-            if not tk_clicado:
-                return
-            for _k_co in [k for k in st.session_state.keys() if k.startswith("tab1_chart_open_")]:
-                st.session_state.pop(_k_co, None)
-            if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
-                st.session_state["raiox_visivel"] = False
-            else:
-                st.session_state["raiox_ativo_sel"] = tk_clicado
-                st.session_state["raiox_visivel"] = True
-
         st.text_input(
             "comp_bridge_input",
             key="comp_bridge",
             label_visibility="collapsed",
             on_change=_ao_clicar_comparar_tabela,
-        )
-        st.text_input(
-            "raiox_bridge_input",
-            key="raiox_bridge",
-            label_visibility="collapsed",
-            on_change=_ao_clicar_ticker_tabela,
         )
         st.markdown(
             "<style>"
@@ -7277,6 +7363,29 @@ with tab1:
 
                 @st.fragment
                 def render_tabela_e_raiox(exibir_rows: list[dict], opcoes_rx: list[str], mapa_res: dict[str, dict], comp_ativos: set[str], modo_score_chave: str = "score_geral"):
+                    def _ao_clicar_ticker_tabela():
+                        raw_rx = st.session_state.get("raiox_bridge", "").strip().upper()
+                        st.session_state["raiox_bridge"] = ""
+                        if not raw_rx:
+                            return
+                        tk_clicado = raw_rx.split("|")[0].strip()
+                        if not tk_clicado:
+                            return
+                        for _k_co in [k for k in st.session_state.keys() if k.startswith("tab1_chart_open_")]:
+                            st.session_state.pop(_k_co, None)
+                        if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
+                            st.session_state["raiox_visivel"] = False
+                        else:
+                            st.session_state["raiox_ativo_sel"] = tk_clicado
+                            st.session_state["raiox_visivel"] = True
+
+                    st.text_input(
+                        "raiox_bridge_input",
+                        key="raiox_bridge",
+                        label_visibility="collapsed",
+                        on_change=_ao_clicar_ticker_tabela,
+                    )
+
                     if "raiox_ativo_sel" not in st.session_state:
                         st.session_state["raiox_ativo_sel"] = ativo_url if ativo_url in opcoes_rx else opcoes_rx[0]
                         if ativo_url and ativo_url in opcoes_rx:

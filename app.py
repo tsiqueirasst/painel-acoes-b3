@@ -3800,7 +3800,13 @@ def render_grafico_e_tabela_ativo(
         unsafe_allow_html=True,
     )
 
-    with st.expander(f"📈 :blue-background[**{ticker}**] — Cotação & Simulador de Rentabilidade · clique para minimizar/maximizar", expanded=expandir_padrao):
+    k_chart_open = f"{key_prefix}_chart_open_{ticker}"
+
+    def _marcar_chart_aberto():
+        st.session_state[k_chart_open] = True
+
+    @st.fragment
+    def _frag_cotacao_sim():
         c_i10_hdr1, c_i10_hdr2, c_i10_hdr3 = st.columns([1.3, 2.7, 0.35], vertical_alignment="center")
         with c_i10_hdr1:
             st.markdown(f"**📈 COTAÇÃO {ticker}**")
@@ -3812,6 +3818,7 @@ def render_grafico_e_tabela_ativo(
                     default="1 A",
                     label_visibility="collapsed",
                     key=f"{key_prefix}_per_seg_{ticker}",
+                    on_change=_marcar_chart_aberto,
                     width="stretch",
                 )
                 if not periodo:
@@ -3824,13 +3831,14 @@ def render_grafico_e_tabela_ativo(
                     horizontal=True,
                     label_visibility="collapsed",
                     key=f"{key_prefix}_per_{ticker}",
+                    on_change=_marcar_chart_aberto,
                 )
         with c_i10_hdr3:
             dt_custom_ini = None
             dt_custom_fim = None
             if hasattr(st, "popover"):
                 with st.popover("📅", help="Filtrar intervalo personalizado de datas"):
-                    usar_custom_dt = st.checkbox("Usar datas personalizadas", key=f"{key_prefix}_use_dt_{ticker}")
+                    usar_custom_dt = st.checkbox("Usar datas personalizadas", key=f"{key_prefix}_use_dt_{ticker}", on_change=_marcar_chart_aberto)
                     if usar_custom_dt:
                         hoje_d_i10 = datetime.now(BRT).date()
                         dt_custom_ini = st.date_input("De:", value=hoje_d_i10 - timedelta(days=365), format="DD/MM/YYYY", key=f"{key_prefix}_dt_i_{ticker}")
@@ -3843,20 +3851,23 @@ def render_grafico_e_tabela_ativo(
         )
         with c_tb_b1:
             if st.button("🎯", key=f"{key_prefix}_btn_m_{ticker}", type="primary" if st.session_state[k_marcos] else "secondary", help="Mostrar/ocultar Máxima, Mínima do período e seu Preço Médio", use_container_width=True):
+                st.session_state[k_chart_open] = True
                 st.session_state[k_marcos] = not st.session_state[k_marcos]
                 st.rerun()
         with c_tb_b2:
             if st.button("🕯️", key=f"{key_prefix}_btn_c_{ticker}", type="primary" if st.session_state[k_candles] else "secondary", help="Alternar entre Área e Candles (DEXTools)", use_container_width=True):
+                st.session_state[k_chart_open] = True
                 st.session_state[k_candles] = not st.session_state[k_candles]
                 st.rerun()
         with c_tb_b3:
             if st.button("🐷", key=f"{key_prefix}_btn_p_{ticker}", type="primary" if st.session_state[k_provs] else "secondary", help="Mostrar/ocultar dividendos e JCP pagos no período", use_container_width=True):
+                st.session_state[k_chart_open] = True
                 st.session_state[k_provs] = not st.session_state[k_provs]
                 st.rerun()
         with c_tb_moeda:
-            moeda_graf = st.selectbox("Moeda:", ["Real", "Dólar"], index=0, label_visibility="collapsed", key=f"{key_prefix}_moeda_{ticker}")
+            moeda_graf = st.selectbox("Moeda:", ["Real", "Dólar"], index=0, label_visibility="collapsed", key=f"{key_prefix}_moeda_{ticker}", on_change=_marcar_chart_aberto)
         with c_tb_tipo:
-            tipo_cot = st.selectbox("Tipo:", ["Cotação ajustada", "Cotação simples"], index=0, label_visibility="collapsed", key=f"{key_prefix}_tipo_{ticker}")
+            tipo_cot = st.selectbox("Tipo:", ["Cotação ajustada", "Cotação simples"], index=0, label_visibility="collapsed", key=f"{key_prefix}_tipo_{ticker}", on_change=_marcar_chart_aberto)
         with c_tb_cmp:
             if hasattr(st, "popover"):
                 with st.popover("⇄ Comparar", use_container_width=True):
@@ -4476,6 +4487,9 @@ def render_grafico_e_tabela_ativo(
                 unsafe_allow_html=True,
             )
 
+    with st.expander(f"📈 :blue-background[**{ticker}**] — Cotação & Simulador de Rentabilidade · clique para minimizar/maximizar", expanded=st.session_state.get(k_chart_open, expandir_padrao)):
+        _frag_cotacao_sim()
+
     # --- BLOCO 2: HISTÓRICO FUNDAMENTALISTA ---
     with st.expander(f"📑 :blue-background[**{ticker}**] — Histórico Fundamentalista · clique para minimizar/maximizar", expanded=expandir_padrao):
         with st.spinner(f"Carregando balanços oficiais da CVM (DFP/ITR) para {ticker}..."):
@@ -4640,6 +4654,10 @@ def render_grafico_e_tabela_ativo(
         cot_sim = float(base_ativo.get("cotacao") or 0.0)
         if cot_sim <= 0.0 and not serie.empty:
             cot_sim = float(serie.iloc[-1])
+        if cot_sim <= 0.0:
+            s_fb_c = buscar_historico_preco(ticker, "30 D", True)
+            if not s_fb_c.empty:
+                cot_sim = float(s_fb_c.iloc[-1])
 
         with st.expander(f"💰 :blue-background[**{ticker}**] — Simulador de Renda Passiva · clique para minimizar/maximizar", expanded=expandir_padrao):
             sr_in1, sr_in2 = st.columns([1.35, 2.65], vertical_alignment="bottom")
@@ -6217,6 +6235,8 @@ with tab1:
             tk_clicado = raw_rx.split("|")[0].strip()
             if not tk_clicado:
                 return
+            for _k_co in [k for k in st.session_state.keys() if k.startswith("tab1_chart_open_")]:
+                st.session_state.pop(_k_co, None)
             if st.session_state.get("raiox_visivel", False) and st.session_state.get("raiox_ativo_sel") == tk_clicado:
                 st.session_state["raiox_visivel"] = False
             else:
@@ -6485,13 +6505,13 @@ with tab1:
                     "padding:10px 14px!important;}"
                     "div[data-testid='stVerticalBlock']:has(> div .painel-analise-host),"
                     "div[data-testid='stVerticalBlock']:has(> div > div .painel-analise-host){"
-                    "gap:6px!important;}"
+                    "gap:8px!important;}"
                     "div[data-testid='stElementContainer']:has(.painel-analise-host),"
                     "div[data-testid='stElementContainer']:has(.painel-modo-host),"
                     "div[data-testid='stElementContainer']:has(.painel-link-host){"
                     "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
                     "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button{"
-                    "border-radius:8px!important;min-height:34px!important;padding:4px 10px!important;font-size:13.5px!important;transition:all 0.15s ease!important;}"
+                    "border-radius:8px!important;min-height:36px!important;padding:4px 10px!important;font-size:13.5px!important;transition:all 0.15s ease!important;}"
                     "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='primary']{"
                     "background:rgba(16,185,129,0.16)!important;border:1px solid rgba(16,185,129,0.62)!important;"
                     "color:#34d399!important;font-weight:600!important;box-shadow:none!important;}"
@@ -6514,14 +6534,11 @@ with tab1:
 
                 c_pa_tit, c_pa_dic = st.columns([3.5, 1.0], vertical_alignment="center")
                 with c_pa_tit:
-                    st.markdown("<div style='font-size:14.5px; font-weight:700; letter-spacing:0.4px; line-height:1.2;'>PAINEL DE ANÁLISE</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='font-size:13.5px; font-weight:700; letter-spacing:0.5px; line-height:1.2;'>MODO DE ANÁLISE</div>", unsafe_allow_html=True)
                 with c_pa_dic:
                     st.markdown("<span class='painel-link-host' style='display:none;'></span>", unsafe_allow_html=True)
                     if st.button("📖 Dicionário", key="btn_dic_tab1"):
                         modal_dicionario()
-
-                st.markdown("<div style='margin:2px 0 2px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
-                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin:0;'>MODO DE ANÁLISE</div>", unsafe_allow_html=True)
 
                 modos_ui = [
                     ("🏆 Geral", "🏆 Geral (Melhor Compra Equilibrada)"),
@@ -6547,8 +6564,7 @@ with tab1:
                                 st.query_params["modo"] = lbl_full_m
                                 st.rerun()
 
-                st.markdown("<div style='margin:4px 0 2px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
-                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin:0;'>FILTROS</div>", unsafe_allow_html=True)
+                st.markdown("<div style='margin:2px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
 
                 c_busca, c_ver, c_ord1, c_ord2, c_ord3 = st.columns([1.35, 1.35, 1.25, 1.05, 0.8], vertical_alignment="bottom")
                 with c_busca:
@@ -7157,6 +7173,7 @@ with tab1:
                         return;
                     }
 
+                    if (e.target && e.target.closest && e.target.closest("[data-testid='stExpander'], .raiox-blocks-host")) return;
                     const rowRx = e.target && e.target.closest ? e.target.closest("table.val-table tbody tr[data-raiox-ticker]") : null;
                     if (rowRx) {
                         const selTxt = pWin.getSelection ? pWin.getSelection().toString() : "";

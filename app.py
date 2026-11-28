@@ -818,6 +818,12 @@ def _fetch_investidor10(ticker: str) -> tuple[str, dict]:
             if val_num is not None:
                 dados[chave_dst] = val_num
 
+        for img_el in soup.find_all("img", src=True):
+            src_i = (img_el.get("src") or "").strip()
+            if "/storage/companies/" in src_i or "/companies/" in src_i:
+                dados["logo_i10"] = ("https://investidor10.com.br" + src_i) if src_i.startswith("/") else src_i
+                break
+
         return ticker, dados
     except Exception:
         return ticker, {}
@@ -3189,6 +3195,35 @@ def modal_dicionario():
     st.divider()
     if st.button("✖️ Fechar Dicionário", type="primary", use_container_width=True, key="btn_fechar_dic"):
         st.rerun()
+
+
+def html_logo_ativo(
+    ticker: str,
+    logo_fb: str = "",
+    size: int = 36,
+    radius: int = 8,
+    bg_monogram: str = "rgba(59,130,246,0.22)",
+) -> str:
+    tk_esc = html.escape(ticker)
+    src_prim = f"https://icons.brapi.dev/icons/{tk_esc}.svg"
+    if logo_fb:
+        fb_esc = html.escape(logo_fb, quote=True)
+        onerror_js = (
+            f"if(!this.dataset.triedFb){{this.dataset.triedFb='1';this.src='{fb_esc}';}}"
+            "else{this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='inline-flex';}"
+        )
+    else:
+        onerror_js = "this.style.display='none';if(this.nextElementSibling)this.nextElementSibling.style.display='inline-flex';"
+    fs_mono = max(9, int(size * 0.27))
+    return (
+        f"<span style='display:inline-flex; align-items:center; justify-content:center; width:{size}px; height:{size}px; flex-shrink:0;'>"
+        f"<img src='{src_prim}' alt='{tk_esc}' loading='lazy' onerror=\"{onerror_js}\" "
+        f"style='width:{size}px; height:{size}px; object-fit:contain; border-radius:{radius}px; background:rgba(255,255,255,0.04); padding:2px;' />"
+        f"<span style='display:none; align-items:center; justify-content:center; width:{size}px; height:{size}px; "
+        f"border-radius:{radius}px; background:{bg_monogram}; border:1px solid rgba(148,163,184,0.35); "
+        f"font-size:{fs_mono}px; font-weight:800; color:#e2e8f0; letter-spacing:0.3px;'>{html.escape(ticker[:4])}</span>"
+        "</span>"
+    )
 
 
 def badge_veredito_html(veredito: str) -> str:
@@ -6002,6 +6037,7 @@ def montar_item_completo(a: dict) -> dict:
         "dpa_12m": dpa_12m, "dy_12m": dy_12m,
         "dpa_med_6a": dpa_med_6a, "anos_hist": anos_hist, "dpa_proj": dpa_proj,
         "pt_med": pt_med, "pt_proj": pt_proj, "pt_bazin": pt_bazin, "graham": graham,
+        "logo_i10": i10_info.get("logo_i10", ""),
         "var_dia_pct": i10_info.get("var_dia_i10") if i10_info.get("var_dia_i10") is not None else yf_info.get("var_dia_pct"),
         "ifr_14": yf_info.get("ifr_14"),
         "mm20": yf_info.get("mm20"),
@@ -6314,22 +6350,40 @@ with tab1:
                 # Card 1: Líder de Atratividade
                 lider_atr = resultados_tab[0]
                 with rc1:
-                    with st.container(border=True):
-                        st.markdown(
-                            "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                            "<div>"
-                            "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>🏆 Líder de Atratividade</div>"
-                            f"<div style='font-size:20px; font-weight:700; color:#60a5fa; line-height:1.2;'>{lider_atr['ticker']}</div>"
-                            f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(lider_atr['nome'])}'>{html.escape(lider_atr['nome'])}</div>"
-                            "</div>"
-                            "<div>"
-                            f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(lider_atr['cotacao'])}</strong></div>"
-                            f"<div style='font-size:13px;'>Score Ativo: <strong>{fmt_num(lider_atr['score_ativo'], 1)}/100</strong></div>"
-                            f"<div style='margin-top:4px; min-height:22px; display:flex; align-items:center;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>"
-                            "</div>"
-                            "</div>",
-                            unsafe_allow_html=True,
-                        )
+                    logo_c1 = html_logo_ativo(lider_atr["ticker"], lider_atr.get("logo_i10", ""), size=46, radius=9, bg_monogram="rgba(16,185,129,0.22)")
+                    st.markdown(
+                        "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                        "border:1px solid rgba(16,185,129,0.55); "
+                        "background:linear-gradient(145deg, rgba(16,185,129,0.16) 0%, rgba(10,22,18,0.90) 58%, rgba(7,14,11,0.96) 100%); "
+                        "display:flex; flex-direction:column; justify-content:space-between; gap:10px;'>"
+                        "<div style='display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:nowrap;'>"
+                        "<div style='display:flex; align-items:center; gap:7px; min-width:0;'>"
+                        "<span style='font-size:16px; line-height:1;'>🏆</span>"
+                        "<span style='background:rgba(16,185,129,0.22); border:1px solid rgba(16,185,129,0.45); color:#34d399; "
+                        "border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>Líder de Atratividade</span>"
+                        "</div>"
+                        f"<div style='flex-shrink:0;'>{badge_veredito_html(lider_atr.get('veredito', ''))}</div>"
+                        "</div>"
+                        "<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                        "<div style='min-width:0;'>"
+                        f"<div style='font-size:21px; font-weight:800; color:#f8fafc; line-height:1.15;'>{lider_atr['ticker']}</div>"
+                        f"<div style='font-size:12px; color:rgba(226,232,240,0.75); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;' title='{html.escape(lider_atr['nome'])}'>{html.escape(lider_atr['nome'])}</div>"
+                        "</div>"
+                        f"{logo_c1}"
+                        "</div>"
+                        "<div style='display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); padding-top:4px;'>"
+                        "<div style='border-right:1px solid rgba(255,255,255,0.12); padding-right:10px;'>"
+                        "<div style='font-size:11px; color:rgba(226,232,240,0.68);'>📈 Cotação</div>"
+                        f"<div style='font-size:16px; font-weight:800; color:#f8fafc; margin-top:2px;'>R$ {fmt_num(lider_atr['cotacao'])}</div>"
+                        "</div>"
+                        "<div style='padding-left:12px;'>"
+                        "<div style='font-size:11px; color:rgba(226,232,240,0.68);'>⭐ Score Ativo</div>"
+                        f"<div style='font-size:16px; font-weight:800; color:#34d399; margin-top:2px;'>{fmt_num(lider_atr['score_ativo'], 1)}/100</div>"
+                        "</div>"
+                        "</div>"
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
 
                 # Card 2: Maior DY Sustentável
                 cands_dy = [
@@ -6343,35 +6397,57 @@ with tab1:
                     )
                 ]
                 with rc2:
-                    with st.container(border=True):
-                        if cands_dy:
-                            top_dy = max(cands_dy, key=lambda x: float(x["dy_12m"]))
-                            bz_dy = top_dy.get("pt_bazin")
-                            bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>💰 Maior DY Sustentável</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#22c55e; line-height:1.2;'>{top_dy['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_dy['nome'])}'>{html.escape(top_dy['nome'])}</div>"
-                                "</div>"
-                                "<div>"
-                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_dy['cotacao'])}</strong></div>"
-                                f"<div style='font-size:13px;'>DY 12m: <strong>{fmt_num(top_dy['dy_12m'], 2)}%</strong></div>"
-                                f"<div style='font-size:12px; opacity:0.85; min-height:22px; display:flex; align-items:center;'>Teto Bazin:&nbsp;<strong>{bz_txt}</strong></div>"
-                                "</div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div style='font-size:14px; font-weight:700;'>💰 Maior DY Sustentável</div>"
-                                "<div style='font-size:12px; opacity:0.75;'>Sem ativo elegível com ROE &gt; 10% e DY &gt; 0% neste filtro.</div>"
-                                "<div></div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
+                    if cands_dy:
+                        top_dy = max(cands_dy, key=lambda x: float(x["dy_12m"]))
+                        bz_dy = top_dy.get("pt_bazin")
+                        bz_txt = f"R$ {fmt_num(bz_dy)}" if (bz_dy and bz_dy > 0) else "—"
+                        logo_c2 = html_logo_ativo(top_dy["ticker"], top_dy.get("logo_i10", ""), size=46, radius=9, bg_monogram="rgba(245,158,11,0.22)")
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(245,158,11,0.55); "
+                            "background:linear-gradient(145deg, rgba(245,158,11,0.16) 0%, rgba(24,18,8,0.90) 58%, rgba(15,11,6,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between; gap:10px;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'>"
+                            "<span style='font-size:16px; line-height:1;'>🪙</span>"
+                            "<span style='background:rgba(245,158,11,0.22); border:1px solid rgba(245,158,11,0.45); color:#fbbf24; "
+                            "border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700; white-space:nowrap;'>Maior DY Sustentável</span>"
+                            "</div>"
+                            "<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                            "<div style='min-width:0;'>"
+                            f"<div style='font-size:21px; font-weight:800; color:#f8fafc; line-height:1.15;'>{top_dy['ticker']}</div>"
+                            f"<div style='font-size:12px; color:rgba(226,232,240,0.75); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;' title='{html.escape(top_dy['nome'])}'>{html.escape(top_dy['nome'])}</div>"
+                            "</div>"
+                            f"{logo_c2}"
+                            "</div>"
+                            "<div style='display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding-top:4px;'>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding-right:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>📈 Cotação</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>R$ {fmt_num(top_dy['cotacao'])}</div>"
+                            "</div>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding:0 6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>DY 12 meses</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#fbbf24; margin-top:2px; white-space:nowrap;'>{fmt_num(top_dy['dy_12m'], 2)}%</div>"
+                            "</div>"
+                            "<div style='padding-left:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>🎯 Teto Bazin</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>{bz_txt}</div>"
+                            "</div>"
+                            "</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(245,158,11,0.45); "
+                            "background:linear-gradient(145deg, rgba(245,158,11,0.12) 0%, rgba(24,18,8,0.90) 60%, rgba(15,11,6,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'><span style='font-size:16px;'>🪙</span>"
+                            "<span style='background:rgba(245,158,11,0.22); border:1px solid rgba(245,158,11,0.45); color:#fbbf24; border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700;'>Maior DY Sustentável</span></div>"
+                            "<div style='font-size:12px; opacity:0.78;'>Sem ativo elegível com ROE &gt; 10% e DY &gt; 0% neste filtro.</div>"
+                            "<div></div></div>",
+                            unsafe_allow_html=True,
+                        )
 
                 # Card 3: Oportunidade Técnica (Sobrevendida)
                 cands_ifr = [
@@ -6390,35 +6466,58 @@ with tab1:
                         and (r.get("roe") is None or float(r["roe"]) > 0.0)
                     ]
                 with rc3:
-                    with st.container(border=True):
-                        if cands_ifr:
-                            top_ifr = min(cands_ifr, key=lambda x: float(x["ifr_14"]))
-                            d200_i = top_ifr.get("dist_mm200_pct")
-                            d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>⚡ Oportunidade Técnica</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#facc15; line-height:1.2;'>{top_ifr['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_ifr['nome'])}'>{html.escape(top_ifr['nome'])}</div>"
-                                "</div>"
-                                "<div>"
-                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_ifr['cotacao'])}</strong></div>"
-                                f"<div style='font-size:13px;'>IFR (14d): <strong>{fmt_num(top_ifr['ifr_14'], 1)}</strong></div>"
-                                f"<div style='font-size:12px; opacity:0.85; min-height:22px; display:flex; align-items:center;'>Dist. MM200:&nbsp;<strong>{d200_s}</strong></div>"
-                                "</div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div style='font-size:14px; font-weight:700;'>⚡ Oportunidade Técnica</div>"
-                                "<div style='font-size:12px; opacity:0.75;'>Indicadores técnicos não carregados para este filtro.</div>"
-                                "<div></div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
+                    if cands_ifr:
+                        top_ifr = min(cands_ifr, key=lambda x: float(x["ifr_14"]))
+                        d200_i = top_ifr.get("dist_mm200_pct")
+                        d200_s = f"{d200_i:+.1f}%" if d200_i is not None else "—"
+                        cor_d200 = "#4ade80" if (d200_i is not None and d200_i >= 0) else "#fb923c"
+                        logo_c3 = html_logo_ativo(top_ifr["ticker"], top_ifr.get("logo_i10", ""), size=46, radius=9, bg_monogram="rgba(168,85,247,0.22)")
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(168,85,247,0.58); "
+                            "background:linear-gradient(145deg, rgba(168,85,247,0.16) 0%, rgba(20,12,28,0.90) 58%, rgba(13,9,19,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between; gap:10px;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'>"
+                            "<span style='font-size:16px; line-height:1;'>⚡</span>"
+                            "<span style='background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.48); color:#c084fc; "
+                            "border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700; white-space:nowrap;'>Oportunidade Técnica</span>"
+                            "</div>"
+                            "<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                            "<div style='min-width:0;'>"
+                            f"<div style='font-size:21px; font-weight:800; color:#f8fafc; line-height:1.15;'>{top_ifr['ticker']}</div>"
+                            f"<div style='font-size:12px; color:rgba(226,232,240,0.75); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;' title='{html.escape(top_ifr['nome'])}'>{html.escape(top_ifr['nome'])}</div>"
+                            "</div>"
+                            f"{logo_c3}"
+                            "</div>"
+                            "<div style='display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding-top:4px;'>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding-right:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>📈 Cotação</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>R$ {fmt_num(top_ifr['cotacao'])}</div>"
+                            "</div>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding:0 6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>📊 IFR (14d)</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>{fmt_num(top_ifr['ifr_14'], 1)}</div>"
+                            "</div>"
+                            "<div style='padding-left:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>📉 Dist. MM200</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:{cor_d200}; margin-top:2px; white-space:nowrap;'>{d200_s}</div>"
+                            "</div>"
+                            "</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(168,85,247,0.45); "
+                            "background:linear-gradient(145deg, rgba(168,85,247,0.12) 0%, rgba(20,12,28,0.90) 60%, rgba(13,9,19,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'><span style='font-size:16px;'>⚡</span>"
+                            "<span style='background:rgba(168,85,247,0.22); border:1px solid rgba(168,85,247,0.48); color:#c084fc; border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700;'>Oportunidade Técnica</span></div>"
+                            "<div style='font-size:12px; opacity:0.78;'>Indicadores técnicos não carregados para este filtro.</div>"
+                            "<div></div></div>",
+                            unsafe_allow_html=True,
+                        )
 
                 # Card 4: Maior Desconto Graham
                 cands_gr = []
@@ -6429,33 +6528,55 @@ with tab1:
                     if ms_g is not None and ms_g > 0.0:
                         cands_gr.append((ms_g, r_g))
                 with rc4:
-                    with st.container(border=True):
-                        if cands_gr:
-                            ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div>"
-                                "<div style='font-size:14px; font-weight:700; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>🛡️ Maior Desconto Graham</div>"
-                                f"<div style='font-size:20px; font-weight:700; color:#38bdf8; line-height:1.2;'>{top_gr['ticker']}</div>"
-                                f"<div style='font-size:12px; opacity:0.8; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;' title='{html.escape(top_gr['nome'])}'>{html.escape(top_gr['nome'])}</div>"
-                                "</div>"
-                                "<div>"
-                                f"<div style='font-size:13px;'>Cotação: <strong>R$ {fmt_num(top_gr['cotacao'])}</strong></div>"
-                                f"<div style='font-size:13px;'>Graham: <strong>R$ {fmt_num(top_gr['graham'])}</strong></div>"
-                                f"<div style='font-size:12px; color:#22c55e; font-weight:700; min-height:22px; display:flex; align-items:center;'>Margem: +{fmt_num(ms_best, 1)}%</div>"
-                                "</div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                "<div style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                                "<div style='font-size:14px; font-weight:700;'>🛡️ Maior Desconto Graham</div>"
-                                "<div style='font-size:12px; opacity:0.75;'>Nenhum ativo abaixo do valor de Graham neste filtro.</div>"
-                                "<div></div>"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
+                    if cands_gr:
+                        ms_best, top_gr = max(cands_gr, key=lambda pair: pair[0])
+                        logo_c4 = html_logo_ativo(top_gr["ticker"], top_gr.get("logo_i10", ""), size=46, radius=9, bg_monogram="rgba(56,189,248,0.22)")
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(56,189,248,0.58); "
+                            "background:linear-gradient(145deg, rgba(56,189,248,0.16) 0%, rgba(10,20,30,0.90) 58%, rgba(7,13,20,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between; gap:10px;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'>"
+                            "<span style='font-size:16px; line-height:1;'>💎</span>"
+                            "<span style='background:rgba(56,189,248,0.20); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; "
+                            "border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700; white-space:nowrap;'>Maior Desconto Graham</span>"
+                            "</div>"
+                            "<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                            "<div style='min-width:0;'>"
+                            f"<div style='font-size:21px; font-weight:800; color:#f8fafc; line-height:1.15;'>{top_gr['ticker']}</div>"
+                            f"<div style='font-size:12px; color:rgba(226,232,240,0.75); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px;' title='{html.escape(top_gr['nome'])}'>{html.escape(top_gr['nome'])}</div>"
+                            "</div>"
+                            f"{logo_c4}"
+                            "</div>"
+                            "<div style='display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding-top:4px;'>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding-right:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>📈 Cotação</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>R$ {fmt_num(top_gr['cotacao'])}</div>"
+                            "</div>"
+                            "<div style='border-right:1px solid rgba(255,255,255,0.12); padding:0 6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>🏛️ Graham</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#f8fafc; margin-top:2px; white-space:nowrap;'>R$ {fmt_num(top_gr['graham'])}</div>"
+                            "</div>"
+                            "<div style='padding-left:6px;'>"
+                            "<div style='font-size:11px; color:rgba(226,232,240,0.68); white-space:nowrap;'>✳️ Margem</div>"
+                            f"<div style='font-size:14.5px; font-weight:800; color:#4ade80; margin-top:2px; white-space:nowrap;'>+{fmt_num(ms_best, 1)}%</div>"
+                            "</div>"
+                            "</div>"
+                            "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            "<div style='min-height:164px; border-radius:12px; padding:14px 16px; "
+                            "border:1px solid rgba(56,189,248,0.45); "
+                            "background:linear-gradient(145deg, rgba(56,189,248,0.12) 0%, rgba(10,20,30,0.90) 60%, rgba(7,13,20,0.96) 100%); "
+                            "display:flex; flex-direction:column; justify-content:space-between;'>"
+                            "<div style='display:flex; align-items:center; gap:7px;'><span style='font-size:16px;'>💎</span>"
+                            "<span style='background:rgba(56,189,248,0.20); border:1px solid rgba(56,189,248,0.45); color:#38bdf8; border-radius:999px; padding:2px 9px; font-size:11px; font-weight:700;'>Maior Desconto Graham</span></div>"
+                            "<div style='font-size:12px; opacity:0.78;'>Nenhum ativo abaixo do valor de Graham neste filtro.</div>"
+                            "<div></div></div>",
+                            unsafe_allow_html=True,
+                        )
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
 
         with st.expander(f"📋 Tabela Comparativa ({len(resultados_tab)} ativos no filtro) — clique para minimizar/maximizar | clique em qualquer linha para abrir/fechar o Raio-X", expanded=True):
@@ -6767,10 +6888,16 @@ with tab1:
                         else:
                             var_dia_html = ""
 
+                        logo_td = html_logo_ativo(r["ticker"], r.get("logo_i10", ""), size=36, radius=7)
                         linha = (
                             f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
                             f"<td class='col-sticky-0' style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
-                            f"<td class='col-sticky-1'><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
+                            f"<td class='col-sticky-1'>"
+                            f"<div style='display:flex; align-items:center; gap:10px;'>"
+                            f"{logo_td}"
+                            f"<div style='min-width:0;'><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</div>"
+                            f"</div>"
+                            f"</td>"
                             f"<td style='text-align:center; line-height:1.35;'>"
                             f"<span style='font-weight:700;' title='Posição no Ranking e Score Ativo (0 a 100)'>{r['pos_ranking']}º · <strong>{fmt_num(score_at, 1)}</strong></span>"
                             f"<br>{badge_v}"
@@ -6865,7 +6992,7 @@ with tab1:
         (function() {
             const pWin = __USE_PARENT__ ? window.parent : window;
             const pDoc = pWin.document;
-            const STORAGE_KEY = "painel_b3_val_col_widths_v3";
+            const STORAGE_KEY = "painel_b3_val_col_widths_v4";
 
             function applyStickyBgVars() {
                 const refEl = pDoc.querySelector('[data-testid="stAppViewContainer"]') || pDoc.body;
@@ -7013,7 +7140,7 @@ with tab1:
                     widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
                 } else {
                     topTable.style.tableLayout = "auto";
-                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : (i === 3 ? 185 : 54), Math.round(th.getBoundingClientRect().width)));
+                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : (i === 1 ? 235 : (i === 3 ? 185 : 54)), Math.round(th.getBoundingClientRect().width)));
                 }
 
                 totalW = widths.reduce((a, b) => a + b, 0);

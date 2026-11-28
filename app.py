@@ -1202,7 +1202,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 16,
+    _v: int = 17,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     # --- CAMINHO RÁPIDO: rotas oficiais descobertas via DevTools (sem descoberta de rotas/JS) ---
@@ -1262,7 +1262,10 @@ def buscar_serie_investidor10_chart_com_info(
                     if not tem_hora_fp or len(s_fp) < 12 or len({ts.date() for ts in s_fp.index}) < 2:
                         continue
                 elif periodo_label == "YTD":
-                    s_ytd_fp = s_fp[(s_fp.index.year == s_fp.index[-1].year) & ~((s_fp.index.month == 1) & (s_fp.index.day == 1))]
+                    ano_fim_fp = s_fp.index[-1].year
+                    if s_fp.index[0] < pd.Timestamp(year=ano_fim_fp - 1, month=12, day=20):
+                        continue
+                    s_ytd_fp = s_fp if "/ytd/" in url_fp else s_fp[s_fp.index >= pd.Timestamp(year=ano_fim_fp, month=1, day=1)]
                     if len(s_ytd_fp) < 3:
                         continue
                     s_fp = s_ytd_fp
@@ -1454,9 +1457,6 @@ def buscar_serie_investidor10_chart_com_info(
                 if dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
                     diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
                     continue
-                s_ytd_ano = s_out[(s_out.index.year == dt_fim_s.year) & ~((s_out.index.month == 1) & (s_out.index.day == 1))]
-                if len(s_ytd_ano) >= 3:
-                    s_out = s_ytd_ano
             if cot_live and float(cot_live) > 0:
                 s_out.iloc[-1] = float(cot_live)
             return s_out, "Investidor10"
@@ -1479,6 +1479,23 @@ def buscar_serie_investidor10_chart(
     _v: int = 15,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def buscar_prev_close_investidor10(ticker: str, data_ref_iso: str, _v: int = 1) -> float | None:
+    """Fechamento anterior (sem ajuste) segundo a própria série diária do Investidor10."""
+    try:
+        s_d, _ = buscar_serie_investidor10_chart_com_info(ticker, "30 D", False, None)
+        if s_d is None or s_d.empty:
+            return None
+        dt_ref = pd.Timestamp(data_ref_iso).normalize()
+        s_ant = s_d[s_d.index.normalize() < dt_ref]
+        if s_ant.empty:
+            return None
+        v_prev = float(s_ant.iloc[-1])
+        return v_prev if v_prev > 0 else None
+    except Exception:
+        return None
 
 
 def _calc_ticks_y_i10(y_min: float, y_max: float) -> list[float]:
@@ -4450,8 +4467,11 @@ def render_grafico_e_tabela_ativo(
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
             p_ref_var = p_ini
             if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
+                prev_i10_1d = buscar_prev_close_investidor10(ticker, serie.index[-1].strftime("%Y-%m-%d")) if usou_i10_graf else None
                 var_dia_ref = (base_ativo or {}).get("var_dia_pct")
-                if var_dia_ref is not None and p_fim > 0 and (1.0 + float(var_dia_ref) / 100.0) > 0:
+                if prev_i10_1d and prev_i10_1d > 0:
+                    p_ref_var = prev_i10_1d
+                elif var_dia_ref is not None and p_fim > 0 and (1.0 + float(var_dia_ref) / 100.0) > 0:
                     p_ref_var = p_fim / (1.0 + float(var_dia_ref) / 100.0)
                 else:
                     prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)

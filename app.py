@@ -1023,30 +1023,40 @@ def buscar_dividendos_ativo(ticker: str) -> pd.Series:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 4) -> list[str]:
+def _descobrir_rotas_chart_i10(script_urls: tuple[str, ...], _v: int = 5) -> list[str]:
     rotas: list[str] = []
-    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
+    pat = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180})\1""")
+    pat_api = re.compile(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""")
     kws = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
+    ign_js = ("jquery", "bootstrap", "popper", "chart.js", "apexcharts", "echarts", "highcharts", "sentry", "gtag", "analytics", "vendor")
     filtrados = [
         su for su in script_urls
-        if any(k in su.lower() for k in ("app", "main", "chart", "cotac", "acao", "stock", "quote", "ticker", "bundle", "index"))
-    ] or list(script_urls)
-    for su in filtrados[:6]:
+        if not any(ig in su.lower() for ig in ign_js)
+        and any(k in su.lower() for k in ("app", "main", "chart", "cotac", "acao", "acoes", "compan", "asset", "stock", "quote", "ticker", "bundle", "index", "show", "build", "pages"))
+    ] or [su for su in script_urls if not any(ig in su.lower() for ig in ign_js)]
+
+    def _ler_js(su: str):
         try:
             r = requests.get(su, headers=HEADERS, timeout=2.0)
-            if r.status_code != 200:
-                continue
-            for _, path in pat.findall(r.text):
-                p_low = path.lower()
-                if any(k in p_low for k in kws) and path not in rotas:
-                    rotas.append(path)
+            if r.status_code == 200:
+                return [p for _, p in (pat.findall(r.text) + pat_api.findall(r.text))]
         except Exception:
-            continue
+            pass
+        return []
+
+    with ThreadPoolExecutor(max_workers=6) as ex_js:
+        for paths in ex_js.map(_ler_js, filtrados[:12]):
+            for path in paths:
+                p_low = path.lower()
+                if any(k in p_low for k in kws):
+                    norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
+                    if norm_p not in rotas:
+                        rotas.append(norm_p)
     return rotas
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _obter_meta_chart_i10(ticker: str, _v: int = 2) -> dict:
+def _obter_meta_chart_i10(ticker: str, _v: int = 3) -> dict:
     url_pg = f"https://investidor10.com.br/acoes/{ticker.lower()}/"
     sess = requests.Session()
     sess.headers.update({
@@ -1088,15 +1098,17 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 2) -> dict:
 
         rotas_desc: list[str] = []
         kws_api = ("chart", "cotac", "quot", "hist", "intraday", "candle", "price", "preco")
-        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
-            if any(k in path.lower() for k in kws_api) and path not in rotas_desc:
-                rotas_desc.append(path)
+        for _, path in re.findall(r"""(['"`])((?:https?://[^'"`\s]+)?/(?:api/)?cotacoes/[^'"`\s]{3,180}|(?:https?://[^'"`\s]+)?/api/[^'"`\s]{4,180})\1""", resp_pg.text):
+            if any(k in path.lower() for k in kws_api):
+                norm_p = path if (path.startswith("http") or path.startswith("/api/")) else ("/api" + path if path.startswith("/cotacoes/") else path)
+                if norm_p not in rotas_desc:
+                    rotas_desc.append(norm_p)
 
         srcs = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', resp_pg.text, re.IGNORECASE)
         local_srcs = []
         for s in srcs:
             s_low = s.lower()
-            if any(ig in s_low for ig in ("google", "gtm", "facebook", "clarity", "hotjar", "jquery", "bootstrap", "ads", "analytics")):
+            if any(ig in s_low for ig in ("google", "gtm", "facebook", "clarity", "hotjar", "jquery", "bootstrap", "ads", "analytics", "cloudflare")):
                 continue
             if s.startswith("/"):
                 local_srcs.append("https://investidor10.com.br" + s)
@@ -1117,13 +1129,86 @@ def _obter_meta_chart_i10(ticker: str, _v: int = 2) -> dict:
         return {"erro": "erro de conexão"}
 
 
+def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
+    lista_pts = None
+    if isinstance(js, list):
+        lista_pts = js
+    elif isinstance(js, dict):
+        for k_l in ("real", "data", "prices", "cotacoes", "chart", "series", "intraday", "quotes"):
+            v_l = js.get(k_l)
+            if isinstance(v_l, list) and v_l:
+                lista_pts = v_l
+                break
+            if isinstance(v_l, dict):
+                for k_sub in ("real", "data", "prices", "cotacoes", "series", "intraday"):
+                    if isinstance(v_l.get(k_sub), list) and v_l[k_sub]:
+                        lista_pts = v_l[k_sub]
+                        break
+                if lista_pts:
+                    break
+    if not lista_pts:
+        return pd.Series(dtype=float)
+
+    hoje_brt_str = datetime.now(BRT).strftime("%Y-%m-%d")
+    ano_brt_int = datetime.now(BRT).year
+    datas, vals = [], []
+    for pt in lista_pts:
+        dt_raw, vl_raw, hr_raw = None, None, None
+        if isinstance(pt, dict):
+            dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("time") or pt.get("x")
+            hr_raw = pt.get("hour") or pt.get("hora") or (pt.get("time") if dt_raw != pt.get("time") else None)
+            vl_raw = (
+                pt.get("price") if pt.get("price") is not None
+                else (pt.get("value") if pt.get("value") is not None
+                else (pt.get("close") if pt.get("close") is not None
+                else (pt.get("cotacao") if pt.get("cotacao") is not None else pt.get("y"))))
+            )
+        elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            dt_raw, vl_raw = pt[0], pt[1]
+
+        if dt_raw is None or vl_raw is None:
+            continue
+        if isinstance(dt_raw, (int, float)) and dt_raw > 1e11:
+            dt_u = pd.to_datetime(dt_raw, unit="ms", utc=True, errors="coerce")
+            dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
+        elif isinstance(dt_raw, (int, float)) and dt_raw > 1e8:
+            dt_u = pd.to_datetime(dt_raw, unit="s", utc=True, errors="coerce")
+            dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
+        else:
+            dt_str_raw = str(dt_raw).strip()
+            if hr_raw and len(dt_str_raw) <= 10 and ":" not in dt_str_raw:
+                dt_str_raw = f"{dt_str_raw} {str(hr_raw).strip()}"
+            if re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", dt_str_raw):
+                dt_p = pd.to_datetime(f"{hoje_brt_str} {dt_str_raw}", errors="coerce")
+            elif re.match(r"^\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", dt_str_raw):
+                p_sp = dt_str_raw.split(None, 1)
+                dt_p = pd.to_datetime(f"{p_sp[0]}/{ano_brt_int} {p_sp[1]}", dayfirst=True, errors="coerce")
+            else:
+                dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
+
+        if isinstance(vl_raw, str) and ("," in vl_raw or "R$" in vl_raw):
+            vl_p = _parse_i10_num(vl_raw)
+        else:
+            vl_p = pd.to_numeric(vl_raw, errors="coerce")
+        if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
+            if getattr(dt_p, "tzinfo", None) is not None:
+                dt_p = dt_p.tz_convert(BRT).tz_localize(None)
+            datas.append(dt_p)
+            vals.append(float(vl_p))
+
+    if len(datas) < 3:
+        return pd.Series(dtype=float)
+    s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
+    return s_out[~s_out.index.duplicated(keep="last")]
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def buscar_serie_investidor10_chart_com_info(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 6,
+    _v: int = 7,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     mapa_dias = {
@@ -1205,18 +1290,22 @@ def buscar_serie_investidor10_chart_com_info(
                     url_mont,
                     flags=re.IGNORECASE,
                 )
-            tem_intra = "intraday" in url_mont.lower()
+            elif url_mont.rstrip("/").endswith(("/intraday", "/chart")):
+                url_mont = url_mont.rstrip("/") + (f"/{tid}" if tid else "") + (f"/{d_s}/{adj_str}/real" if "/chart" in url_mont else "")
             if "${" not in url_mont and "{" not in url_mont:
+                tem_intra = "intraday" in url_mont.lower()
                 if (eh_intraday_per and tem_intra) or re.search(rf"(?:/|=){re.escape(d_s)}(?:/|&|$)", url_mont):
                     cands_urls.append(url_mont)
         if tid:
             if periodo_label == "7 D":
                 cands_urls.extend([
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}?days=7",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}/{adj_str}/real",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
+                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}/real",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_int}/real",
                     f"https://investidor10.com.br/api/cotacoes/acao/chart/{tid}/{d_s}/{adj_str}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}/{d_s}",
-                    f"https://investidor10.com.br/api/cotacoes/acao/intraday/{tid}",
                 ])
             elif eh_intraday_per:
                 cands_urls.extend([
@@ -1239,132 +1328,71 @@ def buscar_serie_investidor10_chart_com_info(
 
     vistos_u: set[str] = set()
     urls_unicas = [u for u in cands_urls if not (u in vistos_u or vistos_u.add(u))]
-    hoje_brt_str = datetime.now(BRT).strftime("%Y-%m-%d")
-    ano_brt_int = datetime.now(BRT).year
     diag_motivo = "indisponível"
+    serie_diaria_fb = pd.Series(dtype=float)
 
-    intraday_404 = False
-    for url_c in urls_unicas[:9]:
-        if intraday_404 and "/intraday/" in url_c:
-            continue
+    for url_c in urls_unicas[:10]:
         try:
             r_c = sess.get(url_c, timeout=2.5)
             if r_c.status_code in (401, 403, 429):
                 diag_motivo = f"HTTP {r_c.status_code}"
                 break
             if r_c.status_code != 200:
-                if r_c.status_code == 404 and "/intraday/" in url_c:
-                    intraday_404 = True
                 diag_motivo = f"HTTP {r_c.status_code}"
                 continue
-            js = r_c.json()
-            lista_pts = None
-            if isinstance(js, list):
-                lista_pts = js
-            elif isinstance(js, dict):
-                for k_l in ("real", "data", "prices", "cotacoes", "chart", "series", "intraday"):
-                    v_l = js.get(k_l)
-                    if isinstance(v_l, list) and v_l:
-                        lista_pts = v_l
-                        break
-                    if isinstance(v_l, dict):
-                        for k_sub in ("real", "data", "prices", "cotacoes", "series"):
-                            if isinstance(v_l.get(k_sub), list) and v_l[k_sub]:
-                                lista_pts = v_l[k_sub]
-                                break
-                        if lista_pts:
-                            break
-            if not lista_pts:
+            s_out = _parse_i10_chart_json(r_c.json(), eh_intraday_per=eh_intraday_per)
+            if s_out.empty:
                 diag_motivo = "lista vazia na API"
                 continue
 
-            datas, vals = [], []
-            for pt in lista_pts:
-                dt_raw, vl_raw = None, None
-                if isinstance(pt, dict):
-                    dt_raw = pt.get("created_at") or pt.get("date") or pt.get("data") or pt.get("timestamp") or pt.get("time") or pt.get("x")
-                    vl_raw = (
-                        pt.get("price") if pt.get("price") is not None
-                        else (pt.get("value") if pt.get("value") is not None
-                        else (pt.get("close") if pt.get("close") is not None
-                        else (pt.get("cotacao") if pt.get("cotacao") is not None else pt.get("y"))))
-                    )
-                elif isinstance(pt, (list, tuple)) and len(pt) >= 2:
-                    dt_raw, vl_raw = pt[0], pt[1]
-
-                if dt_raw is None or vl_raw is None:
+            tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
+            if periodo_label == "1 D":
+                if not tem_hora or len(s_out) < 5:
+                    diag_motivo = "API retornou apenas série diária para 1 D"
                     continue
-                if isinstance(dt_raw, (int, float)) and dt_raw > 1e11:
-                    dt_u = pd.to_datetime(dt_raw, unit="ms", utc=True, errors="coerce")
-                    dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
-                elif isinstance(dt_raw, (int, float)) and dt_raw > 1e8:
-                    dt_u = pd.to_datetime(dt_raw, unit="s", utc=True, errors="coerce")
-                    dt_p = dt_u.tz_convert(BRT).tz_localize(None) if (pd.notna(dt_u) and (eh_intraday_per or dt_u.hour != 0 or dt_u.minute != 0)) else (dt_u.tz_localize(None) if pd.notna(dt_u) else dt_u)
-                else:
-                    dt_str_raw = str(dt_raw).strip()
-                    if re.match(r"^\d{1,2}:\d{2}(?::\d{2})?$", dt_str_raw):
-                        dt_p = pd.to_datetime(f"{hoje_brt_str} {dt_str_raw}", errors="coerce")
-                    elif re.match(r"^\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}", dt_str_raw):
-                        p_sp = dt_str_raw.split(None, 1)
-                        dt_p = pd.to_datetime(f"{p_sp[0]}/{ano_brt_int} {p_sp[1]}", dayfirst=True, errors="coerce")
-                    else:
-                        dt_p = pd.to_datetime(dt_str_raw, dayfirst=bool(re.match(r"^\d{1,2}/\d{1,2}/\d{2,4}", dt_str_raw)), errors="coerce")
-                if isinstance(vl_raw, str) and ("," in vl_raw or "R$" in vl_raw):
-                    vl_p = _parse_i10_num(vl_raw)
-                else:
-                    vl_p = pd.to_numeric(vl_raw, errors="coerce")
-                if pd.notna(dt_p) and pd.notna(vl_p) and float(vl_p) > 0:
-                    if getattr(dt_p, "tzinfo", None) is not None:
-                        dt_p = dt_p.tz_convert(BRT).tz_localize(None)
-                    datas.append(dt_p)
-                    vals.append(float(vl_p))
-
-            if len(datas) >= 3:
-                s_out = pd.Series(vals, index=pd.DatetimeIndex(datas)).sort_index()
-                s_out = s_out[~s_out.index.duplicated(keep="last")]
-                tem_hora = any((ts.hour != 0 or ts.minute != 0) for ts in s_out.index)
-
-                if periodo_label == "1 D":
-                    if not tem_hora or len(s_out) < 5:
-                        diag_motivo = "API retornou apenas série diária para 1 D"
-                        continue
-                    s_out = s_out[s_out.index.date == s_out.index.date[-1]]
-                    if len(s_out) < 5:
-                        diag_motivo = "menos de 5 pontos intradiários para 1 D"
-                        continue
-                    if cot_live and float(cot_live) > 0:
-                        s_out.iloc[-1] = float(cot_live)
-                    return s_out, "Investidor10"
-
-                if periodo_label == "7 D":
-                    if not tem_hora or len(s_out) < 12:
-                        diag_motivo = "API retornou apenas série diária para 7 D"
-                        continue
-                    if cot_live and float(cot_live) > 0:
-                        s_out.iloc[-1] = float(cot_live)
-                    return s_out, "Investidor10"
-
-                span_dias = int((s_out.index[-1] - s_out.index[0]).days)
-                dt_ini_s = s_out.index[0].date()
-                dt_fim_s = s_out.index[-1].date()
-                min_spans = {"6 M": 100, "1 A": 240, "5 A": 1400, "10 A": 3100, "15 A": 4700}
-                max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
-                if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
-                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                    continue
-                if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
-                    diag_motivo = f"retornou {span_dias}d para {periodo_label}"
-                    continue
-                if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
-                    diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                s_out = s_out[s_out.index.date == s_out.index.date[-1]]
+                if len(s_out) < 5:
+                    diag_motivo = "menos de 5 pontos intradiários para 1 D"
                     continue
                 if cot_live and float(cot_live) > 0:
                     s_out.iloc[-1] = float(cot_live)
                 return s_out, "Investidor10"
-            diag_motivo = "menos de 3 pontos válidos"
+
+            if periodo_label == "7 D":
+                if tem_hora and len(s_out) >= 12:
+                    if cot_live and float(cot_live) > 0:
+                        s_out.iloc[-1] = float(cot_live)
+                    return s_out, "Investidor10"
+                if serie_diaria_fb.empty and len(s_out) >= 3:
+                    serie_diaria_fb = s_out
+                diag_motivo = "API retornou apenas série diária para 7 D"
+                continue
+
+            span_dias = int((s_out.index[-1] - s_out.index[0]).days)
+            dt_ini_s = s_out.index[0].date()
+            dt_fim_s = s_out.index[-1].date()
+            min_spans_real = {"6 M": 40, "1 A": 60, "5 A": 60, "10 A": 60, "15 A": 60}
+            max_spans = {"30 D": 60, "6 M": 240, "YTD": 385, "1 A": 450}
+            if periodo_label in min_spans and span_dias < min_spans[periodo_label]:
+                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                continue
+            if periodo_label in max_spans and span_dias > max_spans[periodo_label]:
+                diag_motivo = f"retornou {span_dias}d para {periodo_label}"
+                continue
+            if periodo_label == "YTD" and dt_ini_s < date(dt_fim_s.year - 1, 12, 20):
+                diag_motivo = f"YTD iniciou em {dt_ini_s.strftime('%d/%m/%Y')}"
+                continue
+            if cot_live and float(cot_live) > 0:
+                s_out.iloc[-1] = float(cot_live)
+            return s_out, "Investidor10"
         except Exception:
             diag_motivo = "erro ao ler JSON"
-            break
+            continue
+
+    if periodo_label == "7 D" and not serie_diaria_fb.empty:
+        if cot_live and float(cot_live) > 0:
+            serie_diaria_fb.iloc[-1] = float(cot_live)
+        return serie_diaria_fb, "Investidor10 (diária 7 D)"
 
     return pd.Series(dtype=float), diag_motivo
 
@@ -1373,7 +1401,7 @@ def buscar_serie_investidor10_chart(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 6,
+    _v: int = 7,
 ) -> pd.Series:
     return buscar_serie_investidor10_chart_com_info(ticker, periodo_label, ajustada, cot_live=cot_live)[0]
 
@@ -2303,10 +2331,10 @@ def buscar_historico_preco(
     return df["Close"].dropna()
 
 @st.cache_data(ttl=300, show_spinner=False)
-def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None) -> float | None:
+def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None, ajustada: bool = False, _v: int = 2) -> float | None:
     try:
         tk = yf.Ticker(f"{ticker}.SA")
-        h5 = tk.history(period="7d", interval="1d", auto_adjust=False)
+        h5 = tk.history(period="1mo", interval="1d", auto_adjust=ajustada)
         if h5 is not None and not h5.empty and "Close" in h5.columns:
             h5.index = _idx_para_brt_naive(h5.index)
             c5 = h5["Close"].dropna()
@@ -2315,11 +2343,12 @@ def buscar_prev_close_ativo(ticker: str, ref_date: date | None = None) -> float 
                 anteriores = c5[c5.index.date < alvo_d]
                 if not anteriores.empty:
                     return float(anteriores.iloc[-1])
-        fi = tk.fast_info
-        if fi:
-            pc = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
-            if pc and float(pc) > 0:
-                return float(pc)
+        if not ajustada:
+            fi = tk.fast_info
+            if fi:
+                pc = fi.get("previousClose") or fi.get("regularMarketPreviousClose")
+                if pc and float(pc) > 0:
+                    return float(pc)
     except Exception:
         pass
     return None
@@ -4277,8 +4306,24 @@ def render_grafico_e_tabela_ativo(
                 f_alt_i10 = ex_g.submit(buscar_serie_investidor10_chart, ticker, periodo, ajustada_alt, cot_ref_live) if (not eh_candles_req and periodo != "1 D") else None
 
                 serie_i10_c, diag_i10_graf = f_i10.result() if f_i10 is not None else (pd.Series(dtype=float), "")
-                df_ohlcv = f_yh.result() if (eh_candles_req or serie_i10_c.empty) else pd.DataFrame()
-                if not serie_i10_c.empty:
+                i10_eh_diaria_7d = (periodo == "7 D") and ("diária 7 D" in diag_i10_graf)
+                df_ohlcv = f_yh.result() if (eh_candles_req or serie_i10_c.empty or i10_eh_diaria_7d) else pd.DataFrame()
+                if not serie_i10_c.empty and not i10_eh_diaria_7d:
+                    serie = serie_i10_c
+                    usou_i10_graf = True
+                elif i10_eh_diaria_7d and df_ohlcv is not None and not df_ohlcv.empty and "Close" in df_ohlcv.columns:
+                    # Usa a curva intradiária 15m do Yahoo ancorada aos fechamentos diários oficiais do Investidor10
+                    serie_yh_15m = df_ohlcv["Close"].dropna().copy()
+                    for dt_i10, vl_i10 in serie_i10_c.items():
+                        d_i10 = dt_i10.date()
+                        mask_d = serie_yh_15m.index.date == d_i10
+                        if mask_d.any():
+                            v_yh_fim = float(serie_yh_15m[mask_d].iloc[-1])
+                            if v_yh_fim > 0:
+                                serie_yh_15m.loc[mask_d] = serie_yh_15m.loc[mask_d] * (float(vl_i10) / v_yh_fim)
+                    serie = serie_yh_15m
+                    usou_i10_graf = True
+                elif not serie_i10_c.empty:
                     serie = serie_i10_c
                     usou_i10_graf = True
                 else:
@@ -4326,13 +4371,16 @@ def render_grafico_e_tabela_ativo(
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
             p_ref_var = p_ini
             if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
-                prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date())
+                prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)
                 if prev_c_1d and prev_c_1d > 0:
                     p_ref_var = prev_c_1d
-            elif not usar_custom_range and periodo == "7 D" and moeda_graf == "Real" and not usou_i10_graf:
-                prev_c_7d = buscar_prev_close_ativo(ticker, serie.index[0].date())
-                if prev_c_7d and prev_c_7d > 0:
-                    p_ref_var = prev_c_7d
+            elif not usar_custom_range and periodo == "7 D" and moeda_graf == "Real":
+                if not usou_i10_graf:
+                    prev_c_7d = buscar_prev_close_ativo(ticker, serie.index[0].date(), ajustada=ajustada)
+                    if prev_c_7d and prev_c_7d > 0:
+                        p_ref_var = prev_c_7d
+                elif i10_eh_diaria_7d and not serie_i10_c.empty:
+                    p_ref_var = float(serie_i10_c.iloc[0])
             var_pct = ((p_fim - p_ref_var) / p_ref_var) * 100.0 if p_ref_var > 0 else 0.0
             cor = "#22c55e" if var_pct >= 0 else "#dc2626"
             fill_cor = "rgba(34, 197, 94, 0.16)" if var_pct >= 0 else "rgba(220, 38, 38, 0.18)"

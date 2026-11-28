@@ -1196,15 +1196,85 @@ def _parse_i10_chart_json(js, eh_intraday_per: bool) -> pd.Series:
     return s_out[~s_out.index.duplicated(keep="last")]
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def buscar_serie_investidor10_chart_com_info(
     ticker: str,
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 15,
+    _v: int = 16,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
+    # --- CAMINHO RÁPIDO: rotas oficiais descobertas via DevTools (sem descoberta de rotas/JS) ---
+    tk_up_fp = ticker.upper()
+    tk_lo_fp = ticker.lower()
+    hoje_fp = datetime.now(BRT).date()
+    cot_fp = float(cot_live) if (cot_live and float(cot_live) > 0) else None
+    dias_map_fp = {"30 D": 30, "6 M": 182, "1 A": 365, "5 A": 1825, "10 A": 3650, "15 A": 5475}
+    adj_fp = "true" if ajustada else "false"
+    base_fp = "https://investidor10.com.br/api"
+    if periodo_label == "1 D":
+        urls_fp = [f"{base_fp}/quotations/one-day/{tk_up_fp}/"]
+    elif periodo_label == "7 D":
+        urls_fp = [f"{base_fp}/quotations/seven-days/{tk_up_fp}/"]
+    elif periodo_label == "YTD":
+        dias_ytd_fp = max(1, (hoje_fp - date(hoje_fp.year, 1, 1)).days)
+        urls_fp = [
+            f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/ytd/{adj_fp}/real",
+            f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/{dias_ytd_fp}/{adj_fp}/real",
+        ]
+    elif periodo_label in dias_map_fp:
+        urls_fp = [f"{base_fp}/cotacoes/acao/chart/{tk_lo_fp}/{dias_map_fp[periodo_label]}/{adj_fp}/real"]
+    else:
+        urls_fp = []
+
+    if urls_fp:
+        sess_fp = requests.Session()
+        sess_fp.headers.update({
+            **HEADERS,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
+            "Referer": f"https://investidor10.com.br/acoes/{tk_lo_fp}/",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        cookie_fp = str(get_secret("INVESTIDOR10_COOKIE", "") or "").strip()
+        if cookie_fp:
+            sess_fp.headers["Cookie"] = cookie_fp
+        eh_intra_fp = periodo_label in ("1 D", "7 D")
+        for url_fp in urls_fp:
+            try:
+                r_fp = sess_fp.get(url_fp, timeout=6.0)
+                if r_fp.status_code != 200:
+                    continue
+                if (r_fp.text or "").lstrip()[:15].lower().startswith(("<!doctype", "<html")):
+                    continue
+                s_fp = _parse_i10_chart_json(r_fp.json(), eh_intraday_per=eh_intra_fp)
+                if s_fp.empty:
+                    continue
+                tem_hora_fp = any((ts.hour != 0 or ts.minute != 0) for ts in s_fp.index)
+                if periodo_label == "1 D":
+                    if not tem_hora_fp:
+                        continue
+                    s_fp = s_fp[s_fp.index.date == s_fp.index.date[-1]]
+                    if len(s_fp) < 5:
+                        continue
+                elif periodo_label == "7 D":
+                    if not tem_hora_fp or len(s_fp) < 12 or len({ts.date() for ts in s_fp.index}) < 2:
+                        continue
+                elif periodo_label == "YTD":
+                    s_ytd_fp = s_fp[(s_fp.index.year == s_fp.index[-1].year) & ~((s_fp.index.month == 1) & (s_fp.index.day == 1))]
+                    if len(s_ytd_fp) < 3:
+                        continue
+                    s_fp = s_ytd_fp
+                elif len(s_fp) < 3:
+                    continue
+                s_fp = s_fp.copy()
+                if cot_fp:
+                    s_fp.iloc[-1] = cot_fp
+                return s_fp, "Investidor10"
+            except Exception:
+                continue
+    # --- FIM DO CAMINHO RÁPIDO (se falhar, segue o fluxo legado abaixo) ---
     mapa_dias = {
         "1 D": 1,
         "7 D": 7,
@@ -2299,11 +2369,11 @@ def buscar_ohlcv_preco(
         ref_corte = max(ult_d_ref, hoje_brt_ts)
         offsets_per = {
             "30 D": pd.DateOffset(days=30),
-            "6 M": pd.DateOffset(months=6),
-            "1 A": pd.DateOffset(years=1),
-            "5 A": pd.DateOffset(years=5),
-            "10 A": pd.DateOffset(years=10),
-            "15 A": pd.DateOffset(years=15),
+            "6 M": pd.DateOffset(days=182),
+            "1 A": pd.DateOffset(days=365),
+            "5 A": pd.DateOffset(days=1825),
+            "10 A": pd.DateOffset(days=3650),
+            "15 A": pd.DateOffset(days=5475),
         }
         if periodo_label == "YTD":
             df = df[df.index.normalize() >= pd.Timestamp(year=ref_corte.year, month=1, day=1)]
@@ -4306,12 +4376,17 @@ def render_grafico_e_tabela_ativo(
             lbl_per_exib = periodo
             with ThreadPoolExecutor(max_workers=3) as ex_g:
                 f_i10 = ex_g.submit(buscar_serie_investidor10_chart_com_info, ticker, periodo, ajustada, cot_ref_live) if not eh_candles_req else None
-                f_yh = ex_g.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live)
-                f_alt_yh = ex_g.submit(buscar_historico_preco, ticker, periodo, ajustada_alt, cot_ref_live) if periodo != "1 D" else None
+                f_yh = ex_g.submit(buscar_ohlcv_preco, ticker, periodo, ajustada, cot_ref_live) if eh_candles_req else None
+                f_alt_yh = None
 
                 serie_i10_c, diag_i10_graf = f_i10.result() if f_i10 is not None else (pd.Series(dtype=float), "")
                 i10_eh_diaria_7d = (periodo == "7 D") and ("diária 7 D" in diag_i10_graf)
-                df_ohlcv = f_yh.result() if (eh_candles_req or serie_i10_c.empty or i10_eh_diaria_7d) else pd.DataFrame()
+                if f_yh is not None:
+                    df_ohlcv = f_yh.result()
+                elif serie_i10_c.empty or i10_eh_diaria_7d:
+                    df_ohlcv = buscar_ohlcv_preco(ticker, periodo, ajustada, cot_ref_live)
+                else:
+                    df_ohlcv = pd.DataFrame()
                 if not serie_i10_c.empty and not i10_eh_diaria_7d:
                     serie = serie_i10_c
                     usou_i10_graf = True
@@ -4337,8 +4412,8 @@ def render_grafico_e_tabela_ativo(
                 if not serie.empty and periodo != "1 D":
                     if usou_i10_graf and not eh_candles_req:
                         serie_alt = buscar_serie_investidor10_chart(ticker, periodo, ajustada_alt, cot_live=cot_ref_live)
-                    if serie_alt.empty and f_alt_yh is not None:
-                        serie_alt = f_alt_yh.result()
+                    if serie_alt.empty and not usou_i10_graf:
+                        serie_alt = buscar_historico_preco(ticker, periodo, ajustada_alt, cot_ref_live)
             if not serie_alt.empty and serie_alt.index[0].normalize() < serie.index[0].normalize():
                 sub_alt = serie_alt[serie_alt.index.normalize() >= serie.index[0].normalize()]
                 if not sub_alt.empty:
@@ -4375,9 +4450,13 @@ def render_grafico_e_tabela_ativo(
             p_ini, p_fim = float(serie.iloc[0]), float(serie.iloc[-1])
             p_ref_var = p_ini
             if not usar_custom_range and periodo == "1 D" and moeda_graf == "Real":
-                prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)
-                if prev_c_1d and prev_c_1d > 0:
-                    p_ref_var = prev_c_1d
+                var_dia_ref = (base_ativo or {}).get("var_dia_pct")
+                if var_dia_ref is not None and p_fim > 0 and (1.0 + float(var_dia_ref) / 100.0) > 0:
+                    p_ref_var = p_fim / (1.0 + float(var_dia_ref) / 100.0)
+                else:
+                    prev_c_1d = buscar_prev_close_ativo(ticker, serie.index[-1].date(), ajustada=False)
+                    if prev_c_1d and prev_c_1d > 0:
+                        p_ref_var = prev_c_1d
             elif not usar_custom_range and periodo == "7 D" and moeda_graf == "Real":
                 if not usou_i10_graf:
                     prev_c_7d = buscar_prev_close_ativo(ticker, serie.index[0].date(), ajustada=ajustada)

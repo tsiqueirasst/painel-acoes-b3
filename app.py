@@ -3768,7 +3768,9 @@ def render_grafico_e_tabela_ativo(
         "<span class='raiox-blocks-host' style='display:none;'></span>"
         "<style>"
         "div[data-testid='stElementContainer']:has(.raiox-blocks-host),"
-        "div.element-container:has(.raiox-blocks-host){"
+        "div.element-container:has(.raiox-blocks-host),"
+        "div[data-testid='stElementContainer']:has(.raiox-indent-host),"
+        "div.element-container:has(.raiox-indent-host){"
         "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
         "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host),"
         "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host){"
@@ -3784,6 +3786,9 @@ def render_grafico_e_tabela_ativo(
         "margin-top:-1px!important;"
         "margin-bottom:0!important;"
         "overflow:hidden;}"
+        "div[data-testid='stVerticalBlock']:has(> div .raiox-indent-host) > div[data-testid='stExpander'],"
+        "div[data-testid='stVerticalBlock']:has(> div > div .raiox-indent-host) > div > div[data-testid='stExpander']{"
+        "margin-left:16px!important;width:calc(100% - 16px)!important;}"
         "div[data-testid='stVerticalBlock']:has(> div .raiox-blocks-host) > div[data-testid='stExpander'] details > summary,"
         "div[data-testid='stVerticalBlock']:has(> div > div .raiox-blocks-host) > div > div[data-testid='stExpander'] details > summary{"
         "background:linear-gradient(90deg, rgba(59,130,246,0.22) 0%, rgba(59,130,246,0.08) 100%)!important;"
@@ -6476,12 +6481,17 @@ with tab1:
                 st.markdown(
                     "<span class='painel-analise-host' style='display:none;'></span>"
                     "<style>"
+                    "div[data-testid='stVerticalBlockBorderWrapper']:has(.painel-analise-host){"
+                    "padding:10px 14px!important;}"
+                    "div[data-testid='stVerticalBlock']:has(> div .painel-analise-host),"
+                    "div[data-testid='stVerticalBlock']:has(> div > div .painel-analise-host){"
+                    "gap:6px!important;}"
                     "div[data-testid='stElementContainer']:has(.painel-analise-host),"
                     "div[data-testid='stElementContainer']:has(.painel-modo-host),"
                     "div[data-testid='stElementContainer']:has(.painel-link-host){"
                     "display:none!important;margin:0!important;padding:0!important;height:0!important;}"
                     "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button{"
-                    "border-radius:8px!important;min-height:40px!important;font-size:13.5px!important;transition:all 0.15s ease!important;}"
+                    "border-radius:8px!important;min-height:34px!important;padding:4px 10px!important;font-size:13.5px!important;transition:all 0.15s ease!important;}"
                     "div[data-testid='stHorizontalBlock']:has(.painel-modo-host) button[kind='primary']{"
                     "background:rgba(16,185,129,0.16)!important;border:1px solid rgba(16,185,129,0.62)!important;"
                     "color:#34d399!important;font-weight:600!important;box-shadow:none!important;}"
@@ -6495,7 +6505,7 @@ with tab1:
                     "div[data-testid='stColumn']:has(.painel-link-host){display:flex;justify-content:flex-end;align-items:center;}"
                     "div[data-testid='stColumn']:has(.painel-link-host) button{"
                     "background:transparent!important;border:none!important;box-shadow:none!important;"
-                    "color:#60a5fa!important;padding:2px 6px!important;min-height:0!important;width:auto!important;font-size:13px!important;font-weight:500!important;}"
+                    "color:#60a5fa!important;padding:0px 4px!important;min-height:0!important;width:auto!important;font-size:13px!important;font-weight:500!important;}"
                     "div[data-testid='stColumn']:has(.painel-link-host) button:hover{"
                     "color:#93c5fd!important;text-decoration:underline!important;background:transparent!important;}"
                     "</style>",
@@ -6504,14 +6514,14 @@ with tab1:
 
                 c_pa_tit, c_pa_dic = st.columns([3.5, 1.0], vertical_alignment="center")
                 with c_pa_tit:
-                    st.markdown("<div style='font-size:14.5px; font-weight:700; letter-spacing:0.4px;'>PAINEL DE ANÁLISE</div>", unsafe_allow_html=True)
+                    st.markdown("<div style='font-size:14.5px; font-weight:700; letter-spacing:0.4px; line-height:1.2;'>PAINEL DE ANÁLISE</div>", unsafe_allow_html=True)
                 with c_pa_dic:
                     st.markdown("<span class='painel-link-host' style='display:none;'></span>", unsafe_allow_html=True)
                     if st.button("📖 Dicionário", key="btn_dic_tab1"):
                         modal_dicionario()
 
-                st.markdown("<div style='margin:6px 0 10px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
-                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin-bottom:6px;'>MODO DE ANÁLISE</div>", unsafe_allow_html=True)
+                st.markdown("<div style='margin:2px 0 2px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin:0;'>MODO DE ANÁLISE</div>", unsafe_allow_html=True)
 
                 modos_ui = [
                     ("🏆 Geral", "🏆 Geral (Melhor Compra Equilibrada)"),
@@ -6537,8 +6547,8 @@ with tab1:
                                 st.query_params["modo"] = lbl_full_m
                                 st.rerun()
 
-                st.markdown("<div style='margin:12px 0 10px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
-                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin-bottom:4px;'>FILTROS</div>", unsafe_allow_html=True)
+                st.markdown("<div style='margin:4px 0 2px 0; border-top:1px solid rgba(128,128,128,0.22);'></div>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:11px; font-weight:700; letter-spacing:0.6px; opacity:0.68; margin:0;'>FILTROS</div>", unsafe_allow_html=True)
 
                 c_busca, c_ver, c_ord1, c_ord2, c_ord3 = st.columns([1.35, 1.35, 1.25, 1.05, 0.8], vertical_alignment="bottom")
                 with c_busca:
@@ -6744,18 +6754,18 @@ with tab1:
                         linha = (
                             f"<tr{tr_cls} data-raiox-ticker='{r['ticker']}'>"
                             f"<td class='col-sticky-0' style='text-align:center;'><span class='{chk_cls}' data-comp-ticker='{r['ticker']}' role='checkbox' aria-checked='{'true' if r['ticker'] in comp_ativos else 'false'}' title='Selecionar para Comparar Ativos'></span></td>"
-                            f"<td class='col-sticky-1'>"
-                            f"<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
-                            f"<div style='min-width:0;'><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</div>"
-                            f"{var_dia_html}"
-                            f"</div>"
-                            f"</td>"
+                            f"<td class='col-sticky-1'><span style='color:#60a5fa; font-weight:700;'>{r['ticker']}</span>{estrela}<br><small style='opacity:0.88;'>{nome_esc}</small>{setor_badge}</td>"
                             f"<td style='text-align:center; line-height:1.35;'>"
                             f"<span style='font-weight:700;' title='Posição no Ranking e Score Ativo (0 a 100)'>{r['pos_ranking']}º · <strong>{fmt_num(score_at, 1)}</strong></span>"
                             f"<br>{badge_v}"
                             f"<br><small style='opacity:0.85; white-space:nowrap;' title='IFR 14 dias (RSI): {ifr_ic} | Notícias 30d: {html.escape(news_res_r)}'>{ifr_ic} | {news_ic}</small>"
                             f"</td>"
-                            f"<td><strong>R$ {fmt_num(cot)}</strong><br><small title='Dividend Yield (12 meses): percentual pago em dividendos/JCP sobre a cotação atual'>DY: {fmt_num(r['dy_12m'])}%</small></td>"
+                            f"<td>"
+                            f"<div style='display:flex; justify-content:space-between; align-items:center; gap:10px;'>"
+                            f"<div style='min-width:0;'><strong>R$ {fmt_num(cot)}</strong><br><small title='Dividend Yield (12 meses): percentual pago em dividendos/JCP sobre a cotação atual'>DY: {fmt_num(r['dy_12m'])}%</small></div>"
+                            f"{var_dia_html}"
+                            f"</div>"
+                            f"</td>"
                             f"<td><span title='Preço sobre Lucro: anos para reaver o investimento via lucro'>P/L:</span> {pl_txt}<br><span title='Preço sobre Valor Patrimonial: abaixo de 1,0 indica desconto contábil'>P/VP:</span> {pvp_html}<br><span title='Retorno sobre Patrimônio Líquido: eficiência na geração de lucro'>ROE:</span> {roe_txt}</td>"
                             f"<td><span title='Lucro por Ação (12m)'>LPA:</span> {lpa_txt} | <span title='Valor Patrimonial por Ação'>VPA:</span> {vpa_txt}<br><span title='Dividendo por Ação pago nos últimos 12 meses e média anual de 6 anos'>12m: R$ {fmt_num(r['dpa_12m'])} | 6a: {dpa6_txt}</span><br><span title='Dividendo por Ação projetado'>Proj: {dpap_txt}</span></td>"
                             f"<td>{html_preco_ms(r['pt_med'], cot, sufixo_6a)}</td>"
@@ -6769,9 +6779,9 @@ with tab1:
                     thead_html = (
                         "<thead><tr>"
                         "<th class='col-sticky-0' style='text-align:center;' title='Marque os ativos para comparar lado a lado na aba Comparar Ativos'>⚖️</th>"
-                        "<th class='col-sticky-1' title='Código na B3, nome da empresa, setor de atuação e variação diária (%)'>Ticker / Empresa</th>"
+                        "<th class='col-sticky-1' title='Código na B3, nome da empresa e setor de atuação'>Ticker / Empresa</th>"
                         "<th style='text-align:center;' title='Posição no Ranking, Score Ativo (0 a 100), Veredito do Modelo, IFR 14 dias e Sentimento de Notícias (30d)'>Rank / Score<br><small>Veredito | IFR | News</small></th>"
-                        f"<th title='Cotação atual da ação e DY (Dividend Yield): percentual pago em dividendos nos últimos 12 meses'>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
+                        f"<th title='Cotação atual da ação, variação diária (%) e DY (Dividend Yield 12 meses)'>Cotação ({datetime.now(BRT).strftime('%d/%m/%Y %H:%M')}) & DY</th>"
                         "<th title='P/L: Preço/Lucro | P/VP: Preço/Valor Patrimonial | ROE: Retorno sobre Patrimônio Líquido'>Indicadores<br><small>(P/L | P/VP | ROE)</small></th>"
                         "<th title='LPA: Lucro por Ação | VPA: Valor Patrimonial por Ação | DPA: Dividendo por Ação (12m, média 6 anos e projetivo)'>Dados Base<br><small>(LPA | VPA | DPAs)</small></th>"
                         "<th title='Preço-Teto Médio (6a): teto para 6% de yield usando a média de dividendos de 6 anos | MS: Margem de Segurança'>Preço Teto Médio (6a) & MS</th>"
@@ -6796,7 +6806,8 @@ with tab1:
                             _rx_ctx = st.container(key=f"rx_box_{ativo_escolhido}") if "key" in inspect.signature(st.container).parameters else st.container()
                             with _rx_ctx:
                                 st.markdown(
-                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>",
+                                    f"<span class='raiox-current-marker' id='raiox-current-{ativo_escolhido}' style='display:none;'></span>"
+                                    "<span class='raiox-indent-host' style='display:none;'></span>",
                                     unsafe_allow_html=True,
                                 )
                                 item_raiox = mapa_res[ativo_escolhido]
@@ -6838,7 +6849,7 @@ with tab1:
         (function() {
             const pWin = __USE_PARENT__ ? window.parent : window;
             const pDoc = pWin.document;
-            const STORAGE_KEY = "painel_b3_val_col_widths_v2";
+            const STORAGE_KEY = "painel_b3_val_col_widths_v3";
 
             function applyStickyBgVars() {
                 const refEl = pDoc.querySelector('[data-testid="stAppViewContainer"]') || pDoc.body;
@@ -6986,7 +6997,7 @@ with tab1:
                     widths = ths.map((_, i) => Math.max(40, Number(saved[i]) || 90));
                 } else {
                     topTable.style.tableLayout = "auto";
-                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : (i === 1 ? 210 : 54), Math.round(th.getBoundingClientRect().width)));
+                    widths = ths.map((th, i) => Math.max(i === 0 ? 42 : (i === 3 ? 185 : 54), Math.round(th.getBoundingClientRect().width)));
                 }
 
                 totalW = widths.reduce((a, b) => a + b, 0);

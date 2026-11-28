@@ -1202,7 +1202,7 @@ def buscar_serie_investidor10_chart_com_info(
     periodo_label: str,
     ajustada: bool,
     cot_live: float | None = None,
-    _v: int = 17,
+    _v: int = 18,
 ) -> tuple[pd.Series, str]:
     """Tenta obter a série exata do gráfico do Investidor10 (retorna (serie, motivo))."""
     # --- CAMINHO RÁPIDO: rotas oficiais descobertas via DevTools (sem descoberta de rotas/JS) ---
@@ -1274,7 +1274,7 @@ def buscar_serie_investidor10_chart_com_info(
                 s_fp = s_fp.copy()
                 if cot_fp:
                     s_fp.iloc[-1] = cot_fp
-                return s_fp, "Investidor10"
+                return s_fp, "Investidor10 · " + url_fp.replace("https://investidor10.com.br/api/", "")
             except Exception:
                 continue
     # --- FIM DO CAMINHO RÁPIDO (se falhar, segue o fluxo legado abaixo) ---
@@ -1482,18 +1482,21 @@ def buscar_serie_investidor10_chart(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def buscar_prev_close_investidor10(ticker: str, data_ref_iso: str, _v: int = 1) -> float | None:
-    """Fechamento anterior (sem ajuste) segundo a própria série diária do Investidor10."""
+def buscar_prev_close_investidor10(ticker: str, data_ref_iso: str, _v: int = 2) -> float | None:
+    """Fechamento anterior segundo o Investidor10: último ponto do pregão anterior na série seven-days (fallback: série diária de 30 D)."""
     try:
-        s_d, _ = buscar_serie_investidor10_chart_com_info(ticker, "30 D", False, None)
-        if s_d is None or s_d.empty:
-            return None
         dt_ref = pd.Timestamp(data_ref_iso).normalize()
-        s_ant = s_d[s_d.index.normalize() < dt_ref]
-        if s_ant.empty:
-            return None
-        v_prev = float(s_ant.iloc[-1])
-        return v_prev if v_prev > 0 else None
+        for per_pc in ("7 D", "30 D"):
+            s_d, _ = buscar_serie_investidor10_chart_com_info(ticker, per_pc, False, None)
+            if s_d is None or s_d.empty:
+                continue
+            s_ant = s_d[s_d.index.normalize() < dt_ref]
+            if s_ant.empty:
+                continue
+            v_prev = float(s_ant.iloc[-1])
+            if v_prev > 0:
+                return v_prev
+        return None
     except Exception:
         return None
 
@@ -4816,7 +4819,7 @@ def render_grafico_e_tabela_ativo(
                 key=f"{key_prefix}_plot_{ticker}",
             )
             fonte_graf_lbl = (
-                "🟢 Fonte dos pontos: Investidor10"
+                f"🟢 Fonte dos pontos: {diag_i10_graf or 'Investidor10'} · {len(serie)} pts · 1º {serie.index[0].strftime('%d/%m/%y %H:%M')} = {fmt_num(float(serie.iloc[0]))} · base da variação = {fmt_num(p_ref_var)}"
                 if usou_i10_graf
                 else (
                     f"🟡 Fonte dos pontos: Yahoo Finance (Investidor10: {diag_i10_graf})"
